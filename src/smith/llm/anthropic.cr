@@ -7,7 +7,7 @@ require "./retry"
 module Smith::LLM
   class Anthropic < Provider
     DEFAULT_ENDPOINT = "https://api.anthropic.com/v1/messages"
-    DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+    DEFAULT_MODEL = "claude-sonnet-5"
     DEFAULT_MAX_TOKENS = 4096
     API_VERSION = "2023-06-01"
 

@@ -113,7 +113,7 @@ module Smith
           puts "   Please set it via: export ANTHROPIC_API_KEY=\"your_key_here\""
           exit(1)
         end
-        default_m = @model || "claude-3-5-sonnet-20241022"
+        default_m = @model || "claude-sonnet-5"
         LLM::Anthropic.new(api_key: api_key, default_model: default_m)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."
