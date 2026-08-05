@@ -3,6 +3,8 @@ require "./llm"
 require "./tools"
 require "./agent"
 require "./session"
+require "./project_ctx"
+require "./skills"
 
 module Smith
   class CLI
@@ -14,9 +16,11 @@ module Smith
     @model : String = "qwen/qwen3.8-max"
     @provider_name : String = "openrouter"
     @session_store : Session::Store
+    @skills_catalog : Skills::Catalog
 
     def initialize(@args : Array(String))
       @session_store = Session::Store.new
+      @skills_catalog = Skills::Catalog.discover
     end
 
     def run
@@ -86,12 +90,29 @@ module Smith
       end
     end
 
+    private def build_system_prompt : String
+      base_prompt = "You are Smith, an autonomous coding agent written in Crystal."
+
+      blocks = [base_prompt]
+
+      if skill_summary = @skills_catalog.summary_prompt
+        blocks << skill_summary
+      end
+
+      if project_instructions = ProjectContext.discover
+        blocks << project_instructions
+      end
+
+      blocks.join("\n\n")
+    end
+
     private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
       registry = Tools::Registry.default
       agent = Agent.new(
         provider: provider,
         registry: registry,
         model: @model,
+        system_prompt: build_system_prompt,
         messages: messages
       )
 
@@ -120,9 +141,14 @@ module Smith
       provider = build_provider
       agent = build_agent(provider)
 
+      expanded_prompt = @skills_catalog.expand_prompt(prompt)
+
       puts "⚒️  Running Smith Headless [Model: #{@model}]"
+      if @skills_catalog.skills.size > 0
+        puts "   Loaded Skills: #{@skills_catalog.skills.keys.join(", ")}"
+      end
       puts "--------------------------------------------------"
-      agent.send(prompt)
+      agent.send(expanded_prompt)
       puts "\n--------------------------------------------------"
       if usage = agent.cumulative_usage
         puts "📊 Usage: #{usage.prompt_tokens} prompt + #{usage.completion_tokens} completion = #{usage.total_tokens} total tokens"
@@ -153,7 +179,6 @@ module Smith
       puts "   Model: #{@model} | Messages: #{session_data.messages.size}"
       puts "--------------------------------------------------"
 
-      # Print recent transcript history preview
       session_data.messages.last(4).each do |msg|
         role_label = msg.role.user? ? "\e[36muser>\e[0m" : "\e[32massistant>\e[0m"
         text = msg.content.select { |b| b.type.text? }.map(&.text).compact.join("\n")
@@ -172,6 +197,9 @@ module Smith
 
       puts "⚒️  Smith LLM Agent Harness v#{Smith::VERSION} (Crystal)"
       puts "   Session: #{session_data.id} | Model: #{@model}"
+      if @skills_catalog.skills.size > 0
+        puts "   Loaded Skills: #{@skills_catalog.skills.keys.join(", ")}"
+      end
       puts "   Type 'exit' or 'quit' to end session.\n\n"
 
       loop do
@@ -185,11 +213,12 @@ module Smith
         next if trimmed.empty?
         break if trimmed == "exit" || trimmed == "quit"
 
+        expanded_input = @skills_catalog.expand_prompt(trimmed)
+
         puts ""
-        agent.send(trimmed)
+        agent.send(expanded_input)
         puts ""
 
-        # Auto-save session state after each turn
         session_data.messages = agent.messages
         session_data.usage = agent.cumulative_usage
         @session_store.save(session_data)
