@@ -131,7 +131,13 @@ module Smith
     end
 
     private def build_system_prompt : String
-      base_prompt = "You are Smith, an autonomous coding agent written in Crystal."
+      base_prompt = String.build do |str|
+        str.puts "You are Smith, an autonomous coding agent written in Crystal."
+        str.puts "\nSkill Storage Policy:"
+        str.puts "  • Project-local: .smith/skills/<name>/SKILL.md (recommended for project-specific skills)"
+        str.puts "  • Global: ~/.smith/skills/<name>/SKILL.md (available across all user projects)"
+        str.puts "When creating a new skill, if the user has not specified the location, ask the user first where they want to store the new skill."
+      end
 
       blocks = [base_prompt]
 
