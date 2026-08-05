@@ -24,10 +24,19 @@ module Smith
     end
 
     def run
-      parser = OptionParser.parse(@args) do |opts|
-        opts.banner = "Usage: smith [command] [options]"
+      parser = OptionParser.new do |opts|
+        opts.banner = String.build do |str|
+          str.puts "⚒️  Smith LLM Agent Harness v#{Smith::VERSION} (Crystal)\n"
+          str.puts "Usage: smith [command] [options] [prompt]\n"
+          str.puts "Commands:"
+          str.puts "  chat                       Start an interactive chat session (default)"
+          str.puts "  run <prompt>               Run a single prompt in headless mode and exit"
+          str.puts "  resume [<session_id>]      Resume an existing session (or latest session)"
+          str.puts "  sessions, list             List all saved local chat sessions\n"
+          str.puts "Options:"
+        end
 
-        opts.on("-m MODEL", "--model=MODEL", "Specify the LLM model to use (default: qwen/qwen3.8-max)") do |m|
+        opts.on("-m MODEL", "--model=MODEL", "Specify the LLM model (default: qwen/qwen3.8-max)") do |m|
           @model = m
         end
 
@@ -35,16 +44,24 @@ module Smith
           @provider_name = p
         end
 
-        opts.on("-v", "--version", "Print version") do
+        opts.on("-v", "--version", "Print version information") do
           puts "smith version #{Smith::VERSION}"
           exit
         end
 
-        opts.on("-h", "--help", "Show help") do
+        opts.on("-h", "--help", "Show this help banner") do
           puts opts
+          puts "\nFeatures & Usage Notes:"
+          puts "  • Skills: Place skills in ~/.smith/skills/<name>/SKILL.md or .smith/skills/<name>/SKILL.md"
+          puts "    Reference via $skill-name or /skill-name in prompt."
+          puts "  • Project Context: Instructions in SMITH.md or AGENTS.md are automatically loaded into prompt."
+          puts "  • Subagents: Agent can delegate tasks using the 'agent' tool (mode: 'work' or 'inspect')."
+          puts "  • Persistence: Sessions are saved under ~/.smith/sessions/ and can be resumed with 'smith resume'."
           exit
         end
       end
+
+      parser.parse(@args)
 
       command = @args.first? || "chat"
 
