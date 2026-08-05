@@ -2,6 +2,7 @@ require "option_parser"
 require "./llm"
 require "./tools"
 require "./agent"
+require "./session"
 
 module Smith
   class CLI
@@ -12,8 +13,10 @@ module Smith
     @args : Array(String)
     @model : String = "anthropic/claude-3.5-sonnet"
     @provider_name : String = "openrouter"
+    @session_store : Session::Store
 
     def initialize(@args : Array(String))
+      @session_store = Session::Store.new
     end
 
     def run
@@ -52,8 +55,12 @@ module Smith
         run_headless(prompt)
       when "chat", "interactive"
         run_interactive
+      when "resume"
+        session_id = @args[1]?
+        run_resume(session_id)
+      when "sessions", "list"
+        list_sessions
       else
-        # If command is not recognized, treat as headless prompt if provided
         prompt = @args.join(" ")
         if prompt.empty?
           run_interactive
@@ -63,8 +70,8 @@ module Smith
       end
     end
 
-    private def build_provider : LLM::Provider
-      case @provider_name.downcase
+    private def build_provider(provider_name : String = @provider_name) : LLM::Provider
+      case provider_name.downcase
       when "openrouter"
         api_key = ENV["OPENROUTER_API_KEY"]?
         if api_key.nil? || api_key.empty?
@@ -74,20 +81,20 @@ module Smith
         end
         LLM::OpenRouter.new(api_key: api_key, default_model: @model)
       else
-        puts "❌ Error: Unknown provider '#{@provider_name}'."
+        puts "❌ Error: Unknown provider '#{provider_name}'."
         exit(1)
       end
     end
 
-    private def build_agent(provider : LLM::Provider) : Agent
+    private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
       registry = Tools::Registry.default
       agent = Agent.new(
         provider: provider,
         registry: registry,
-        model: @model
+        model: @model,
+        messages: messages
       )
 
-      # Attach CLI event listeners for ANSI progress rendering
       agent.on_event do |event|
         case event
         when Events::AssistantText
@@ -99,14 +106,10 @@ module Smith
           if event.is_error
             puts "❌ Tool \e[31m#{event.tool_name}\e[0m failed: #{event.result}"
           else
-            summary = event.result.lines.first? || "(empty output)"
             puts "✅ Tool \e[32m#{event.tool_name}\e[0m finished."
           end
         when Events::TurnError
           puts "\n❌ Error: #{event.error}"
-        when Events::UsageUpdated
-          u = event.usage
-          # Silent or debug log
         end
       end
 
@@ -127,11 +130,48 @@ module Smith
     end
 
     private def run_interactive
-      provider = build_provider
-      agent = build_agent(provider)
+      session_data = @session_store.create(model: @model, provider: @provider_name)
+      start_session_loop(session_data)
+    end
+
+    private def run_resume(session_id : String?)
+      session_data = if session_id
+                       @session_store.load(session_id)
+                     else
+                       @session_store.latest
+                     end
+
+      if session_data.nil?
+        puts "❌ No sessions found to resume."
+        exit(1)
+      end
+
+      @model = session_data.model
+      @provider_name = session_data.provider
+
+      puts "🔄 Resuming Session [#{session_data.id}]"
+      puts "   Model: #{@model} | Messages: #{session_data.messages.size}"
+      puts "--------------------------------------------------"
+
+      # Print recent transcript history preview
+      session_data.messages.last(4).each do |msg|
+        role_label = msg.role.user? ? "\e[36muser>\e[0m" : "\e[32massistant>\e[0m"
+        text = msg.content.select { |b| b.type.text? }.map(&.text).compact.join("\n")
+        unless text.empty?
+          puts "#{role_label} #{text[0..100]}"
+        end
+      end
+      puts "--------------------------------------------------"
+
+      start_session_loop(session_data)
+    end
+
+    private def start_session_loop(session_data : Session::Data)
+      provider = build_provider(session_data.provider)
+      agent = build_agent(provider, session_data.messages)
 
       puts "⚒️  Smith LLM Agent Harness v#{Smith::VERSION} (Crystal)"
-      puts "   Model: #{@model} | Provider: #{@provider_name}"
+      puts "   Session: #{session_data.id} | Model: #{@model}"
       puts "   Type 'exit' or 'quit' to end session.\n\n"
 
       loop do
@@ -148,9 +188,36 @@ module Smith
         puts ""
         agent.send(trimmed)
         puts ""
+
+        # Auto-save session state after each turn
+        session_data.messages = agent.messages
+        session_data.usage = agent.cumulative_usage
+        @session_store.save(session_data)
       end
 
+      puts "Session saved to #{@session_store.sessions_dir}/#{session_data.id}.json"
       puts "Goodbye! ⚒️"
+    end
+
+    private def list_sessions
+      entries = @session_store.list
+      if entries.empty?
+        puts "No saved sessions found under #{@session_store.sessions_dir}"
+        return
+      end
+
+      puts "📜 Saved Smith Sessions (#{@session_store.sessions_dir}):"
+      puts "--------------------------------------------------------------------------------"
+      printf "%-28s %-20s %-8s %s\n", "SESSION ID", "UPDATED", "MSGS", "FIRST PROMPT"
+      puts "--------------------------------------------------------------------------------"
+
+      entries.each do |e|
+        time_str = e.updated_at.to_s("%Y-%m-%d %H:%M")
+        printf "%-28s %-20s %-8d %s\n", e.id, time_str, e.message_count, e.first_prompt
+      end
+
+      puts "--------------------------------------------------------------------------------"
+      puts "To resume a session, run: smith resume <session_id>"
     end
   end
 end
