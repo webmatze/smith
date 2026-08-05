@@ -40,6 +40,8 @@ module Smith::LLM
           json.object do
             json.field "model", model
 
+            json.field "reasoning_effort", "none"
+
             if max_tok = request.max_tokens
               json.field "max_completion_tokens", max_tok
             end
