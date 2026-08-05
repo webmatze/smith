@@ -108,6 +108,9 @@ module Smith
 
     private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
       registry = Tools::Registry.default
+      supervisor = Subagents::Supervisor.new
+      registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: @model))
+
       agent = Agent.new(
         provider: provider,
         registry: registry,
