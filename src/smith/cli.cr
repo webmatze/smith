@@ -40,7 +40,7 @@ module Smith
           @model = m
         end
 
-        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider (default: openrouter)") do |p|
+        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama (default: openrouter)") do |p|
           @provider_name = p
         end
 
@@ -101,6 +101,10 @@ module Smith
           exit(1)
         end
         LLM::OpenRouter.new(api_key: api_key, default_model: @model)
+      when "ollama"
+        host = ENV["OLLAMA_HOST"]? || "http://localhost:11434"
+        default_m = @model == "qwen/qwen3.8-max" ? "gemma4:latest" : @model
+        LLM::Ollama.new(host: host, default_model: default_m)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."
         exit(1)
