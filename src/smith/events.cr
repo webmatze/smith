@@ -1,0 +1,55 @@
+require "./llm/types"
+
+module Smith::Events
+  abstract class Event
+  end
+
+  class AssistantText < Event
+    getter text : String
+
+    def initialize(@text : String)
+    end
+  end
+
+  class ToolStart < Event
+    getter tool_call_id : String
+    getter tool_name : String
+    getter args : JSON::Any
+
+    def initialize(@tool_call_id : String, @tool_name : String, @args : JSON::Any)
+    end
+  end
+
+  class ToolFinished < Event
+    getter tool_call_id : String
+    getter tool_name : String
+    getter result : String
+    getter is_error : Bool
+
+    def initialize(@tool_call_id : String, @tool_name : String, @result : String, @is_error : Bool = false)
+    end
+  end
+
+  class UsageUpdated < Event
+    getter usage : Smith::LLM::Usage
+
+    def initialize(@usage : Smith::LLM::Usage)
+    end
+  end
+
+  class TurnCompleted < Event
+    getter turns : Int32
+
+    def initialize(@turns : Int32)
+    end
+  end
+
+  class TurnError < Event
+    getter error : String
+
+    def initialize(@error : String)
+    end
+  end
+
+  alias Listener = Proc(Event, Nil)
+end

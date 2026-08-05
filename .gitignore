@@ -1,0 +1,9 @@
+# Binaries
+/bin/
+/.crystal/
+
+# Dependencies
+/lib/
+
+# macOS
+.DS_Store

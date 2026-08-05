@@ -1,0 +1,9 @@
+name: smith
+version: 0.1.0
+
+targets:
+  smith:
+    main: src/smith.cr
+
+license: MIT
+

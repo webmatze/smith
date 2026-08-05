@@ -1,0 +1,5 @@
+require "spec"
+require "../src/smith/llm"
+require "../src/smith/tools"
+require "../src/smith/events"
+require "../src/smith/agent"

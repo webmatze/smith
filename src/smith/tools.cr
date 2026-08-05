@@ -1,0 +1,8 @@
+require "./tools/tool"
+require "./tools/bash"
+require "./tools/read_file"
+require "./tools/write_file"
+require "./tools/edit_file"
+require "./tools/grep"
+require "./tools/glob"
+require "./tools/registry"
