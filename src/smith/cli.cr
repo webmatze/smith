@@ -40,7 +40,7 @@ module Smith
           @model = m
         end
 
-        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama, anthropic (default: openrouter)") do |p|
+        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)") do |p|
           @provider_name = p
         end
 
@@ -115,6 +115,15 @@ module Smith
         end
         default_m = @model || "claude-sonnet-5"
         LLM::Anthropic.new(api_key: api_key, default_model: default_m)
+      when "openai"
+        api_key = ENV["OPENAI_API_KEY"]?
+        if api_key.nil? || api_key.empty?
+          puts "❌ Error: OPENAI_API_KEY environment variable is not set."
+          puts "   Please set it via: export OPENAI_API_KEY=\"your_key_here\""
+          exit(1)
+        end
+        default_m = @model || "gpt-4o"
+        LLM::OpenAI.new(api_key: api_key, default_model: default_m)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."
         exit(1)
