@@ -226,7 +226,7 @@ module Smith
         print "\n\e[36msmith>\e[0m "
         STDOUT.flush
 
-        input = ARGF.gets
+        input = STDIN.gets
         break if input.nil?
 
         trimmed = input.strip
