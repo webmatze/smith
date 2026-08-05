@@ -122,7 +122,7 @@ module Smith
           puts "   Please set it via: export OPENAI_API_KEY=\"your_key_here\""
           exit(1)
         end
-        default_m = @model || "gpt-4o"
+        default_m = @model || "gpt-5.6-luna"
         LLM::OpenAI.new(api_key: api_key, default_model: default_m)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."

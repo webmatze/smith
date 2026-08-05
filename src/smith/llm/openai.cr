@@ -7,7 +7,7 @@ require "./retry"
 module Smith::LLM
   class OpenAI < Provider
     DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
-    DEFAULT_MODEL = "gpt-4o"
+    DEFAULT_MODEL = "gpt-5.6-luna"
 
     getter api_key : String
     getter default_model : String

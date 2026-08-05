@@ -5,7 +5,7 @@ describe Smith::LLM::OpenAI do
   it "initializes with API key and default model" do
     provider = Smith::LLM::OpenAI.new(api_key: "dummy_key")
     provider.name.should eq("openai")
-    provider.default_model.should eq("gpt-4o")
+    provider.default_model.should eq("gpt-5.6-luna")
     provider.api_key.should eq("dummy_key")
   end
 
