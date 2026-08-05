@@ -10,6 +10,10 @@ describe Smith::Skills::Catalog do
     skill_file = File.join(skill_dir, "SKILL.md")
     File.write(skill_file, "---\nname: test-runner\ndescription: Run crystal spec\n---\n\nRun 'crystal spec' to test everything.")
 
+    # Isolate from the user's real global skills (~/.smith/skills) via SMITH_HOME
+    prev_smith_home = ENV["SMITH_HOME"]?
+    ENV["SMITH_HOME"] = File.join(temp_dir, "smith-home")
+
     begin
       catalog = Smith::Skills::Catalog.discover(workspace_dir: temp_dir)
       catalog.skills.size.should eq(1)
@@ -30,6 +34,11 @@ describe Smith::Skills::Catalog do
       expanded_slash.should contain("Arguments: src/smith.cr")
       expanded_slash.should contain("Run 'crystal spec' to test everything.")
     ensure
+      if prev = prev_smith_home
+        ENV["SMITH_HOME"] = prev
+      else
+        ENV.delete("SMITH_HOME")
+      end
       FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
     end
   end

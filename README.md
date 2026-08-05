@@ -13,8 +13,8 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **🤖 Subagent Supervision (`Smith::Subagents`)**: The parent agent can delegate subtasks to autonomous child subagents running in isolated fibers in `work` (full capabilities) or `inspect` (read-only) mode.
 - **📡 Provider-Neutral LLM Layer (`Smith::LLM`)**: Ships with **OpenRouter**, **Ollama** (local models), **Anthropic** (Messages API), and **OpenAI** (Chat Completions) support with exponential backoff retry logic. Default models: `qwen/qwen3.8-max` (OpenRouter) / `gemma4:latest` (Ollama) / `claude-sonnet-5` (Anthropic) / `gpt-5.6-luna` (OpenAI).
 - **📂 Project Context & Skills Catalog**:
-  - Automatically loads instructions from `SMITH.md` or `AGENTS.md`.
-  - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` and expands `$skill-name` or `/skill-name` references at runtime.
+  - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
+  - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
 - **⚡ Native Performance**: Compiles to a lightweight native binary with sub-20ms test suite execution.
 
@@ -32,20 +32,41 @@ It is inspired by and built according to the policy-free agent loop principles o
 mise use crystal@latest
 
 # 2. Build the binary
+mkdir -p bin
 crystal build src/smith.cr -o bin/smith
 
 # 3. Run the test suite
 crystal spec
 ```
 
+Alternatively, use the bundled `Makefile` (wraps `mise exec -- crystal ...` and signs the binary on macOS):
+
+| Target | Description |
+|---|---|
+| `make build` | Compile `bin/smith` (debug build) |
+| `make release` | Compile optimized `bin/smith` |
+| `make test` | Run the test suite (`crystal spec`) |
+| `make install` | Build release & install to `~/.local/bin/smith` |
+| `make clean` | Remove `bin/` |
+
 ---
 
 ## 🚀 Usage
 
-Set your OpenRouter API key before running `smith`:
+Set the API key for your chosen provider before running `smith`:
 
 ```bash
+# OpenRouter (default provider)
 export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
+
+# Anthropic
+export ANTHROPIC_API_KEY="your-key-here"
+
+# OpenAI
+export OPENAI_API_KEY="your-key-here"
+
+# Ollama needs no API key (optional: point to a non-default host)
+export OLLAMA_HOST="http://localhost:11434"
 ```
 
 ### Interactive Chat Mode
@@ -90,11 +111,13 @@ Commands:
   sessions, list             List all saved local chat sessions
 
 Options:
-  -m MODEL, --model=MODEL    Specify the LLM model (default: qwen/qwen3.8-max)
-  -p PROVIDER, --provider=PROVIDER Specify the provider (default: openrouter)
+  -m MODEL, --model=MODEL    Specify the LLM model (default: provider's default model)
+  -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
   -v, --version              Print version information
   -h, --help                 Show help banner
 ```
+
+You can also pass a prompt directly without a subcommand to run it headless, e.g. `smith "Summarize src/smith.cr"`.
 
 ---
 
@@ -112,11 +135,16 @@ src/
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── session.cr           # Session persistence store (~/.smith/sessions/)
     ├── subagents.cr         # Child agent supervisor & report handling
+    ├── llm.cr               # Requires all LLM provider adapters
+    ├── tools.cr             # Requires all tool implementations
     ├── llm/
     │   ├── types.cr         # Provider-neutral Request, Response, Message & ToolSpec
     │   ├── provider.cr      # Abstract Provider base class
     │   ├── retry.cr         # Exponential backoff retry handler
-    │   └── openrouter.cr    # OpenRouter API client adapter
+    │   ├── openrouter.cr    # OpenRouter API client adapter
+    │   ├── ollama.cr        # Ollama API client adapter
+    │   ├── anthropic.cr     # Anthropic Messages API client adapter
+    │   └── openai.cr        # OpenAI Chat Completions client adapter
     └── tools/
         ├── tool.cr          # Abstract Tool base class & ParallelTool marker
         ├── registry.cr      # Tool registry & Fiber parallel execution scheduler
