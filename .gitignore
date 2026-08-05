@@ -5,5 +5,9 @@
 # Dependencies
 /lib/
 
+# Secrets & Local Config
+.env
+.envrc
+
 # macOS
 .DS_Store
