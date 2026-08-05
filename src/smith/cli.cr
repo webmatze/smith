@@ -40,7 +40,7 @@ module Smith
           @model = m
         end
 
-        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama (default: openrouter)") do |p|
+        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama, anthropic (default: openrouter)") do |p|
           @provider_name = p
         end
 
@@ -106,6 +106,15 @@ module Smith
         host = ENV["OLLAMA_HOST"]? || "http://localhost:11434"
         default_m = @model || "gemma4:latest"
         LLM::Ollama.new(host: host, default_model: default_m)
+      when "anthropic"
+        api_key = ENV["ANTHROPIC_API_KEY"]?
+        if api_key.nil? || api_key.empty?
+          puts "❌ Error: ANTHROPIC_API_KEY environment variable is not set."
+          puts "   Please set it via: export ANTHROPIC_API_KEY=\"your_key_here\""
+          exit(1)
+        end
+        default_m = @model || "claude-3-5-sonnet-20241022"
+        LLM::Anthropic.new(api_key: api_key, default_model: default_m)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."
         exit(1)
