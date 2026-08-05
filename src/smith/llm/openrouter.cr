@@ -13,7 +13,7 @@ module Smith::LLM
     getter api_key : String
     getter default_model : String
 
-    def initialize(@api_key : String = ENV.fetch("OPENROUTER_API_KEY", ""), @default_model : String = "anthropic/claude-3.5-sonnet")
+    def initialize(@api_key : String = ENV.fetch("OPENROUTER_API_KEY", ""), @default_model : String = "qwen/qwen3.8-max")
       if @api_key.empty?
         raise ArgumentError.new("OpenRouter API key is missing. Set OPENROUTER_API_KEY environment variable.")
       end

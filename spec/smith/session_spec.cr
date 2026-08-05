@@ -9,7 +9,7 @@ describe Smith::Session::Store do
       store = Smith::Session::Store.new(base_dir: temp_dir)
 
       # Create session
-      session = store.create(model: "anthropic/claude-3.5-sonnet", provider: "openrouter", cwd: "/tmp")
+      session = store.create(model: "qwen/qwen3.8-max", provider: "openrouter", cwd: "/tmp")
       session.id.should start_with("session-")
 
       # Add message & save
@@ -27,7 +27,7 @@ describe Smith::Session::Store do
       # Load session
       loaded = store.load(session.id)
       loaded.id.should eq(session.id)
-      loaded.model.should eq("anthropic/claude-3.5-sonnet")
+      loaded.model.should eq("qwen/qwen3.8-max")
       loaded.messages.size.should eq(2)
       loaded.messages.first.content.first.text.should eq("Hello from spec test!")
       loaded.messages.last.content.first.text.should eq("Hello back!")

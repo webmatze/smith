@@ -11,7 +11,7 @@ module Smith
     end
 
     @args : Array(String)
-    @model : String = "anthropic/claude-3.5-sonnet"
+    @model : String = "qwen/qwen3.8-max"
     @provider_name : String = "openrouter"
     @session_store : Session::Store
 
@@ -23,7 +23,7 @@ module Smith
       parser = OptionParser.parse(@args) do |opts|
         opts.banner = "Usage: smith [command] [options]"
 
-        opts.on("-m MODEL", "--model=MODEL", "Specify the LLM model to use (default: anthropic/claude-3.5-sonnet)") do |m|
+        opts.on("-m MODEL", "--model=MODEL", "Specify the LLM model to use (default: qwen/qwen3.8-max)") do |m|
           @model = m
         end
 

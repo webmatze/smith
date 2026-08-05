@@ -17,7 +17,7 @@ module Smith
     def initialize(
       @provider : LLM::Provider,
       @registry : Tools::Registry = Tools::Registry.default,
-      @model : String = "anthropic/claude-3.5-sonnet",
+      @model : String = "qwen/qwen3.8-max",
       @system_prompt : String = "You are Smith, an autonomous coding agent written in Crystal.",
       messages : Array(LLM::Message)? = nil
     )
