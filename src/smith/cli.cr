@@ -13,7 +13,7 @@ module Smith
     end
 
     @args : Array(String)
-    @model : String = "qwen/qwen3.8-max"
+    @model : String? = nil
     @provider_name : String = "openrouter"
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
@@ -36,7 +36,7 @@ module Smith
           str.puts "Options:"
         end
 
-        opts.on("-m MODEL", "--model=MODEL", "Specify the LLM model (default: qwen/qwen3.8-max)") do |m|
+        opts.on("-m MODEL", "--model=MODEL", "Specify the LLM model (defaults to provider's default model)") do |m|
           @model = m
         end
 
@@ -100,10 +100,11 @@ module Smith
           puts "   Please set it via: export OPENROUTER_API_KEY=\"your_key_here\""
           exit(1)
         end
-        LLM::OpenRouter.new(api_key: api_key, default_model: @model)
+        default_m = @model || "qwen/qwen3.8-max"
+        LLM::OpenRouter.new(api_key: api_key, default_model: default_m)
       when "ollama"
         host = ENV["OLLAMA_HOST"]? || "http://localhost:11434"
-        default_m = @model == "qwen/qwen3.8-max" ? "gemma4:latest" : @model
+        default_m = @model || "gemma4:latest"
         LLM::Ollama.new(host: host, default_model: default_m)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."
@@ -128,14 +129,16 @@ module Smith
     end
 
     private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
+      effective_model = @model || provider.default_model
+
       registry = Tools::Registry.default
       supervisor = Subagents::Supervisor.new
-      registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: @model))
+      registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: effective_model))
 
       agent = Agent.new(
         provider: provider,
         registry: registry,
-        model: @model,
+        model: effective_model,
         system_prompt: build_system_prompt,
         messages: messages
       )
@@ -164,10 +167,11 @@ module Smith
     private def run_headless(prompt : String)
       provider = build_provider
       agent = build_agent(provider)
+      effective_model = agent.model
 
       expanded_prompt = @skills_catalog.expand_prompt(prompt)
 
-      puts "⚒️  Running Smith Headless [Model: #{@model}]"
+      puts "⚒️  Running Smith Headless [Provider: #{provider.name} | Model: #{effective_model}]"
       if @skills_catalog.skills.size > 0
         puts "   Loaded Skills: #{@skills_catalog.skills.keys.join(", ")}"
       end
@@ -180,7 +184,10 @@ module Smith
     end
 
     private def run_interactive
-      session_data = @session_store.create(model: @model, provider: @provider_name)
+      provider = build_provider
+      effective_model = @model || provider.default_model
+
+      session_data = @session_store.create(model: effective_model, provider: @provider_name)
       start_session_loop(session_data)
     end
 
@@ -200,7 +207,7 @@ module Smith
       @provider_name = session_data.provider
 
       puts "🔄 Resuming Session [#{session_data.id}]"
-      puts "   Model: #{@model} | Messages: #{session_data.messages.size}"
+      puts "   Provider: #{@provider_name} | Model: #{@model} | Messages: #{session_data.messages.size}"
       puts "--------------------------------------------------"
 
       session_data.messages.last(4).each do |msg|
@@ -218,9 +225,10 @@ module Smith
     private def start_session_loop(session_data : Session::Data)
       provider = build_provider(session_data.provider)
       agent = build_agent(provider, session_data.messages)
+      effective_model = agent.model
 
       puts "⚒️  Smith LLM Agent Harness v#{Smith::VERSION} (Crystal)"
-      puts "   Session: #{session_data.id} | Model: #{@model}"
+      puts "   Session: #{session_data.id} | Provider: #{session_data.provider} | Model: #{effective_model}"
       if @skills_catalog.skills.size > 0
         puts "   Loaded Skills: #{@skills_catalog.skills.keys.join(", ")}"
       end

@@ -7,6 +7,10 @@ class MockProvider < Smith::LLM::Provider
     "mock"
   end
 
+  def default_model : String
+    "mock-model"
+  end
+
   def complete(request : Smith::LLM::Request) : Smith::LLM::Response
     @calls << request
 

@@ -9,6 +9,7 @@ module Smith::LLM
 
   abstract class Provider
     abstract def name : String
+    abstract def default_model : String
     abstract def complete(request : Request) : Response
   end
 end
