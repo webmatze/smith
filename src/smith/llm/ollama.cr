@@ -15,6 +15,7 @@ module Smith::LLM
     def initialize(
       host : String? = nil,
       @default_model : String = DEFAULT_MODEL,
+      @timeouts : Timeouts = Timeouts.default,
     )
       raw_host = host || ENV.fetch("OLLAMA_HOST", DEFAULT_HOST)
       # Normalize host URL
@@ -149,7 +150,7 @@ module Smith::LLM
       }
 
       begin
-        client = HTTP::Client.new(uri)
+        client = build_client(uri)
         begin
           response = client.post(uri.path, headers: headers, body: payload)
 

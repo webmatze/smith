@@ -18,7 +18,7 @@ It is inspired by and built according to the policy-free agent loop principles o
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
-- **⚡ Native Performance**: Compiles to a lightweight native binary with sub-20ms test suite execution.
+- **⚡ Native Performance**: Compiles to a lightweight native binary; the test suite runs in well under a second.
 
 ---
 
@@ -124,7 +124,9 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `OLLAMA_HOST`, 
 
 **API keys are never read from the config file.** They stay in environment variables only, so a plaintext config never becomes a place secrets get committed from.
 
-The `[http]`, `[approval]` and `[context]` sections are parsed and exposed today but not yet acted upon — they are wired up by the HTTP-timeout, approval-mode and context-compaction features.
+`[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
+
+The `[approval]` and `[context]` sections are parsed and exposed today but not yet acted upon — they are wired up by the approval-mode and context-compaction features.
 
 Every key is optional; unknown keys are ignored, and a malformed file produces a warning on stderr rather than a crash.
 
@@ -135,6 +137,8 @@ Start an interactive session:
 ```bash
 ./bin/smith chat
 ```
+
+Pressing **Ctrl+C** at any point — including mid-response — saves the session and exits with code 130, printing the `smith resume` command to pick it back up. Nothing in flight is lost.
 
 ### Headless Mode
 

@@ -17,6 +17,7 @@ module Smith::LLM
     def initialize(
       @api_key : String = ENV.fetch("ANTHROPIC_API_KEY", ""),
       @default_model : String = DEFAULT_MODEL,
+      @timeouts : Timeouts = Timeouts.default,
     )
       if @api_key.empty?
         raise ArgumentError.new("Anthropic API key is missing. Set ANTHROPIC_API_KEY environment variable.")
@@ -162,7 +163,7 @@ module Smith::LLM
         "Content-Type"      => "application/json",
       }
 
-      client = HTTP::Client.new(uri)
+      client = build_client(uri)
       begin
         response = client.post(uri.path, headers: headers, body: payload)
 
