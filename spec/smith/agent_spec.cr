@@ -19,13 +19,13 @@ class MockProvider < Smith::LLM::Provider
       args = JSON.parse(%({"path": "spec/spec_helper.cr"}))
       blocks = [
         Smith::LLM::ContentBlock.text("Checking spec_helper..."),
-        Smith::LLM::ContentBlock.tool_use("call_mock_1", "read_file", args)
+        Smith::LLM::ContentBlock.tool_use("call_mock_1", "read_file", args),
       ]
       Smith::LLM::Response.new("resp_1", request.model, blocks, usage: Smith::LLM::Usage.new(10, 5, 15))
     else
       # Turn 2: Finish response with text
       blocks = [
-        Smith::LLM::ContentBlock.text("Done checking spec_helper!")
+        Smith::LLM::ContentBlock.text("Done checking spec_helper!"),
       ]
       Smith::LLM::Response.new("resp_2", request.model, blocks, usage: Smith::LLM::Usage.new(15, 8, 23))
     end

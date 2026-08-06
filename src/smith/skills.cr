@@ -27,7 +27,7 @@ module Smith::Skills
       workspace_skills_dirs = [
         File.join(workspace_dir, ".smith", "skills"),
         File.join(workspace_dir, ".gemini", "skills"),
-        File.join(workspace_dir, ".agents", "skills")
+        File.join(workspace_dir, ".agents", "skills"),
       ]
 
       workspace_skills_dirs.each do |dir|

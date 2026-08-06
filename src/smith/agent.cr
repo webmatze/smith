@@ -19,7 +19,7 @@ module Smith
       @registry : Tools::Registry = Tools::Registry.default,
       @model : String = "qwen/qwen3.8-max",
       @system_prompt : String = "You are Smith, an autonomous coding agent written in Crystal.",
-      messages : Array(LLM::Message)? = nil
+      messages : Array(LLM::Message)? = nil,
     )
       @messages = messages || Array(LLM::Message).new
       @cumulative_usage = LLM::Usage.new(0, 0, 0)

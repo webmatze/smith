@@ -13,7 +13,7 @@ class SubagentMockProvider < Smith::LLM::Provider
 
   def complete(request : Smith::LLM::Request) : Smith::LLM::Response
     blocks = [
-      Smith::LLM::ContentBlock.text("Subagent finished subtask successfully.")
+      Smith::LLM::ContentBlock.text("Subagent finished subtask successfully."),
     ]
     Smith::LLM::Response.new("resp_sub", request.model, blocks, usage: Smith::LLM::Usage.new(5, 5, 10))
   end

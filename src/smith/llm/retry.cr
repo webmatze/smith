@@ -10,7 +10,7 @@ module Smith::LLM
         @max_retries : Int32 = 3,
         @initial_delay : Time::Span = 1.second,
         @max_delay : Time::Span = 30.seconds,
-        @backoff_factor : Float64 = 2.0
+        @backoff_factor : Float64 = 2.0,
       )
       end
     end

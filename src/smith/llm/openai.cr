@@ -7,14 +7,14 @@ require "./retry"
 module Smith::LLM
   class OpenAI < Provider
     DEFAULT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
-    DEFAULT_MODEL = "gpt-5.6-luna"
+    DEFAULT_MODEL    = "gpt-5.6-luna"
 
     getter api_key : String
     getter default_model : String
 
     def initialize(
       @api_key : String = ENV.fetch("OPENAI_API_KEY", ""),
-      @default_model : String = DEFAULT_MODEL
+      @default_model : String = DEFAULT_MODEL,
     )
       if @api_key.empty?
         raise ArgumentError.new("OpenAI API key is missing. Set OPENAI_API_KEY environment variable.")
@@ -146,7 +146,7 @@ module Smith::LLM
       uri = URI.parse(DEFAULT_ENDPOINT)
       headers = HTTP::Headers{
         "Authorization" => "Bearer #{@api_key}",
-        "Content-Type"  => "application/json"
+        "Content-Type"  => "application/json",
       }
 
       client = HTTP::Client.new(uri)

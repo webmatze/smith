@@ -12,7 +12,7 @@ module Smith::Tools
     def initialize(
       @supervisor : Smith::Subagents::Supervisor,
       @provider : Smith::LLM::Provider,
-      @model : String
+      @model : String,
     )
     end
 
