@@ -5,5 +5,9 @@ targets:
   smith:
     main: src/smith.cr
 
-license: MIT
+dependencies:
+  toml:
+    github: crystal-community/toml.cr
+    version: ~> 0.8.1
 
+license: MIT

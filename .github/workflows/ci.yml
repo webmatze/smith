@@ -21,6 +21,9 @@ jobs:
         with:
           crystal: latest
 
+      - name: Install dependencies
+        run: shards install
+
       - name: Check formatting
         run: crystal tool format --check
 

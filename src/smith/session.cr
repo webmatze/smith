@@ -1,6 +1,7 @@
 require "json"
 require "file_utils"
 require "./atomic_file"
+require "./paths"
 require "./llm/types"
 
 module Smith::Session
@@ -69,7 +70,7 @@ module Smith::Session
     getter index_path : String
 
     def initialize(base_dir : String? = nil)
-      @base_dir = base_dir || ENV.fetch("SMITH_HOME", File.join(Path.home, ".smith"))
+      @base_dir = base_dir || Smith.home_dir
       @sessions_dir = File.join(@base_dir, "sessions")
       @index_path = File.join(@sessions_dir, "index.json")
 

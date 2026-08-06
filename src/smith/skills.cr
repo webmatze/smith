@@ -1,5 +1,6 @@
 require "path"
 require "file_utils"
+require "./paths"
 
 module Smith::Skills
   struct Skill
@@ -19,8 +20,7 @@ module Smith::Skills
       catalog = Catalog.new
 
       # 1. Global skills in ~/.smith/skills/
-      global_dir = ENV.fetch("SMITH_HOME", File.join(Path.home, ".smith"))
-      global_skills_dir = File.join(global_dir, "skills")
+      global_skills_dir = File.join(Smith.home_dir, "skills")
       catalog.load_skills_dir(global_skills_dir)
 
       # 2. Local workspace skills in .smith/skills/, .gemini/skills/, .claude/skills/
