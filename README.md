@@ -33,11 +33,14 @@ It is inspired by and built according to the policy-free agent loop principles o
 # 1. Install Crystal via mise (if using mise)
 mise use crystal@latest
 
-# 2. Build the binary
+# 2. Install dependencies
+shards install
+
+# 3. Build the binary
 mkdir -p bin
 crystal build src/smith.cr -o bin/smith
 
-# 3. Run the test suite
+# 4. Run the test suite
 crystal spec
 ```
 
@@ -70,6 +73,60 @@ export OPENAI_API_KEY="your-key-here"
 # Ollama needs no API key (optional: point to a non-default host)
 export OLLAMA_HOST="http://localhost:11434"
 ```
+
+### Configuration
+
+Persistent defaults live in a TOML file, so provider and model no longer have to be passed as flags every time. Two locations are read:
+
+| Location | Scope |
+|---|---|
+| `~/.smith/config.toml` | Global (override the directory via `SMITH_HOME`) |
+| `.smith/config.toml` | Project — searched upward from the working directory to the Git root; the nearest one wins |
+
+Values resolve in this order, highest priority first:
+
+```text
+CLI flag  >  environment variable  >  project config  >  global config  >  built-in default
+```
+
+A full example with every supported key:
+
+```toml
+[defaults]
+provider = "openrouter"          # openrouter | ollama | anthropic | openai
+
+[providers.openrouter]
+model = "qwen/qwen3.8-max"
+
+[providers.ollama]
+model = "gemma4:latest"
+host  = "http://localhost:11434"
+
+[providers.anthropic]
+model = "claude-sonnet-5"
+
+[providers.openai]
+model = "gpt-5.6-luna"
+
+[http]
+connect_timeout = 10             # seconds
+read_timeout    = 120
+
+[approval]
+mode      = "prompt"             # prompt | auto
+allowlist = ["ls", "git status"]
+
+[context]
+max_tokens = 120000
+```
+
+Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `OLLAMA_HOST`, `SMITH_HOME`.
+
+**API keys are never read from the config file.** They stay in environment variables only, so a plaintext config never becomes a place secrets get committed from.
+
+The `[http]`, `[approval]` and `[context]` sections are parsed and exposed today but not yet acted upon — they are wired up by the HTTP-timeout, approval-mode and context-compaction features.
+
+Every key is optional; unknown keys are ignored, and a malformed file produces a warning on stderr rather than a crash.
 
 ### Interactive Chat Mode
 
@@ -133,6 +190,8 @@ src/
     ├── cli.cr               # CLI OptionParser, command router & event renderer
     ├── events.cr            # Typed event stream (AssistantText, ToolStart, ToolFinished, etc.)
     ├── atomic_file.cr       # Atomic write helper for safe persistence
+    ├── paths.cr             # Resolves ~/.smith (honours SMITH_HOME)
+    ├── config.cr            # config.toml discovery, merging & precedence chain
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── session.cr           # Session persistence store (~/.smith/sessions/)

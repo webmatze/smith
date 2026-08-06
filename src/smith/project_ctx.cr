@@ -1,5 +1,6 @@
 require "path"
 require "file_utils"
+require "./paths"
 
 module Smith
   class ProjectContext
@@ -10,7 +11,7 @@ module Smith
       instructions = Array(String).new
 
       # 1. Global instructions in ~/.smith/
-      global_dir = ENV.fetch("SMITH_HOME", File.join(Path.home, ".smith"))
+      global_dir = Smith.home_dir
       FILE_NAMES.each do |filename|
         global_file = File.join(global_dir, filename)
         if File.exists?(global_file) && File.file?(global_file)

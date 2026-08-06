@@ -1,6 +1,7 @@
 require "./llm"
 require "./tools"
 require "./events"
+require "./config"
 
 module Smith
   class Agent
@@ -17,7 +18,7 @@ module Smith
     def initialize(
       @provider : LLM::Provider,
       @registry : Tools::Registry = Tools::Registry.default,
-      @model : String = "qwen/qwen3.8-max",
+      @model : String = Config::DEFAULT_MODEL,
       @system_prompt : String = "You are Smith, an autonomous coding agent written in Crystal.",
       messages : Array(LLM::Message)? = nil,
     )

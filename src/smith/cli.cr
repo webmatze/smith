@@ -5,6 +5,7 @@ require "./agent"
 require "./session"
 require "./project_ctx"
 require "./skills"
+require "./config"
 
 module Smith
   class CLI
@@ -14,13 +15,21 @@ module Smith
 
     @args : Array(String)
     @model : String? = nil
-    @provider_name : String = "openrouter"
+    @provider_name : String? = nil
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
+    @config : Config
 
     def initialize(@args : Array(String))
+      @config = Config.load
       @session_store = Session::Store.new
       @skills_catalog = Skills::Catalog.discover
+    end
+
+    # The provider actually in effect: CLI flag (or a resumed session's
+    # provider) first, otherwise whatever the config/env/default chain yields.
+    private def effective_provider_name : String
+      @provider_name || @config.provider
     end
 
     def run
@@ -40,7 +49,7 @@ module Smith
           @model = m
         end
 
-        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)") do |p|
+        opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama, anthropic, openai (default: from config, else openrouter)") do |p|
           @provider_name = p
         end
 
@@ -91,43 +100,37 @@ module Smith
       end
     end
 
-    private def build_provider(provider_name : String = @provider_name) : LLM::Provider
-      case provider_name.downcase
+    private def build_provider(provider_name : String = effective_provider_name) : LLM::Provider
+      name = provider_name.downcase
+      # -m wins over the config/env chain; nil means "ask the config".
+      default_m = @model || @config.model_for(name)
+
+      case name
       when "openrouter"
-        api_key = ENV["OPENROUTER_API_KEY"]?
-        if api_key.nil? || api_key.empty?
-          puts "❌ Error: OPENROUTER_API_KEY environment variable is not set."
-          puts "   Please set it via: export OPENROUTER_API_KEY=\"your_key_here\""
-          exit(1)
-        end
-        default_m = @model || "qwen/qwen3.8-max"
-        LLM::OpenRouter.new(api_key: api_key, default_model: default_m)
+        LLM::OpenRouter.new(api_key: require_api_key("OPENROUTER_API_KEY"), default_model: default_m)
       when "ollama"
-        host = ENV["OLLAMA_HOST"]? || "http://localhost:11434"
-        default_m = @model || "gemma4:latest"
-        LLM::Ollama.new(host: host, default_model: default_m)
+        LLM::Ollama.new(host: @config.ollama_host, default_model: default_m)
       when "anthropic"
-        api_key = ENV["ANTHROPIC_API_KEY"]?
-        if api_key.nil? || api_key.empty?
-          puts "❌ Error: ANTHROPIC_API_KEY environment variable is not set."
-          puts "   Please set it via: export ANTHROPIC_API_KEY=\"your_key_here\""
-          exit(1)
-        end
-        default_m = @model || "claude-sonnet-5"
-        LLM::Anthropic.new(api_key: api_key, default_model: default_m)
+        LLM::Anthropic.new(api_key: require_api_key("ANTHROPIC_API_KEY"), default_model: default_m)
       when "openai"
-        api_key = ENV["OPENAI_API_KEY"]?
-        if api_key.nil? || api_key.empty?
-          puts "❌ Error: OPENAI_API_KEY environment variable is not set."
-          puts "   Please set it via: export OPENAI_API_KEY=\"your_key_here\""
-          exit(1)
-        end
-        default_m = @model || "gpt-5.6-luna"
-        LLM::OpenAI.new(api_key: api_key, default_model: default_m)
+        LLM::OpenAI.new(api_key: require_api_key("OPENAI_API_KEY"), default_model: default_m)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."
+        puts "   Known providers: #{Config::BUILTIN_MODELS.keys.join(", ")}"
         exit(1)
       end
+    end
+
+    # API keys stay env-only and are never read from the config file, so a
+    # plaintext config never becomes a place secrets get committed from.
+    private def require_api_key(var_name : String) : String
+      api_key = ENV[var_name]?
+      if api_key.nil? || api_key.empty?
+        puts "❌ Error: #{var_name} environment variable is not set."
+        puts "   Please set it via: export #{var_name}=\"your_key_here\""
+        exit(1)
+      end
+      api_key
     end
 
     private def build_system_prompt : String
@@ -211,7 +214,7 @@ module Smith
       provider = build_provider
       effective_model = @model || provider.default_model
 
-      session_data = @session_store.create(model: effective_model, provider: @provider_name)
+      session_data = @session_store.create(model: effective_model, provider: effective_provider_name)
       start_session_loop(session_data)
     end
 
