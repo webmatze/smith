@@ -1,5 +1,7 @@
 # ⚒️ smith
 
+[![CI](https://github.com/webmatze/smith/actions/workflows/ci.yml/badge.svg)](https://github.com/webmatze/smith/actions/workflows/ci.yml)
+
 **smith** is a fast, local-first LLM Agent Harness written in [Crystal](https://crystal-lang.org/).
 
 It is inspired by and built according to the policy-free agent loop principles outlined in the [Neo Architecture](https://github.com/owainlewis/neo/blob/main/ARCHITECTURE.md).
