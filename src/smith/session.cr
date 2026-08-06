@@ -37,7 +37,7 @@ module Smith::Session
       @messages : Array(Smith::LLM::Message) = Array(Smith::LLM::Message).new,
       @usage : Smith::LLM::Usage = Smith::LLM::Usage.new(0, 0, 0),
       @created_at : Time = Time.local,
-      @updated_at : Time = Time.local
+      @updated_at : Time = Time.local,
     )
     end
 

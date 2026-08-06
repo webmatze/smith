@@ -44,7 +44,7 @@ module Smith::Subagents
       prompt : String,
       mode : Mode,
       provider : Smith::LLM::Provider,
-      model : String
+      model : String,
     ) : Report
       if @count >= MAX_CHILDREN_PER_SESSION
         return Report.new(
@@ -63,11 +63,11 @@ module Smith::Subagents
       registry = build_child_registry(mode)
 
       child_system_prompt = case mode
-                           when Mode::Inspect
-                             "You are an inspection subagent. Your task is read-only research and analysis. Provide clear, accurate summaries."
-                           else
-                             "You are an autonomous child worker agent. Complete the requested task efficiently and report your results."
-                           end
+                            when Mode::Inspect
+                              "You are an inspection subagent. Your task is read-only research and analysis. Provide clear, accurate summaries."
+                            else
+                              "You are an autonomous child worker agent. Complete the requested task efficiently and report your results."
+                            end
 
       child_agent = Smith::Agent.new(
         provider: provider,

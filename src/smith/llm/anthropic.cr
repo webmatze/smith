@@ -6,17 +6,17 @@ require "./retry"
 
 module Smith::LLM
   class Anthropic < Provider
-    DEFAULT_ENDPOINT = "https://api.anthropic.com/v1/messages"
-    DEFAULT_MODEL = "claude-sonnet-5"
+    DEFAULT_ENDPOINT   = "https://api.anthropic.com/v1/messages"
+    DEFAULT_MODEL      = "claude-sonnet-5"
     DEFAULT_MAX_TOKENS = 4096
-    API_VERSION = "2023-06-01"
+    API_VERSION        = "2023-06-01"
 
     getter api_key : String
     getter default_model : String
 
     def initialize(
       @api_key : String = ENV.fetch("ANTHROPIC_API_KEY", ""),
-      @default_model : String = DEFAULT_MODEL
+      @default_model : String = DEFAULT_MODEL,
     )
       if @api_key.empty?
         raise ArgumentError.new("Anthropic API key is missing. Set ANTHROPIC_API_KEY environment variable.")
@@ -159,7 +159,7 @@ module Smith::LLM
       headers = HTTP::Headers{
         "x-api-key"         => @api_key,
         "anthropic-version" => API_VERSION,
-        "Content-Type"      => "application/json"
+        "Content-Type"      => "application/json",
       }
 
       client = HTTP::Client.new(uri)

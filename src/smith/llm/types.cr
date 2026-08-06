@@ -118,7 +118,7 @@ module Smith::LLM
       @system : String? = nil,
       @tools : Array(ToolSpec)? = nil,
       @max_tokens : Int32? = nil,
-      @temperature : Float64? = nil
+      @temperature : Float64? = nil,
     )
     end
   end
@@ -135,7 +135,7 @@ module Smith::LLM
       @model : String,
       @content : Array(ContentBlock),
       @stop_reason : String? = nil,
-      @usage : Usage? = nil
+      @usage : Usage? = nil,
     )
     end
   end

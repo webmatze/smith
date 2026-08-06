@@ -144,7 +144,7 @@ module Smith::LLM
         "Authorization" => "Bearer #{@api_key}",
         "HTTP-Referer"  => DEFAULT_SITE_URL,
         "X-Title"       => DEFAULT_APP_NAME,
-        "Content-Type"  => "application/json"
+        "Content-Type"  => "application/json",
       }
 
       client = HTTP::Client.new(uri)

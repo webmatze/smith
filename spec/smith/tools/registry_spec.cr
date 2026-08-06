@@ -22,7 +22,7 @@ describe Smith::Tools::Registry do
     begin
       calls = [
         Smith::Tools::CallRequest.new("1", "read_file", JSON.parse(%({"path": "#{test_path}"}))),
-        Smith::Tools::CallRequest.new("2", "glob", JSON.parse(%({"pattern": "tmp_*.txt"})))
+        Smith::Tools::CallRequest.new("2", "glob", JSON.parse(%({"pattern": "tmp_*.txt"}))),
       ]
 
       results = registry.execute_calls(calls)
@@ -39,7 +39,7 @@ describe Smith::Tools::Registry do
   it "executes bash tool" do
     registry = Smith::Tools::Registry.default
     calls = [
-      Smith::Tools::CallRequest.new("c1", "bash", JSON.parse(%({"command": "echo 'Hello Smith'"})))
+      Smith::Tools::CallRequest.new("c1", "bash", JSON.parse(%({"command": "echo 'Hello Smith'"}))),
     ]
 
     results = registry.execute_calls(calls)

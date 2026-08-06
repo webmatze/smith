@@ -6,7 +6,7 @@ require "./retry"
 
 module Smith::LLM
   class Ollama < Provider
-    DEFAULT_HOST = "http://localhost:11434"
+    DEFAULT_HOST  = "http://localhost:11434"
     DEFAULT_MODEL = "gemma4:latest"
 
     getter host : String
@@ -14,7 +14,7 @@ module Smith::LLM
 
     def initialize(
       host : String? = nil,
-      @default_model : String = DEFAULT_MODEL
+      @default_model : String = DEFAULT_MODEL,
     )
       raw_host = host || ENV.fetch("OLLAMA_HOST", DEFAULT_HOST)
       # Normalize host URL
@@ -145,7 +145,7 @@ module Smith::LLM
       endpoint_url = "#{@host}/v1/chat/completions"
       uri = URI.parse(endpoint_url)
       headers = HTTP::Headers{
-        "Content-Type" => "application/json"
+        "Content-Type" => "application/json",
       }
 
       begin
