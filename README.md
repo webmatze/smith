@@ -12,7 +12,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 
 - **🚀 Policy-Free Core Agent Loop (`Smith::Agent`)**: Complete decoupling of conversation transcript, LLM provider calls, tool execution, and UI surfaces.
 - **⚡ Fiber-Based Parallel Tool Execution (`Smith::Tools`)**: Concurrent execution of parallel-safe tools (`read_file`, `grep`, `glob`) via Crystal Fibers (`spawn` & `Channel`).
-- **🤖 Subagent Supervision (`Smith::Subagents`)**: The parent agent can delegate subtasks to autonomous child subagents running in isolated fibers in `work` (full capabilities) or `inspect` (read-only) mode.
+- **🤖 Subagent Supervision (`Smith::Subagents`)**: The parent agent can delegate subtasks to autonomous child subagents running in isolated fibers in `work` (full capabilities) or `inspect` (read-only) mode, bounded by a nesting depth and a spawn budget shared across every level.
 - **📡 Provider-Neutral LLM Layer (`Smith::LLM`)**: Ships with **OpenRouter**, **Ollama** (local models), **Anthropic** (Messages API), and **OpenAI** (Chat Completions) support with exponential backoff retry logic. Default models: `qwen/qwen3.8-max` (OpenRouter) / `gemma4:latest` (Ollama) / `claude-sonnet-5` (Anthropic) / `gpt-5.6-luna` (OpenAI).
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
@@ -125,6 +125,10 @@ allowlist = ["ls", "git status"]
 
 [context]
 max_tokens = 120000
+
+[subagents]
+max_depth    = 3                 # levels of nesting; 0 disables delegation
+max_children = 20                # total spawns per run, shared across levels
 ```
 
 Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `OLLAMA_HOST`, `SMITH_HOME`.
@@ -133,7 +137,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
+`[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
 
 ### Streaming
 
@@ -226,6 +230,29 @@ An allowlist entry matches a command exactly or as a whole first word (`git stat
 Without an interactive terminal there is nobody to ask, so `prompt` mode refuses mutating tools rather than running them. Pass `--yes` for headless runs.
 
 Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one.
+
+### Subagent Limits
+
+Delegation is bounded in two directions.
+
+```toml
+[subagents]
+max_depth    = 3     # levels of nesting below the main agent
+max_children = 20    # total spawns per run
+```
+
+**The budget is shared across every level**, not counted per supervisor. That distinction is the whole point: a per-level counter would let three levels of twenty become eight thousand agents, each with its own API calls and its own fiber. A refusal comes back as an ordinary subagent report, so the model sees the blockage in its transcript and picks another route:
+
+```text
+=== Subagent [rejected] Report (rejected) ===
+Subagent nesting limit reached (depth 3). Complete this task directly instead of delegating further.
+```
+
+`max_children = 0` switches delegation off entirely — the `agent` tool is then not even advertised, since offering one that always refuses only wastes turns.
+
+Node ids nest along with the agents (`subagent-2.1.1`), so an id is unambiguous across levels.
+
+Worth knowing: children are currently not given the `agent` tool at all, so nesting cannot actually be triggered yet. The limits exist because that is an invariant nobody wrote down — it holds only as long as everyone remembers not to register one tool. A spec now guards it, and the depth and budget are already wired for whoever does register it.
 
 ### Hooks
 

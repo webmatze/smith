@@ -35,19 +35,79 @@ module Smith::Subagents
     end
   end
 
+  # How many subagents the whole run may spawn, shared by every level.
+  #
+  # A per-supervisor counter would reset for each nested supervisor, so three
+  # levels of twenty would be eight thousand agents — each with its own API
+  # calls, each in its own fiber.
+  class SpawnBudget
+    getter limit : Int32
+    getter remaining : Int32
+
+    def initialize(@limit : Int32 = Supervisor::MAX_CHILDREN_PER_SESSION)
+      @remaining = @limit
+    end
+
+    # Check and decrement in one go. Children run in fibers, and although
+    # Crystal's are cooperative, a separate test-then-decrement would be a
+    # yield point away from handing out the same slot twice.
+    def claim? : Bool
+      return false if @remaining <= 0
+
+      @remaining -= 1
+      true
+    end
+
+    def exhausted? : Bool
+      @remaining <= 0
+    end
+  end
+
   class Supervisor
     MAX_CHILDREN_PER_SESSION = 20
 
+    # The main agent is depth 0, so this allows three levels of children.
+    MAX_DEPTH = 3
+
     getter count : Int32 = 0
     getter approver : Smith::Tools::Approver
+    getter depth : Int32
+    getter max_depth : Int32
+    getter budget : SpawnBudget
 
     # Plan mode is a property of the whole run, not just the main thread:
     # without this, `agent(mode: "work")` would be a trivial way around it.
     property plan_mode : Bool = false
 
-    # Children build their own registry, so without this a work-mode subagent
-    # would run bash straight past the parent's approval gate.
-    def initialize(@approver : Smith::Tools::Approver = Smith::Tools::AutoApprover.new)
+    # Children build their own registry, so without the approver a work-mode
+    # subagent would run bash straight past the parent's approval gate.
+    #
+    # `node_path` is this supervisor's own position ("2.1"), which its children
+    # extend — an id is then unambiguous across levels.
+    def initialize(
+      @approver : Smith::Tools::Approver = Smith::Tools::AutoApprover.new,
+      @max_depth : Int32 = MAX_DEPTH,
+      budget : SpawnBudget? = nil,
+      @depth : Int32 = 0,
+      @node_path : String = "",
+    )
+      @budget = budget || SpawnBudget.new
+    end
+
+    # The supervisor a child agent would need in order to delegate further.
+    # Nothing registers the agent tool for children today, so this is currently
+    # only reached from the specs — but the limits are wired here, so whoever
+    # does register it (see #21) inherits them instead of reinventing them.
+    def child_supervisor(node_path : String) : Supervisor
+      supervisor = Supervisor.new(
+        approver: @approver,
+        max_depth: @max_depth,
+        budget: @budget,
+        depth: @depth + 1,
+        node_path: node_path
+      )
+      supervisor.plan_mode = @plan_mode
+      supervisor
     end
 
     def run_child(
@@ -56,18 +116,18 @@ module Smith::Subagents
       provider : Smith::LLM::Provider,
       model : String,
     ) : Report
-      if @count >= MAX_CHILDREN_PER_SESSION
-        return Report.new(
-          node_id: "error",
-          status: "rejected",
-          summary: "Exceeded max limit of #{MAX_CHILDREN_PER_SESSION} subagents per session.",
-          turns_used: 0,
-          usage: Smith::LLM::Usage.new(0, 0, 0)
-        )
+      # Depth before budget: a run that has gone too deep should be told so,
+      # not told it is out of spawns.
+      if @depth >= @max_depth
+        return rejected("Subagent nesting limit reached (depth #{@depth}). Complete this task directly instead of delegating further.")
+      end
+
+      unless @budget.claim?
+        return rejected("Exceeded max limit of #{@budget.limit} subagents per session.")
       end
 
       @count += 1
-      node_id = "subagent-#{@count}"
+      node_id = "subagent-#{@node_path.empty? ? @count : "#{@node_path}.#{@count}"}"
 
       # In plan mode nothing may change, delegated or not.
       mode = Mode::Inspect if @plan_mode
@@ -119,6 +179,18 @@ module Smith::Subagents
         summary: final_text.empty? ? "(Subagent completed without text output)" : final_text,
         turns_used: turns,
         usage: child_agent.cumulative_usage
+      )
+    end
+
+    # Handed back to the model as an ordinary report, the same way the width
+    # cap always has been, so it can see the blockage and pick another route.
+    private def rejected(summary : String) : Report
+      Report.new(
+        node_id: "rejected",
+        status: "rejected",
+        summary: summary,
+        turns_used: 0,
+        usage: Smith::LLM::Usage.new(0, 0, 0)
       )
     end
 
