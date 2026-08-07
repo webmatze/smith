@@ -3,6 +3,7 @@ require "digest/sha256"
 require "./paths"
 require "./mode"
 require "./hooks"
+require "./subagents"
 
 module Smith
   # Resolved configuration, merged from (lowest to highest priority):
@@ -51,6 +52,14 @@ module Smith
       getter allowlist : Array(String)
 
       def initialize(@mode : String, @allowlist : Array(String))
+      end
+    end
+
+    struct SubagentSettings
+      getter max_depth : Int32
+      getter max_children : Int32
+
+      def initialize(@max_depth : Int32, @max_children : Int32)
       end
     end
 
@@ -296,6 +305,15 @@ module Smith
         matcher: matcher,
         timeout: fields["timeout"]?.try(&.as_i?) || Hooks::DEFAULT_TIMEOUT,
         once: fields["once"]?.try(&.as_bool?) || false
+      )
+    end
+
+    # Consumed by Subagents::Supervisor via CLI#build_agent. max_children = 0
+    # switches subagents off entirely — the agent tool is then not registered.
+    def subagents : SubagentSettings
+      SubagentSettings.new(
+        max_depth: lookup("subagents", "max_depth").try(&.as_i?) || Subagents::Supervisor::MAX_DEPTH,
+        max_children: lookup("subagents", "max_children").try(&.as_i?) || Subagents::Supervisor::MAX_CHILDREN_PER_SESSION
       )
     end
 

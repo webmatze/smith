@@ -341,8 +341,18 @@ module Smith
         renderer.handle(Events::TodosUpdated.new(items))
       end
 
-      supervisor = Subagents::Supervisor.new(approver)
-      registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: effective_model))
+      subagents = @config.subagents
+      supervisor = Subagents::Supervisor.new(
+        approver,
+        max_depth: subagents.max_depth,
+        budget: Subagents::SpawnBudget.new(subagents.max_children)
+      )
+
+      # max_children = 0 means "no subagents at all", so the tool is not even
+      # advertised — offering one that always refuses just wastes turns.
+      unless subagents.max_children.zero?
+        registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: effective_model))
+      end
 
       agent = Agent.new(
         provider: provider,
