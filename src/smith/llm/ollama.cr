@@ -151,7 +151,12 @@ module Smith::LLM
 
         json.object do
           json.field "role", "assistant"
-          json.field "content", text_content.empty? ? nil : text_content
+          # `content: null` is the OpenAI convention for a tool-call-only
+          # message, but a null with *no* tool_calls is rejected — Ollama
+          # answers 400 "invalid message content type: <nil>" — and since the
+          # whole transcript is resent every turn, one such message breaks the
+          # rest of the session.
+          json.field "content", text_content.empty? && !tool_uses.empty? ? nil : text_content
 
           unless tool_uses.empty?
             json.field "tool_calls" do

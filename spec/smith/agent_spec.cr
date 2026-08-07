@@ -66,3 +66,50 @@ describe Smith::Agent do
     agent.cumulative_usage.total_tokens.should eq(38)
   end
 end
+
+# Returns one content-less response, then a normal one. Real models do this:
+# gemma4 via Ollama puts its answer in `reasoning` and leaves `content` empty,
+# so nothing survives parsing.
+class EmptyResponseProvider < Smith::LLM::Provider
+  getter calls = 0
+
+  def name : String
+    "mock"
+  end
+
+  def default_model : String
+    "mock-model"
+  end
+
+  def complete(request : Smith::LLM::Request) : Smith::LLM::Response
+    @calls += 1
+    Smith::LLM::Response.new("resp_#{@calls}", request.model, Array(Smith::LLM::ContentBlock).new)
+  end
+end
+
+describe "a response with no content blocks" do
+  it "is not recorded in the transcript" do
+    provider = EmptyResponseProvider.new
+    agent = Smith::Agent.new(provider: provider, registry: Smith::Tools::Registry.new)
+
+    agent.send("hello")
+
+    # An empty assistant message carries nothing, and serializes to
+    # `content: null` with no tool_calls — which providers reject, breaking
+    # every later turn in the session.
+    agent.messages.map(&.role).should eq([Smith::LLM::Role::User])
+  end
+
+  it "still ends the turn rather than looping" do
+    provider = EmptyResponseProvider.new
+    agent = Smith::Agent.new(provider: provider, registry: Smith::Tools::Registry.new)
+
+    completed = 0
+    agent.on_event { |e| completed += 1 if e.is_a?(Smith::Events::TurnCompleted) }
+
+    agent.send("hello")
+
+    provider.calls.should eq(1)
+    completed.should eq(1)
+  end
+end
