@@ -189,6 +189,38 @@ Two details worth knowing:
 - **Ollama streams OpenAI-shaped SSE, not NDJSON**, because smith talks to its `/v1/chat/completions` endpoint. OpenRouter, OpenAI and Ollama therefore share one reader; Anthropic has its own for its named-event format.
 - **A stream that dies after text has already appeared is not retried.** Replaying the request would print the same text a second time. Failures before the first token — connection, HTTP status — still go through the normal retry handler.
 
+### Thinking
+
+Anthropic models can reason before they answer. smith keeps those blocks in the transcript — the API rejects the next request otherwise, because a thinking block carries a signature that has to come back untouched — and renders them as they stream, so a long research phase is no longer silent.
+
+Off by default; it costs tokens:
+
+```bash
+smith --think "why does this test fail only on Linux?"
+```
+
+```toml
+[defaults]
+thinking = true
+
+[providers.anthropic]
+thinking_effort = "medium"       # low | medium | high | xhigh | max
+```
+
+`thinking_effort` is how deep the model is asked to think — the model still decides per request whether it needs to. `medium` is the default; `high` and above suit long agentic runs, `low` short lookups.
+
+For OpenAI the equivalent knob is `reasoning_effort`, which used to be hardcoded:
+
+```toml
+[providers.openai]
+reasoning_effort = "none"        # none | low | medium | high
+```
+
+Two details worth knowing:
+
+- **Anthropic models older than 4.6** take a fixed token budget instead of an effort level. That form is unset on purpose, because current models reject it with a 400; set `thinking_budget` under `[providers.anthropic]` only when you actually run such a model, and keep it below `max_tokens` — smith checks that before sending and says so plainly rather than passing the provider's error through.
+- **Compaction drops thinking blocks when it summarises old turns**, since they are large and worthless to a summary. Blocks in turns that have not been compacted stay untouched, so the signature requirement holds.
+
 ### Prompt Caching
 
 Every turn resends the whole transcript, so a 50-turn session pays for the system prompt and all tool definitions 50 times. For Anthropic, smith marks that prefix as cacheable — reads cost 0.1x the normal input price.
@@ -829,6 +861,7 @@ Options:
       --trust-hooks          Trust this project's hooks without asking (they run arbitrary commands)
       --plan                 Start in plan mode: research only, until you approve a plan
       --json                 Emit JSON Lines on stdout (headless 'run' only)
+      --think                Enable thinking (Anthropic); --no-think turns it off
       --no-stream            Wait for the complete response instead of streaming it
   -v, --version              Print version information
   -h, --help                 Show help banner

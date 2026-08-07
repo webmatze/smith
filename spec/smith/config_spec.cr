@@ -502,3 +502,39 @@ describe "web settings" do
     end
   end
 end
+
+describe "thinking settings" do
+  it "is off by default, and leaves the legacy budget unset" do
+    with_sandbox do |temp_dir, _home|
+      config = Smith::Config.load(make_project(temp_dir))
+
+      config.thinking?.should be_false
+      config.thinking_effort.should eq("medium")
+      # Setting it would make current Anthropic models reject every request.
+      config.thinking_budget.should be_nil
+      config.reasoning_effort.should eq("none")
+    end
+  end
+
+  it "reads all four" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [defaults]
+        thinking = true
+
+        [providers.anthropic]
+        thinking_effort = "high"
+        thinking_budget = 8000
+
+        [providers.openai]
+        reasoning_effort = "high"
+        TOML
+
+      config = Smith::Config.load(project)
+      config.thinking?.should be_true
+      config.thinking_effort.should eq("high")
+      config.thinking_budget.should eq(8000)
+      config.reasoning_effort.should eq("high")
+    end
+  end
+end

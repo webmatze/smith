@@ -17,6 +17,7 @@ module Smith::LLM
       @api_key : String = ENV.fetch("OPENAI_API_KEY", ""),
       @default_model : String = DEFAULT_MODEL,
       @timeouts : Timeouts = Timeouts.default,
+      @reasoning_effort : String = "none",
     )
       if @api_key.empty?
         raise ArgumentError.new("OpenAI API key is missing. Set OPENAI_API_KEY environment variable.")
@@ -73,7 +74,7 @@ module Smith::LLM
           json.object do
             json.field "model", model
 
-            json.field "reasoning_effort", "none"
+            json.field "reasoning_effort", @reasoning_effort
 
             if streaming
               json.field "stream", true

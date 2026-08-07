@@ -35,6 +35,7 @@ module Smith
     @agent_name : String? = nil
     @config : Config
     @todos = TodoList.new
+    @thinking : Bool? = nil
     @trust_hooks : Bool = false
     @hooks : Hooks::Runner? = nil
     @session_id : String = "headless"
@@ -132,6 +133,14 @@ module Smith
 
         opts.on("--agent NAME", "Run the main thread as the agent defined in .smith/agents/NAME.md") do |name|
           @agent_name = name
+        end
+
+        opts.on("--think", "Enable extended thinking (Anthropic)") do
+          @thinking = true
+        end
+
+        opts.on("--no-think", "Disable extended thinking") do
+          @thinking = false
         end
 
         opts.on("--trust-hooks", "Trust this project's hooks without asking (they run arbitrary commands)") do
@@ -245,7 +254,7 @@ module Smith
       when "anthropic"
         LLM::Anthropic.new(api_key: require_api_key("ANTHROPIC_API_KEY"), default_model: default_m, timeouts: timeouts, cache: @config.cache_for(name))
       when "openai"
-        LLM::OpenAI.new(api_key: require_api_key("OPENAI_API_KEY"), default_model: default_m, timeouts: timeouts)
+        LLM::OpenAI.new(api_key: require_api_key("OPENAI_API_KEY"), default_model: default_m, timeouts: timeouts, reasoning_effort: @config.reasoning_effort)
       else
         STDERR.puts "❌ Error: Unknown provider '#{provider_name}'."
         STDERR.puts "   Known providers: #{Config::BUILTIN_MODELS.keys.join(", ")}"
@@ -398,6 +407,15 @@ module Smith
       FileUtils.rm_rf(jobs.dir) if @session_id == "headless" && Dir.exists?(jobs.dir)
     end
 
+    # Only Anthropic implements thinking in the form smith speaks, so asking
+    # for it elsewhere would just be an unknown request field.
+    private def thinking_enabled? : Bool
+      return false unless effective_provider_name.downcase == "anthropic"
+
+      wanted = @thinking
+      wanted.nil? ? @config.thinking? : wanted
+    end
+
     private def plan_session : PlanSession
       @plan ||= PlanSession.new(effective_mode, build_plan_gate)
     end
@@ -510,7 +528,9 @@ module Smith
         messages: messages,
         max_context_tokens: @config.context.max_tokens,
         stream: @stream.nil? ? @config.stream? : @stream.not_nil!,
-        hooks: hooks
+        hooks: hooks,
+        thinking_effort: thinking_enabled? ? @config.thinking_effort : nil,
+        thinking_budget: thinking_enabled? ? @config.thinking_budget : nil
       )
 
       agent.on_event do |event|

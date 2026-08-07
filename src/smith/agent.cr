@@ -44,6 +44,8 @@ module Smith
       @max_context_tokens : Int32 = Config::DEFAULT_MAX_CONTEXT_TOKENS,
       @stream : Bool = true,
       @hooks : Hooks::Runner = Hooks::Runner.new,
+      @thinking_effort : String? = nil,
+      @thinking_budget : Int32? = nil,
     )
       @messages = messages || Array(LLM::Message).new
       @cumulative_usage = LLM::Usage.new(0, 0, 0)
@@ -88,10 +90,13 @@ module Smith
           system: @system_prompt,
           messages: @messages,
           tools: @registry.specs,
-          stream: @stream
+          stream: @stream,
+          thinking_effort: @thinking_effort,
+          thinking_budget: @thinking_budget
         )
 
         response = begin
+          @provider.on_thinking = ->(chunk : String) { emit(Events::ThinkingDelta.new(chunk)) }
           @provider.complete_streaming(request) do |delta|
             emit(Events::AssistantTextDelta.new(delta))
           end
@@ -109,6 +114,11 @@ module Smith
         response.content.each do |block|
           if block.type.text? && (txt = block.text)
             emit(Events::AssistantText.new(txt))
+          elsif block.type.thinking? && (txt = block.text)
+            emit(Events::ThinkingBlock.new(txt))
+          elsif block.type.redacted_thinking?
+            # The content is encrypted; only its presence is reportable.
+            emit(Events::ThinkingBlock.new("", redacted: true))
           end
         end
 
@@ -248,7 +258,10 @@ module Smith
     # or drag the main conversation's history along.
     private def summarize_prefix(prefix : Array(LLM::Message)) : String
       transcript = prefix.map do |message|
-        text = message.content.compact_map(&.text).join("\n")
+        # Thinking is dropped rather than summarised: it is bulky, worthless to
+        # a summary, and the turns it belonged to are being replaced anyway, so
+        # no signature is left dangling.
+        text = message.content.reject(&.thinking?).compact_map(&.text).join("\n")
         "#{message.role}: #{text}"
       end.join("\n\n")
 

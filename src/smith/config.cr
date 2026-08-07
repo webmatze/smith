@@ -39,6 +39,10 @@ module Smith
     DEFAULT_MODE               = "normal"
     DEFAULT_MAX_CONTEXT_TOKENS = 120_000
 
+    DEFAULT_THINKING         = false
+    DEFAULT_THINKING_EFFORT  = "medium"
+    DEFAULT_REASONING_EFFORT = "none"
+
     DEFAULT_WEB_ALLOW_PRIVATE = false
     DEFAULT_WEB_MAX_BYTES     = 256 * 1024
     DEFAULT_SEARCH_PROVIDER   = "none"
@@ -377,6 +381,29 @@ module Smith
         timeout: fields["timeout"]?.try(&.as_i?) || Hooks::DEFAULT_TIMEOUT,
         once: fields["once"]?.try(&.as_bool?) || false
       )
+    end
+
+    # Extended thinking is off by default: it costs tokens, and only Anthropic
+    # supports it in the form smith implements.
+    def thinking? : Bool
+      value = lookup("defaults", "thinking").try(&.as_bool?)
+      value.nil? ? DEFAULT_THINKING : value
+    end
+
+    # How deep to think: low | medium | high | xhigh | max.
+    def thinking_effort : String
+      lookup("providers", "anthropic", "thinking_effort").try(&.as_s?) || DEFAULT_THINKING_EFFORT
+    end
+
+    # Only for Anthropic models older than 4.6, which take a token budget
+    # instead of an effort level. Unset on purpose: current models reject it.
+    def thinking_budget : Int32?
+      lookup("providers", "anthropic", "thinking_budget").try(&.as_i?)
+    end
+
+    # Was hardcoded in the OpenAI adapter.
+    def reasoning_effort : String
+      lookup("providers", "openai", "reasoning_effort").try(&.as_s?) || DEFAULT_REASONING_EFFORT
     end
 
     # Consumed by Tools::WebFetch and Tools::WebSearch via CLI#build_agent.

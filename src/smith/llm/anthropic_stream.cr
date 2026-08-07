@@ -13,15 +13,18 @@ module Smith::LLM
   #   content_block_stop
   #   message_delta        -> stop_reason, output tokens
   module AnthropicStream
+    # Thinking arrives like any other block: a start, a run of deltas, and a
+    # signature delta at the end.
     private struct PartialBlock
       property type : String = "text"
       property text : String = ""
       property id : String = ""
       property name : String = ""
       property partial_json : String = ""
+      property signature : String = ""
     end
 
-    def self.read(io : IO, default_model : String, &on_delta : String -> Nil) : Response
+    def self.read(io : IO, default_model : String, on_thinking : Proc(String, Nil)? = nil, &on_delta : String -> Nil) : Response
       blocks = Hash(Int32, PartialBlock).new
       id = ""
       model = default_model
@@ -75,6 +78,17 @@ module Smith::LLM
               partial.text += chunk
               on_delta.call(chunk)
             end
+          when "thinking_delta"
+            # Deliberately not pushed through on_delta: thinking has its own
+            # event, so anything listening for the answer is unaffected.
+            if chunk = delta["thinking"]?.try(&.as_s?)
+              partial.text += chunk
+              on_thinking.try &.call(chunk)
+            end
+          when "signature_delta"
+            if chunk = delta["signature"]?.try(&.as_s?)
+              partial.signature += chunk
+            end
           when "input_json_delta"
             # Tool arguments arrive as fragments and only form valid JSON once
             # the block stops, so they are stitched together first.
@@ -120,6 +134,10 @@ module Smith::LLM
         case partial.type
         when "text"
           result << ContentBlock.text(partial.text) unless partial.text.empty?
+        when "thinking"
+          result << ContentBlock.thinking(partial.text, partial.signature.presence)
+        when "redacted_thinking"
+          result << ContentBlock.redacted_thinking(partial.text)
         when "tool_use"
           next if partial.name.empty?
 

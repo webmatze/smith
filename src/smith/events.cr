@@ -147,5 +147,23 @@ module Smith::Events
     end
   end
 
+  # The model's own reasoning, kept clearly apart from its answer. Separate
+  # event types on purpose: anything listening for assistant_text keeps working
+  # unchanged whether thinking is on or off.
+  class ThinkingDelta < Event
+    getter text : String
+
+    def initialize(@text : String)
+    end
+  end
+
+  class ThinkingBlock < Event
+    getter text : String
+    getter? redacted : Bool
+
+    def initialize(@text : String, @redacted : Bool = false)
+    end
+  end
+
   alias Listener = Proc(Event, Nil)
 end

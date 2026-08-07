@@ -31,6 +31,8 @@ module Smith::LLM
       Text
       ToolUse
       ToolResult
+      Thinking
+      RedactedThinking
     end
 
     getter type : BlockType
@@ -40,7 +42,13 @@ module Smith::LLM
     getter tool_args : JSON::Any?
     getter is_error : Bool?
 
-    def initialize(@type : BlockType, @text : String? = nil, @tool_call_id : String? = nil, @tool_name : String? = nil, @tool_args : JSON::Any? = nil, @is_error : Bool? = nil)
+    # Anthropic's cryptographic signature over a thinking block. It must go
+    # back exactly as it came: never truncated, normalised or regenerated, or
+    # the next request is rejected. Defaulted in the declaration so sessions
+    # saved before thinking existed still deserialize.
+    getter signature : String? = nil
+
+    def initialize(@type : BlockType, @text : String? = nil, @tool_call_id : String? = nil, @tool_name : String? = nil, @tool_args : JSON::Any? = nil, @is_error : Bool? = nil, @signature : String? = nil)
     end
 
     def self.text(content : String) : ContentBlock
@@ -53,6 +61,20 @@ module Smith::LLM
 
     def self.tool_result(id : String, result : String, is_error : Bool = false) : ContentBlock
       ContentBlock.new(BlockType::ToolResult, text: result, tool_call_id: id, is_error: is_error)
+    end
+
+    def self.thinking(content : String, signature : String? = nil) : ContentBlock
+      ContentBlock.new(BlockType::Thinking, text: content, signature: signature)
+    end
+
+    # The content is encrypted, so it is carried through untouched and never
+    # shown.
+    def self.redacted_thinking(data : String) : ContentBlock
+      ContentBlock.new(BlockType::RedactedThinking, text: data)
+    end
+
+    def thinking? : Bool
+      @type.thinking? || @type.redacted_thinking?
     end
   end
 
@@ -139,6 +161,15 @@ module Smith::LLM
     getter temperature : Float64?
     getter? stream : Bool
 
+    # nil leaves thinking off, which is the default. Otherwise one of
+    # low/medium/high/xhigh/max — how deep the model is asked to think.
+    getter thinking_effort : String?
+
+    # The pre-4.6 form, where thinking was a fixed token budget rather than an
+    # effort level. Current models reject it with a 400, so it is only set when
+    # someone explicitly configures it for an older model.
+    getter thinking_budget : Int32?
+
     def initialize(
       @model : String,
       @messages : Array(Message),
@@ -147,6 +178,8 @@ module Smith::LLM
       @max_tokens : Int32? = nil,
       @temperature : Float64? = nil,
       @stream : Bool = true,
+      @thinking_effort : String? = nil,
+      @thinking_budget : Int32? = nil,
     )
     end
   end
