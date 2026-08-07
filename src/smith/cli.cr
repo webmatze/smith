@@ -238,8 +238,8 @@ module Smith
     private def build_system_prompt : String
       # A definition replaces the built-in preamble outright — the point of
       # --agent is a single-purpose runner, not smith wearing a hat.
-      if agent = main_agent
-        blocks = [agent.system_prompt]
+      if definition = main_agent
+        blocks = [definition.system_prompt]
         blocks << @hook_context.not_nil! if @hook_context
         return blocks.join("\n\n")
       end
@@ -418,9 +418,9 @@ module Smith
       # narrows a child's. Done last, after every tool is registered, so the
       # agent tool is subject to it too: a definition has to ask for `agent`
       # to get it, on the main thread as much as in a child.
-      if agent = main_agent
+      if definition = main_agent
         registry.specs.map(&.name).each do |registered|
-          registry.unregister(registered) unless agent.tool_names.includes?(registered)
+          registry.unregister(registered) unless definition.tool_names.includes?(registered)
         end
       end
 
@@ -549,8 +549,8 @@ module Smith
       if @agents_catalog.agents.size > 0
         puts "   Loaded Agents: #{@agents_catalog.agents.keys.join(", ")}"
       end
-      if agent = main_agent
-        puts "   Running as agent: #{agent.name}"
+      if definition = main_agent
+        puts "   Running as agent: #{definition.name}"
       end
       puts "   Mode: plan (research only — /normal to leave)" if plan_session.plan_mode?
       puts "   Type 'exit' or 'quit' to end session.\n\n"
