@@ -187,7 +187,7 @@ module Smith
       when "ollama"
         LLM::Ollama.new(host: @config.ollama_host, default_model: default_m, timeouts: timeouts)
       when "anthropic"
-        LLM::Anthropic.new(api_key: require_api_key("ANTHROPIC_API_KEY"), default_model: default_m, timeouts: timeouts)
+        LLM::Anthropic.new(api_key: require_api_key("ANTHROPIC_API_KEY"), default_model: default_m, timeouts: timeouts, cache: @config.cache_for(name))
       when "openai"
         LLM::OpenAI.new(api_key: require_api_key("OPENAI_API_KEY"), default_model: default_m, timeouts: timeouts)
       else

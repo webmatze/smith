@@ -282,3 +282,32 @@ describe "hook rendering" do
     line["blocked"].as_bool.should be_true
   end
 end
+
+private def cached_usage
+  Smith::LLM::Usage.new(7126, 132, 7258, cache_creation_tokens: 1226, cache_read_tokens: 5900)
+end
+
+describe "cache usage reporting" do
+  it "shows the cached share next to the prompt tokens (human)" do
+    stdout_io = IO::Memory.new
+    Smith::Output::HumanRenderer.new(stdout_io).finish(cached_usage)
+
+    stdout_io.to_s.should contain("7126 prompt (7126 cached)")
+  end
+
+  it "stays quiet about caching when nothing was cached (human)" do
+    stdout_io = IO::Memory.new
+    Smith::Output::HumanRenderer.new(stdout_io).finish(usage)
+
+    stdout_io.to_s.should_not contain("cached")
+  end
+
+  it "always reports both counters (json)" do
+    stdout_io = IO::Memory.new
+    Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new).finish(cached_usage)
+
+    reported = parsed_lines(stdout_io).first["usage"]
+    reported["cache_creation_tokens"].as_i.should eq(1226)
+    reported["cache_read_tokens"].as_i.should eq(5900)
+  end
+end

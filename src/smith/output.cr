@@ -100,8 +100,12 @@ module Smith::Output
     end
 
     def finish(usage : LLM::Usage) : Nil
+      # Only mentioned when there is something to mention — three of the four
+      # providers never cache anything.
+      cached = usage.cached_tokens.zero? ? "" : " (#{usage.cached_tokens} cached)"
+
       @io.puts "\n--------------------------------------------------"
-      @io.puts "📊 Usage: #{usage.prompt_tokens} prompt + #{usage.completion_tokens} completion = #{usage.total_tokens} total tokens"
+      @io.puts "📊 Usage: #{usage.prompt_tokens} prompt#{cached} + #{usage.completion_tokens} completion = #{usage.total_tokens} total tokens"
     end
   end
 
@@ -206,6 +210,8 @@ module Smith::Output
             json.field "prompt_tokens", usage.prompt_tokens
             json.field "completion_tokens", usage.completion_tokens
             json.field "total_tokens", usage.total_tokens
+            json.field "cache_creation_tokens", usage.cache_creation_tokens
+            json.field "cache_read_tokens", usage.cache_read_tokens
           end
         end
       end

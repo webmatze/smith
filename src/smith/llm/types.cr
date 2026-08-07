@@ -100,7 +100,33 @@ module Smith::LLM
     getter completion_tokens : Int32
     getter total_tokens : Int32
 
-    def initialize(@prompt_tokens : Int32 = 0, @completion_tokens : Int32 = 0, @total_tokens : Int32 = 0)
+    # Anthropic prompt caching. Defaulted here as well as in the constructor,
+    # so sessions saved before these fields existed still deserialize.
+    getter cache_creation_tokens : Int32 = 0
+    getter cache_read_tokens : Int32 = 0
+
+    def initialize(
+      @prompt_tokens : Int32 = 0,
+      @completion_tokens : Int32 = 0,
+      @total_tokens : Int32 = 0,
+      @cache_creation_tokens : Int32 = 0,
+      @cache_read_tokens : Int32 = 0,
+    )
+    end
+
+    # Everything that went through the cache, written or read.
+    def cached_tokens : Int32
+      @cache_creation_tokens + @cache_read_tokens
+    end
+
+    def +(other : Usage) : Usage
+      Usage.new(
+        @prompt_tokens + other.prompt_tokens,
+        @completion_tokens + other.completion_tokens,
+        @total_tokens + other.total_tokens,
+        @cache_creation_tokens + other.cache_creation_tokens,
+        @cache_read_tokens + other.cache_read_tokens
+      )
     end
   end
 

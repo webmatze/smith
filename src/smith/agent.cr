@@ -217,11 +217,7 @@ module Smith
     end
 
     private def update_usage(u : LLM::Usage)
-      @cumulative_usage = LLM::Usage.new(
-        @cumulative_usage.prompt_tokens + u.prompt_tokens,
-        @cumulative_usage.completion_tokens + u.completion_tokens,
-        @cumulative_usage.total_tokens + u.total_tokens
-      )
+      @cumulative_usage += u
     end
   end
 end

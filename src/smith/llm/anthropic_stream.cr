@@ -28,6 +28,8 @@ module Smith::LLM
       stop_reason : String? = nil
       input_tokens = 0
       output_tokens = 0
+      cache_creation_tokens = 0
+      cache_read_tokens = 0
 
       SSE.each_data(io) do |payload|
         event = begin
@@ -41,7 +43,13 @@ module Smith::LLM
           if message = event["message"]?
             id = message["id"]?.try(&.as_s?) || id
             model = message["model"]?.try(&.as_s?) || model
-            input_tokens = message["usage"]?.try(&.["input_tokens"]?).try(&.as_i?) || input_tokens
+            if u = message["usage"]?
+              input_tokens = u["input_tokens"]?.try(&.as_i?) || input_tokens
+              # Streaming is the default path, so without these the saving
+              # would never show up anywhere.
+              cache_creation_tokens = u["cache_creation_input_tokens"]?.try(&.as_i?) || cache_creation_tokens
+              cache_read_tokens = u["cache_read_input_tokens"]?.try(&.as_i?) || cache_read_tokens
+            end
           end
         when "content_block_start"
           index = event["index"]?.try(&.as_i?) || 0
@@ -85,7 +93,13 @@ module Smith::LLM
       end
 
       usage = if input_tokens > 0 || output_tokens > 0
-                Usage.new(input_tokens, output_tokens, input_tokens + output_tokens)
+                Usage.new(
+                  input_tokens,
+                  output_tokens,
+                  input_tokens + output_tokens,
+                  cache_creation_tokens: cache_creation_tokens,
+                  cache_read_tokens: cache_read_tokens
+                )
               end
 
       Response.new(

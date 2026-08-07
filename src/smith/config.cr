@@ -30,6 +30,7 @@ module Smith
     DEFAULT_MODEL       = BUILTIN_MODELS[DEFAULT_PROVIDER]
     DEFAULT_OLLAMA_HOST = "http://localhost:11434"
     DEFAULT_STREAM      = true
+    DEFAULT_CACHE       = true
 
     DEFAULT_CONNECT_TIMEOUT    =  10
     DEFAULT_READ_TIMEOUT       = 120
@@ -189,6 +190,13 @@ module Smith
         lookup("providers", provider_name, "model").try(&.as_s?) ||
         BUILTIN_MODELS[provider_name]? ||
         DEFAULT_MODEL
+    end
+
+    # Anthropic prompt caching. On by default; worth switching off only when
+    # the prompt is too short to reach the cache minimum.
+    def cache_for(provider_name : String) : Bool
+      value = lookup("providers", provider_name, "cache").try(&.as_bool?)
+      value.nil? ? DEFAULT_CACHE : value
     end
 
     def ollama_host : String
