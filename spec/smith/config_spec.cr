@@ -444,3 +444,31 @@ describe "checkpoint settings" do
     end
   end
 end
+
+describe "bash settings" do
+  it "defaults to a two-minute timeout and ten jobs" do
+    with_sandbox do |temp_dir, _home|
+      settings = Smith::Config.load(make_project(temp_dir)).bash
+
+      settings.timeout.should eq(120)
+      settings.max_background_jobs.should eq(10)
+      settings.max_output_bytes.should eq(262_144)
+    end
+  end
+
+  it "reads all three from the config" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [bash]
+        timeout = 30
+        max_background_jobs = 2
+        max_output_bytes = 1024
+        TOML
+
+      settings = Smith::Config.load(project).bash
+      settings.timeout.should eq(30)
+      settings.max_background_jobs.should eq(2)
+      settings.max_output_bytes.should eq(1024)
+    end
+  end
+end

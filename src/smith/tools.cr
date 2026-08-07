@@ -1,6 +1,8 @@
 require "./tools/tool"
 require "./tools/permissions"
+require "./tools/bash_jobs"
 require "./tools/bash"
+require "./tools/bash_output"
 require "./tools/read_file"
 require "./tools/write_file"
 require "./tools/edit_file"

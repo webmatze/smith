@@ -226,9 +226,19 @@ module Smith::Tools
     # to allowing everything: the Registry stays usable as a plain library
     # component. Callers that want to observe or persist the plan — the CLI —
     # pass their own list in.
-    def self.default(approver : Approver = AutoApprover.new, todos : Smith::TodoList = Smith::TodoList.new) : Registry
+    def self.default(
+      approver : Approver = AutoApprover.new,
+      todos : Smith::TodoList = Smith::TodoList.new,
+      jobs : BashJobs? = nil,
+      bash_timeout : Int32 = Bash::DEFAULT_TIMEOUT,
+      max_output_bytes : Int32 = Bash::MAX_OUTPUT_BYTES,
+    ) : Registry
       registry = Registry.new(approver)
-      registry.register(Bash.new)
+
+      bash = Bash.new(jobs: jobs, timeout: bash_timeout, max_output_bytes: max_output_bytes)
+      registry.register(bash)
+      registry.register(BashOutput.new(bash.jobs))
+      registry.register(BashKill.new(bash.jobs))
       registry.register(ReadFile.new)
       registry.register(WriteFile.new)
       registry.register(EditFile.new)

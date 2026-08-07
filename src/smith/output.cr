@@ -80,6 +80,10 @@ module Smith::Output
             end
           end
         end
+      when Events::BashJobStarted
+        @io.puts "\n⏱️  Background job #{event.id} started: #{event.command}"
+      when Events::BashJobExited
+        @io.puts "\n⏱️  Background job #{event.id} #{event.status}"
       when Events::EmptyResponse
         @io.puts "\n⚠️  The model returned an empty response — nothing was recorded. Try rephrasing, or a different model."
       when Events::HookFired
@@ -167,6 +171,18 @@ module Smith::Output
               end
             end
           end
+        end
+      when Events::BashJobStarted
+        emit do |json|
+          json.field "type", "bash_job_started"
+          json.field "id", event.id
+          json.field "command", event.command
+        end
+      when Events::BashJobExited
+        emit do |json|
+          json.field "type", "bash_job_exited"
+          json.field "id", event.id
+          json.field "status", event.status
         end
       when Events::EmptyResponse
         emit do |json|

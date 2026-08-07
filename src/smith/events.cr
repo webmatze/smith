@@ -118,5 +118,23 @@ module Smith::Events
   class EmptyResponse < Event
   end
 
+  # A shell command that outlives its tool call — started explicitly, or moved
+  # to the background when it outran its timeout.
+  class BashJobStarted < Event
+    getter id : String
+    getter command : String
+
+    def initialize(@id : String, @command : String)
+    end
+  end
+
+  class BashJobExited < Event
+    getter id : String
+    getter status : String
+
+    def initialize(@id : String, @status : String)
+    end
+  end
+
   alias Listener = Proc(Event, Nil)
 end

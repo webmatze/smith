@@ -12,6 +12,7 @@ require "./todos"
 require "./plan"
 require "./chat_commands"
 require "./checkpoints"
+require "file_utils"
 require "./hooks"
 require "./trust"
 
@@ -39,6 +40,7 @@ module Smith
     @session_id : String = "headless"
     @hook_context : String? = nil
     @checkpoints : Checkpoints::Store? = nil
+    @bash_jobs : Tools::BashJobs? = nil
     @rewind_to : String? = nil
     @files_only : Bool = false
     @dry_run : Bool = false
@@ -372,6 +374,30 @@ module Smith
       ).allow?(project, digest, @config.hooks.map(&.command))
     end
 
+    # Job logs live beside the session they belong to. A headless run has no
+    # session, so it gets a per-process directory instead — cleaned up when the
+    # run ends, along with the jobs themselves.
+    private def bash_jobs_dir : String
+      return File.join(@session_store.session_dir(@session_id), "bash") unless @session_id == "headless"
+
+      File.join(Dir.tempdir, "smith-bash-#{Process.pid}")
+    end
+
+    # Nothing a session started may outlive it: an orphaned dev server holding
+    # its port is a bug, not a feature.
+    private def shutdown_bash_jobs : Nil
+      jobs = @bash_jobs
+      return if jobs.nil?
+
+      running = jobs.running
+      unless running.empty?
+        puts "\n🛑 Stopping #{running.size} background job#{running.size == 1 ? "" : "s"}: #{running.map(&.id).join(", ")}"
+      end
+
+      jobs.shutdown_all
+      FileUtils.rm_rf(jobs.dir) if @session_id == "headless" && Dir.exists?(jobs.dir)
+    end
+
     private def plan_session : PlanSession
       @plan ||= PlanSession.new(effective_mode, build_plan_gate)
     end
@@ -407,7 +433,25 @@ module Smith
       # Built once and kept, so the [a]lways answers survive a plan-mode
       # detour instead of being asked again afterwards.
       approver = (@real_approver ||= build_approver)
-      registry = Tools::Registry.default(approver, todos: @todos)
+      bash = @config.bash
+      jobs = (@bash_jobs ||= begin
+        created = Tools::BashJobs.new(bash_jobs_dir, max_jobs: bash.max_background_jobs)
+        created.on_start = ->(job : Tools::BashJob) do
+          renderer.handle(Events::BashJobStarted.new(job.id, job.command))
+        end
+        created.on_exit = ->(job : Tools::BashJob) do
+          renderer.handle(Events::BashJobExited.new(job.id, job.status))
+        end
+        created
+      end)
+
+      registry = Tools::Registry.default(
+        approver,
+        todos: @todos,
+        jobs: jobs,
+        bash_timeout: bash.timeout,
+        max_output_bytes: bash.max_output_bytes
+      )
       registry.hooks = hooks
       registry.checkpoints = @checkpoints
 
@@ -518,6 +562,7 @@ module Smith
       renderer.handle(Events::ModeChanged.new(Mode::Plan)) if plan_session.plan_mode?
 
       submit(agent, prompt)
+      shutdown_bash_jobs
       renderer.finish(agent.cumulative_usage)
 
       # A failed provider call must not report success to a calling script.
@@ -623,6 +668,7 @@ module Smith
         @session_store.save(session_data)
       end
 
+      shutdown_bash_jobs
       puts "Session saved to #{@session_store.session_dir(session_data.id)}/session.json"
       puts "Goodbye! ⚒️"
     end
@@ -688,6 +734,7 @@ module Smith
         session_data.usage = agent.cumulative_usage
         session_data.todos = @todos.items
         @session_store.save(session_data)
+        shutdown_bash_jobs
 
         puts "\n\n⚠️  Interrupted — session saved."
         puts "   Resume with: smith resume #{session_data.id}"

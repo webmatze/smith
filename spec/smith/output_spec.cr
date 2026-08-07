@@ -332,3 +332,31 @@ describe "an empty response" do
     parsed_lines(stdout_io).first["type"].as_s.should eq("empty_response")
   end
 end
+
+describe "background job reporting" do
+  it "names the job and its command, then its status (human)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    renderer.handle(Smith::Events::BashJobStarted.new("bash-1", "npm run dev"))
+    renderer.handle(Smith::Events::BashJobExited.new("bash-1", "exited(1)"))
+
+    text = stdout_io.to_s
+    text.should contain("bash-1")
+    text.should contain("npm run dev")
+    text.should contain("exited(1)")
+  end
+
+  it "emits both as their own events (json)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new)
+
+    renderer.handle(Smith::Events::BashJobStarted.new("bash-1", "npm run dev"))
+    renderer.handle(Smith::Events::BashJobExited.new("bash-1", "killed"))
+
+    lines = parsed_lines(stdout_io)
+    lines.map(&.["type"].as_s).should eq(["bash_job_started", "bash_job_exited"])
+    lines[0]["command"].as_s.should eq("npm run dev")
+    lines[1]["status"].as_s.should eq("killed")
+  end
+end

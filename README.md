@@ -18,6 +18,7 @@ It is inspired by and built according to the policy-free agent loop principles o
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers custom agents in `.smith/agents/<name>.md` and `~/.smith/agents/`, sharing the frontmatter parser with skills.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **⏱️ Background Commands (`Smith::Tools::BashJobs`)**: Dev servers and log tails run in the background, and a foreground command that outruns its timeout is moved there rather than killed — so its output is never thrown away.
 - **⏪ Checkpoints & Rewind (`Smith::Checkpoints`)**: Every `write_file` and `edit_file` is snapshotted first, content-addressed, so a run can be taken back — files and transcript — without having committed anything.
 - **🎭 Custom Agents (`Smith::Agents`)**: Specialists defined in `.smith/agents/<name>.md` — own system prompt, tools, model and provider. Delegate to one via `agent_type`, or run the main thread as one with `--agent`.
 - **🔐 Permission Rules (`Smith::Tools::RuleSet`)**: `allow` / `ask` / `deny` rules with path scoping and wildcards. Deny wins over everything, including `--yes`, and reaches read-only tools too.
@@ -136,6 +137,11 @@ max_tokens = 120000
 max_depth    = 3                 # levels of nesting; 0 disables delegation
 max_children = 20                # total spawns per run, shared across levels
 
+[bash]
+timeout             = 120        # seconds before a command is moved to the background
+max_background_jobs = 10
+max_output_bytes    = 262144
+
 [checkpoints]
 enabled         = true           # snapshot files before write_file / edit_file
 max_per_session = 100
@@ -148,7 +154,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
+`[bash]` tunes the command timeout and background jobs — see [Background Commands](#background-commands). `[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
 
 ### Streaming
 
@@ -590,11 +596,54 @@ smith --json run "..." | jq -r 'select(.type=="result") | .text'
 
 While streaming, each token also arrives as `{"type":"assistant_text_delta","text":"..."}`. `assistant_text` and `result` are unchanged, so a consumer written against the non-streaming format keeps working.
 
-Other event types are `todos_updated`, `plan_presented`, `mode_changed`, `hook_fired`, `history_compacted` and `turn_error`.
+Other event types are `bash_job_started`, `bash_job_exited`, `todos_updated`, `plan_presented`, `mode_changed`, `hook_fired`, `history_compacted` and `turn_error`.
 
 **Exit codes** (both modes, not just `--json`): `0` on success, `1` when the turn failed — a provider error or the turn limit. A tool that returns an error is *not* a failed run; that is ordinary agent flow the model handles itself.
 
 `--json` applies to headless runs only; `smith chat --json` exits with an error rather than quietly doing something else.
+
+### Background Commands
+
+A synchronous `bash` makes three everyday things painful: starting a dev server, following a log, waiting out a long build. All three block the agent until the timeout, and then the command is killed and everything it printed is lost.
+
+```json
+{"command": "npm run dev", "background": true}
+```
+
+```text
+Started in background with id bash-1. Use bash_output to read its output.
+```
+
+**A foreground command that outruns its timeout is moved to the background instead of being killed** — the single most useful part of this. For a build, discarding two minutes of output is regularly the wrong call:
+
+```text
+Command still running after 120s; moved to background as bash-1.
+Use bash_output with id bash-1 to read the rest, or bash_kill to stop it.
+
+Output so far:
+LOS
+```
+
+Nothing is re-attached or re-run: output goes to the job's log file from the first byte, so the deadline only decides how long smith keeps waiting.
+
+Two more tools come with it:
+
+| Tool | Purpose |
+|---|---|
+| `bash_output` | What the job produced **since the last call**, plus its status. Incremental, so following a long log does not resend it every time. Takes an optional `filter` regex. |
+| `bash_kill` | Stops a job. Mutating, so it passes the approval gate. |
+
+```text
+[bash-1] exited(0) — running for 5.0s
+tick 1
+tick 2
+```
+
+#### Lifecycle
+
+Jobs belong to the session that started them and are terminated when it ends — SIGTERM, then SIGKILL after five seconds — including on Ctrl+C. An orphaned dev server still holding its port is a bug, not a feature.
+
+Output is written to `~/.smith/sessions/<id>/bash/<job>.log` rather than kept in memory, so a chatty job cannot grow without bound. A headless run has no session, so its jobs use a per-process temporary directory that is removed with them.
 
 ### Checkpoints & Rewind
 
@@ -759,7 +808,9 @@ src/
         ├── registry.cr      # Tool registry, approval gate & Fiber parallel execution scheduler
         ├── approval.cr      # Approver strategies (prompt/auto/deny/plan/rule) & bash allowlist matching
         ├── permissions.cr   # allow/ask/deny rules, path normalisation & pattern matching
-        ├── bash.cr          # Shell command execution tool
+        ├── bash.cr          # Shell command execution tool, with auto-backgrounding
+        ├── bash_jobs.cr     # Background job registry, logs and lifecycle
+        ├── bash_output.cr   # bash_output & bash_kill tools
         ├── read_file.cr     # File reading tool
         ├── write_file.cr    # File writing tool
         ├── edit_file.cr     # Precise string replacement tool
