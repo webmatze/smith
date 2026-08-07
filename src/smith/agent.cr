@@ -9,6 +9,16 @@ module Smith
   class Agent
     MAX_TURNS = 500
 
+    # A model that keeps running into its output limit would otherwise cost
+    # without bound.
+    MAX_CONTINUATIONS = 3
+
+    CONTINUE_TEXT = "Your previous response was cut off at the output token limit. " \
+                    "Continue exactly where you left off. Do not repeat what you already wrote and do not start over."
+
+    RETRY_SMALLER = "Your tool call was cut off at the output token limit and was discarded. " \
+                    "Retry with a smaller payload — for large files, write them in multiple smaller edits."
+
     # A stop hook that never goes green — `make test` on a red suite — would
     # otherwise keep the loop alive until MAX_TURNS.
     MAX_STOP_CONTINUATIONS = 3
@@ -65,6 +75,7 @@ module Smith
     private def run_loop
       turns = 0
       continuations = 0
+      truncations = 0
       @stop_requested = false
 
       while turns < MAX_TURNS
@@ -99,6 +110,21 @@ module Smith
           if block.type.text? && (txt = block.text)
             emit(Events::AssistantText.new(txt))
           end
+        end
+
+        # Handled before anything else looks at the content: a response cut
+        # off at the output limit is not a finished turn, and a tool call
+        # inside one is not safe to run.
+        if response.stop.max_tokens?
+          if truncations >= MAX_CONTINUATIONS
+            emit(Events::TurnError.new("Response hit the output token limit #{MAX_CONTINUATIONS + 1} times in a row; giving up."))
+            return
+          end
+
+          truncations += 1
+          emit(Events::ResponseContinued.new(truncations, MAX_CONTINUATIONS))
+          continue_truncated(response)
+          next
         end
 
         # Check for tool calls
@@ -177,6 +203,19 @@ module Smith
       end
 
       emit(Events::TurnError.new("Exceeded max limit of #{MAX_TURNS} turns."))
+    end
+
+    # Text can simply be carried on. A tool call cannot: half a call cannot be
+    # completed, and a tool_use with no matching tool_result is rejected by
+    # every provider — so the incomplete blocks are dropped and the model is
+    # asked to retry smaller. That is the case that matters in practice, where
+    # a large write_file payload runs out of room.
+    private def continue_truncated(response : LLM::Response) : Nil
+      truncated_calls = response.content.any?(&.type.tool_use?)
+      keep = truncated_calls ? response.content.reject(&.type.tool_use?) : response.content
+
+      @messages << LLM::Message.assistant_with_blocks(keep) unless keep.empty?
+      @messages << LLM::Message.user(truncated_calls ? RETRY_SMALLER : CONTINUE_TEXT)
     end
 
     private def stop_payload(response : LLM::Response) : JSON::Any

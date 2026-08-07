@@ -151,6 +151,28 @@ module Smith::LLM
     end
   end
 
+  # Why the model stopped, normalised across providers.
+  #
+  # Anthropic says end_turn/tool_use/max_tokens; the OpenAI shape — which
+  # OpenAI, OpenRouter and Ollama all speak — says stop/tool_calls/length.
+  enum StopReason
+    EndTurn
+    ToolUse
+    MaxTokens
+    StopSequence
+    Unknown
+
+    def self.from_raw(raw : String?) : StopReason
+      case raw.try(&.strip.downcase)
+      when "end_turn", "stop"       then EndTurn
+      when "tool_use", "tool_calls" then ToolUse
+      when "max_tokens", "length"   then MaxTokens
+      when "stop_sequence"          then StopSequence
+      else                               Unknown
+      end
+    end
+  end
+
   class Response
     getter id : String
     getter model : String
@@ -165,6 +187,13 @@ module Smith::LLM
       @stop_reason : String? = nil,
       @usage : Usage? = nil,
     )
+    end
+
+    # Derived rather than mapped per adapter: every provider path already
+    # carries its raw value here, so one normalisation covers all five —
+    # including both streaming readers.
+    def stop : StopReason
+      StopReason.from_raw(@stop_reason)
     end
   end
 end
