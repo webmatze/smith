@@ -13,7 +13,11 @@ module Smith::LLM
     getter api_key : String
     getter default_model : String
 
-    def initialize(@api_key : String = ENV.fetch("OPENROUTER_API_KEY", ""), @default_model : String = "qwen/qwen3.8-max")
+    def initialize(
+      @api_key : String = ENV.fetch("OPENROUTER_API_KEY", ""),
+      @default_model : String = "qwen/qwen3.8-max",
+      @timeouts : Timeouts = Timeouts.default,
+    )
       if @api_key.empty?
         raise ArgumentError.new("OpenRouter API key is missing. Set OPENROUTER_API_KEY environment variable.")
       end
@@ -147,7 +151,7 @@ module Smith::LLM
         "Content-Type"  => "application/json",
       }
 
-      client = HTTP::Client.new(uri)
+      client = build_client(uri)
       begin
         response = client.post(uri.path, headers: headers, body: payload)
 

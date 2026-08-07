@@ -105,15 +105,18 @@ module Smith
       # -m wins over the config/env chain; nil means "ask the config".
       default_m = @model || @config.model_for(name)
 
+      http = @config.http
+      timeouts = LLM::Timeouts.from_seconds(http.connect_timeout, http.read_timeout)
+
       case name
       when "openrouter"
-        LLM::OpenRouter.new(api_key: require_api_key("OPENROUTER_API_KEY"), default_model: default_m)
+        LLM::OpenRouter.new(api_key: require_api_key("OPENROUTER_API_KEY"), default_model: default_m, timeouts: timeouts)
       when "ollama"
-        LLM::Ollama.new(host: @config.ollama_host, default_model: default_m)
+        LLM::Ollama.new(host: @config.ollama_host, default_model: default_m, timeouts: timeouts)
       when "anthropic"
-        LLM::Anthropic.new(api_key: require_api_key("ANTHROPIC_API_KEY"), default_model: default_m)
+        LLM::Anthropic.new(api_key: require_api_key("ANTHROPIC_API_KEY"), default_model: default_m, timeouts: timeouts)
       when "openai"
-        LLM::OpenAI.new(api_key: require_api_key("OPENAI_API_KEY"), default_model: default_m)
+        LLM::OpenAI.new(api_key: require_api_key("OPENAI_API_KEY"), default_model: default_m, timeouts: timeouts)
       else
         puts "❌ Error: Unknown provider '#{provider_name}'."
         puts "   Known providers: #{Config::BUILTIN_MODELS.keys.join(", ")}"
@@ -261,6 +264,8 @@ module Smith
       end
       puts "   Type 'exit' or 'quit' to end session.\n\n"
 
+      install_interrupt_handler(session_data, agent)
+
       loop do
         print "\n\e[36msmith>\e[0m "
         STDOUT.flush
@@ -285,6 +290,24 @@ module Smith
 
       puts "Session saved to #{@session_store.sessions_dir}/#{session_data.id}.json"
       puts "Goodbye! ⚒️"
+    end
+
+    # Without this, Ctrl+C kills the process outright and the turn in flight is
+    # lost — the loop only persists *after* a completed turn. The handler fires
+    # anywhere, including mid provider call and while blocked on STDIN.gets.
+    # Session::Store#save writes through AtomicFile, so an interrupt cannot
+    # leave a half-written session behind.
+    private def install_interrupt_handler(session_data : Session::Data, agent : Agent)
+      Signal::INT.trap do
+        session_data.messages = agent.messages
+        session_data.usage = agent.cumulative_usage
+        @session_store.save(session_data)
+
+        puts "\n\n⚠️  Interrupted — session saved."
+        puts "   Resume with: smith resume #{session_data.id}"
+        STDOUT.flush
+        exit(130)
+      end
     end
 
     private def list_sessions

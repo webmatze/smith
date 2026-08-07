@@ -36,6 +36,12 @@ module Smith::LLM
 
     private def self.retryable?(ex : Exception) : Bool
       case ex
+      when IO::TimeoutError
+        # An elapsed timeout is a deliberate give-up, not a transient blip.
+        # Retrying it would multiply the wait the user configured — with the
+        # 120s default and 3 retries that is roughly 8 minutes of silence.
+        # Must stay above the IO::Error branch, which would otherwise match it.
+        false
       when ResponseError
         status = ex.status_code
         status == 429 || status >= 500
