@@ -152,6 +152,14 @@ module Smith::Checkpoints
       entries.sort_by(&.sequence)
     end
 
+    # What a bare `rewind` acts on: the newest checkpoint, so one invocation
+    # undoes one step. Rewinding the whole session by accident is the
+    # expensive direction to get wrong, and `--to <id>` reaches further on
+    # purpose.
+    def default_target : Entry?
+      list.last?
+    end
+
     def blob_count : Int32
       return 0 unless Dir.exists?(blobs_dir)
 

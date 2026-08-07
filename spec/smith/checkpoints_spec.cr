@@ -297,3 +297,58 @@ describe "a rewind that could not finish" do
     end
   end
 end
+
+describe "how far a rewind goes" do
+  # Undoing one step is what "undo" means everywhere else, and it is what the
+  # issue specifies as the default. Rolling the whole session back by accident
+  # is the expensive direction to get wrong.
+  it "undoes only the newest checkpoint by default" do
+    with_store do |store, work|
+      path = File.join(work, "a.txt")
+      File.write(path, "v1")
+      simulate(store, "edit_file", path, "v2")
+      simulate(store, "edit_file", path, "v3")
+
+      store.rewind_to(store.default_target.not_nil!)
+
+      File.read(path).should eq("v2")
+      # The earlier checkpoint survives, so a second rewind goes back further.
+      store.list.map(&.sequence).should eq([1])
+    end
+  end
+
+  it "walks all the way back one step at a time" do
+    with_store do |store, work|
+      path = File.join(work, "a.txt")
+      File.write(path, "v1")
+      simulate(store, "edit_file", path, "v2")
+      simulate(store, "edit_file", path, "v3")
+
+      store.rewind_to(store.default_target.not_nil!)
+      store.rewind_to(store.default_target.not_nil!)
+
+      File.read(path).should eq("v1")
+      store.list.should be_empty
+    end
+  end
+
+  it "reaches everything from an explicit target onwards" do
+    with_store do |store, work|
+      path = File.join(work, "a.txt")
+      File.write(path, "v1")
+      simulate(store, "edit_file", path, "v2")
+      simulate(store, "edit_file", path, "v3")
+
+      # --to 1 means "back to the state before checkpoint 1".
+      store.rewind_to(store.list.first)
+
+      File.read(path).should eq("v1")
+    end
+  end
+
+  it "has no target when there is nothing to undo" do
+    with_store do |store, _work|
+      store.default_target.should be_nil
+    end
+  end
+end

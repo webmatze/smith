@@ -112,7 +112,7 @@ module Smith
           @auto_approve = true
         end
 
-        opts.on("--to CHECKPOINT", "rewind: the checkpoint to go back to (default: the oldest)") do |value|
+        opts.on("--to CHECKPOINT", "rewind: undo this checkpoint and everything after it (default: only the newest)") do |value|
           @rewind_to = value
         end
 
@@ -655,7 +655,7 @@ module Smith
         return
       end
 
-      result = store.rewind_to(entries.first, force: false)
+      result = store.rewind_to(entries.last, force: false)
       result.restored.each { |path| puts "   restored #{path}" }
       result.deleted.each { |path| puts "   deleted  #{path}" }
 
@@ -703,6 +703,10 @@ module Smith
 
       if data.nil?
         STDERR.puts "❌ No sessions found."
+        # `smith run` is stateless, so it has no session to hang checkpoints
+        # off. Saying so beats leaving the user to guess.
+        STDERR.puts "   Checkpoints belong to a session; `smith run` does not create one."
+        STDERR.puts "   Use `smith chat` (or `smith resume`) for a run you may want to undo."
         exit(1)
       end
 
@@ -750,7 +754,8 @@ module Smith
         return
       end
 
-      # Without --to, go back as far as this session's checkpoints reach.
+      # Without --to this undoes the newest checkpoint only — one invocation,
+      # one step back.
       target = if wanted = @rewind_to
                  found = entries.find { |entry| entry.id == wanted || entry.sequence.to_s == wanted }
                  if found.nil?
@@ -760,21 +765,25 @@ module Smith
                  end
                  found
                else
-                 entries.first
+                 entries.last
                end
+
+      undone = entries.count { |entry| entry.sequence >= target.sequence }
+      scope = undone == 1 ? "checkpoint #{target.id}" : "checkpoints #{target.id}–#{entries.last.id}"
 
       result = store.rewind_to(target, force: @force, dry_run: @dry_run)
 
       if @dry_run
-        puts "🔍 Dry run — nothing was changed."
+        puts "🔍 Dry run — nothing was changed. Undoing #{scope} would:"
       elsif result.applied?
-        puts "⏪ Rewound to checkpoint #{target.id}."
+        puts "⏪ Undid #{scope} — back to the state before #{target.id}."
       else
-        puts "🚫 Rewind to checkpoint #{target.id} stopped — nothing was changed."
+        puts "🚫 Undoing #{scope} stopped — nothing was changed."
       end
 
       result.restored.each { |path| puts "   #{result.applied? ? "restored" : "would restore"} #{path}" }
-      result.deleted.each { |path| puts "   #{result.applied? ? "deleted " : "would delete"} #{path}" }
+      # Spelled out: the file is gone because it did not exist before this point.
+      result.deleted.each { |path| puts "   #{result.applied? ? "deleted " : "would delete"} #{path} (did not exist before #{target.id})" }
 
       unless result.conflicts.empty?
         puts "\n⚠️  Changed outside smith since the snapshot:"
@@ -785,6 +794,9 @@ module Smith
       if result.restored.empty? && result.deleted.empty? && result.conflicts.empty?
         puts "   (no file changes to undo)"
       end
+
+      remaining = store.list.size
+      puts "   #{remaining} earlier checkpoint#{remaining == 1 ? "" : "s"} left — run rewind again to go further." if remaining > 0 && result.applied? && !@dry_run
 
       puts "\nChanges made by bash are not covered by checkpoints."
       return if @dry_run || @files_only || !result.applied?

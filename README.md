@@ -605,9 +605,24 @@ Before every `write_file` and `edit_file`, the file's current content is snapsho
 ```bash
 smith checkpoints                  # list them for the latest session
 smith rewind --dry-run             # show what would change
-smith rewind                       # undo files and cut the transcript back
-smith rewind --to 0003             # only back to a specific point
+smith rewind                       # undo the newest checkpoint — one step back
+smith rewind --to 0001             # undo 0001 and everything after it
 smith rewind --files-only          # leave the transcript alone
+```
+
+**A bare `rewind` undoes one step**, the way undo works everywhere else, and tells you how much is left:
+
+```text
+⏪ Undid checkpoint 0002 — back to the state before 0002.
+   restored /tmp/rw4/AGENT.md
+   1 earlier checkpoint left — run rewind again to go further.
+```
+
+`--to <id>` reaches further on purpose: it undoes that checkpoint **and everything after it**, landing you in the state from before it. A file that only came into existence during the run is deleted rather than emptied, and the reason is spelled out:
+
+```text
+⏪ Undid checkpoint 0001 — back to the state before 0001.
+   deleted  /tmp/rw4/AGENT.md (did not exist before 0001)
 ```
 
 `/rewind` does the same inside a chat session. Like `/plan`, it is resolved before skill expansion.
@@ -620,6 +635,10 @@ ID     WHEN                 TOOL         PATH
 ```
 
 A file the run *created* is deleted again on rewind, not merely emptied.
+
+#### Two things checkpoints do not cover
+
+**`smith run` has no checkpoints.** They belong to a session, and a headless run does not create one. Use `smith chat` for anything you might want to undo. (Making headless runs checkpointable is a worthwhile follow-up — it is the `--yes` case, where an undo matters most.)
 
 #### `bash` is not covered
 
@@ -679,7 +698,7 @@ Options:
   -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
   -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
       --auto-approve         Alias for --yes
-      --to CHECKPOINT        rewind: the checkpoint to go back to (default: the oldest)
+      --to CHECKPOINT        rewind: undo this checkpoint and everything after it (default: only the newest)
       --files-only           rewind: restore files but leave the transcript alone
       --dry-run              rewind: show what would change, change nothing
       --force                rewind: overwrite files changed outside smith since the snapshot
