@@ -1,6 +1,7 @@
 require "json"
 require "./tool"
 require "./approval"
+require "./todo_write"
 require "../llm/types"
 
 module Smith::Tools
@@ -160,8 +161,13 @@ module Smith::Tools
       end
     end
 
-    # Factory helper to register default standard toolset
-    def self.default(approver : Approver = AutoApprover.new) : Registry
+    # Factory helper to register default standard toolset.
+    #
+    # `todos` defaults to a fresh list for the same reason `approver` defaults
+    # to allowing everything: the Registry stays usable as a plain library
+    # component. Callers that want to observe or persist the plan — the CLI —
+    # pass their own list in.
+    def self.default(approver : Approver = AutoApprover.new, todos : Smith::TodoList = Smith::TodoList.new) : Registry
       registry = Registry.new(approver)
       registry.register(Bash.new)
       registry.register(ReadFile.new)
@@ -169,6 +175,7 @@ module Smith::Tools
       registry.register(EditFile.new)
       registry.register(Grep.new)
       registry.register(Glob.new)
+      registry.register(TodoWrite.new(todos))
       registry
     end
   end

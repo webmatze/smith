@@ -166,3 +166,59 @@ describe Smith::Output::HumanRenderer do
     renderer.exit_code.should eq(1)
   end
 end
+
+private def todos_updated(*items : Tuple(String, Smith::TodoList::Status))
+  Smith::Events::TodosUpdated.new(
+    items.to_a.map { |(content, status)| Smith::TodoList::Item.new(content, status) }
+  )
+end
+
+describe "todo rendering" do
+  it "renders the list with a marker per status (human)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    renderer.handle(todos_updated(
+      {"Write the spec", Smith::TodoList::Status::Completed},
+      {"Implement the tool", Smith::TodoList::Status::InProgress},
+      {"Update the README", Smith::TodoList::Status::Pending},
+    ))
+
+    text = stdout_io.to_s
+    text.should contain("☑")
+    text.should contain("▶")
+    text.should contain("☐")
+    text.should contain("Write the spec")
+    text.should contain("Implement the tool")
+    text.should contain("Update the README")
+  end
+
+  it "says so when the list was cleared (human)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    renderer.handle(Smith::Events::TodosUpdated.new([] of Smith::TodoList::Item))
+
+    stdout_io.to_s.should contain("Todos cleared")
+  end
+
+  it "emits one todos_updated object with all items (json)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new)
+
+    renderer.handle(todos_updated(
+      {"Implement the tool", Smith::TodoList::Status::InProgress},
+      {"Update the README", Smith::TodoList::Status::Pending},
+    ))
+
+    lines = parsed_lines(stdout_io)
+    lines.size.should eq(1)
+    lines.first["type"].as_s.should eq("todos_updated")
+
+    todos = lines.first["todos"].as_a
+    todos.size.should eq(2)
+    todos[0]["content"].as_s.should eq("Implement the tool")
+    todos[0]["status"].as_s.should eq("in_progress")
+    todos[1]["status"].as_s.should eq("pending")
+  end
+end
