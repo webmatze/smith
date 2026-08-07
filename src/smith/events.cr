@@ -11,6 +11,16 @@ module Smith::Events
     end
   end
 
+  # A single incremental piece of assistant text. Emitted for every provider —
+  # non-streaming ones deliver the whole block as one delta — so consumers
+  # never need to special-case whether streaming is active.
+  class AssistantTextDelta < Event
+    getter text : String
+
+    def initialize(@text : String)
+    end
+  end
+
   class ToolStart < Event
     getter tool_call_id : String
     getter tool_name : String

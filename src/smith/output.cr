@@ -51,10 +51,14 @@ module Smith::Output
 
     def handle(event : Events::Event) : Nil
       case event
-      when Events::AssistantText
-        @answer << event.text
+      when Events::AssistantTextDelta
+        # Deltas are the only thing printed. Providers that do not stream
+        # deliver one delta per block, so nothing is lost either way — and
+        # AssistantText below must stay silent to avoid printing it twice.
         @io.print event.text
         @io.flush
+      when Events::AssistantText
+        @answer << event.text
       when Events::ToolStart
         @io.puts "\n🔧 Executing tool: \e[33m#{event.tool_name}\e[0m with args: #{event.args.to_json}"
       when Events::ToolFinished
@@ -94,6 +98,11 @@ module Smith::Output
 
     def handle(event : Events::Event) : Nil
       case event
+      when Events::AssistantTextDelta
+        emit do |json|
+          json.field "type", "assistant_text_delta"
+          json.field "text", event.text
+        end
       when Events::AssistantText
         @answer << event.text
         emit do |json|

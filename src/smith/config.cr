@@ -26,6 +26,7 @@ module Smith
 
     DEFAULT_MODEL       = BUILTIN_MODELS[DEFAULT_PROVIDER]
     DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+    DEFAULT_STREAM      = true
 
     DEFAULT_CONNECT_TIMEOUT    =  10
     DEFAULT_READ_TIMEOUT       = 120
@@ -141,6 +142,11 @@ module Smith
       env("SMITH_PROVIDER") ||
         lookup("defaults", "provider").try(&.as_s?) ||
         DEFAULT_PROVIDER
+    end
+
+    def stream? : Bool
+      value = lookup("defaults", "stream").try(&.as_bool?)
+      value.nil? ? DEFAULT_STREAM : value
     end
 
     def model_for(provider_name : String) : String

@@ -3,6 +3,7 @@ require "json"
 require "./provider"
 require "./types"
 require "./retry"
+require "./anthropic_stream"
 
 module Smith::LLM
   class Anthropic < Provider
@@ -37,12 +38,43 @@ module Smith::LLM
       end
     end
 
-    private def build_payload(model : String, request : Request) : String
+    def complete_streaming(request : Request, &on_delta : String -> Nil) : Response
+      return deliver_without_streaming(request, on_delta) unless request.stream?
+
+      model_to_use = request.model.empty? ? @default_model : request.model
+      payload = build_payload(model_to_use, request, streaming: true)
+      emitted = false
+
+      Retry.with_retry do
+        begin
+          headers = HTTP::Headers{
+            "x-api-key"         => @api_key,
+            "anthropic-version" => API_VERSION,
+            "Content-Type"      => "application/json",
+            "Accept"            => "text/event-stream",
+          }
+
+          stream_request(URI.parse(DEFAULT_ENDPOINT), headers, payload, "Anthropic") do |body_io|
+            AnthropicStream.read(body_io, @default_model) do |chunk|
+              emitted = true
+              on_delta.call(chunk)
+            end
+          end
+        rescue ex : Exception
+          # Replaying now would print the already-visible text a second time.
+          raise Retry::Fatal.new(ex) if emitted
+          raise ex
+        end
+      end
+    end
+
+    private def build_payload(model : String, request : Request, streaming : Bool = false) : String
       String.build do |str|
         JSON.build(str) do |json|
           json.object do
             json.field "model", model
             json.field "max_tokens", request.max_tokens || DEFAULT_MAX_TOKENS
+            json.field "stream", true if streaming
 
             if sys = request.system
               json.field "system", sys

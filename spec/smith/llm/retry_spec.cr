@@ -64,6 +64,21 @@ describe Smith::LLM::Retry do
     attempts.should eq(1)
   end
 
+  it "does not retry an error wrapped as Fatal, and unwraps it" do
+    attempts = 0
+
+    # Streaming uses this once a delta has reached the screen: replaying would
+    # print the same text twice. Socket::ConnectError would normally retry.
+    expect_raises(Socket::ConnectError, "stream died mid-flight") do
+      Smith::LLM::Retry.with_retry(FAST_RETRY) do
+        attempts += 1
+        raise Smith::LLM::Retry::Fatal.new(Socket::ConnectError.new("stream died mid-flight"))
+      end
+    end
+
+    attempts.should eq(1)
+  end
+
   it "returns the value once a retried call succeeds" do
     attempts = 0
 

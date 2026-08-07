@@ -19,6 +19,7 @@ module Smith
     @provider_name : String? = nil
     @auto_approve : Bool = false
     @json_output : Bool = false
+    @stream : Bool? = nil
     @renderer : Output::Renderer? = nil
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
@@ -67,6 +68,10 @@ module Smith
 
         opts.on("--json", "Emit JSON Lines on stdout (headless 'run' only)") do
           @json_output = true
+        end
+
+        opts.on("--no-stream", "Wait for the complete response instead of streaming it") do
+          @stream = false
         end
 
         opts.on("-v", "--version", "Print version information") do
@@ -226,7 +231,8 @@ module Smith
         model: effective_model,
         system_prompt: build_system_prompt,
         messages: messages,
-        max_context_tokens: @config.context.max_tokens
+        max_context_tokens: @config.context.max_tokens,
+        stream: @stream.nil? ? @config.stream? : @stream.not_nil!
       )
 
       agent.on_event do |event|

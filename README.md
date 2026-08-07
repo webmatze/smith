@@ -94,6 +94,7 @@ A full example with every supported key:
 ```toml
 [defaults]
 provider = "openrouter"          # openrouter | ollama | anthropic | openai
+stream   = true                  # stream responses token by token
 
 [providers.openrouter]
 model = "qwen/qwen3.8-max"
@@ -126,7 +127,32 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `OLLAMA_HOST`, 
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction).
+`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming).
+
+### Streaming
+
+Responses are streamed token by token by default, for all four providers, so text appears as the model produces it instead of after it finishes.
+
+Measured against a local Ollama (`gemma4:12b-mlx`), asking for a 600-word story:
+
+| | first text | complete |
+|---|---|---|
+| streaming | **17.3 s** | 37.8 s |
+| `--no-stream` | 36.0 s | 36.0 s |
+
+The 17 seconds before the first token are prompt evaluation — the system prompt plus seven tool definitions — which streaming cannot shorten. What it removes is the twenty seconds of silence after that.
+
+Turn it off with `--no-stream`, or persistently:
+
+```toml
+[defaults]
+stream = false
+```
+
+Two details worth knowing:
+
+- **Ollama streams OpenAI-shaped SSE, not NDJSON**, because smith talks to its `/v1/chat/completions` endpoint. OpenRouter, OpenAI and Ollama therefore share one reader; Anthropic has its own for its named-event format.
+- **A stream that dies after text has already appeared is not retried.** Replaying the request would print the same text a second time. Failures before the first token — connection, HTTP status — still go through the normal retry handler.
 
 ### Approval Mode
 
@@ -215,6 +241,8 @@ smith --json run "Run: ls. Then say how many entries you saw." | jq -c .
 smith --json run "..." | jq -r 'select(.type=="result") | .text'
 ```
 
+While streaming, each token also arrives as `{"type":"assistant_text_delta","text":"..."}`. `assistant_text` and `result` are unchanged, so a consumer written against the non-streaming format keeps working.
+
 Other event types are `history_compacted` and `turn_error`.
 
 **Exit codes** (both modes, not just `--json`): `0` on success, `1` when the turn failed — a provider error or the turn limit. A tool that returns an error is *not* a failed run; that is ordinary agent flow the model handles itself.
@@ -252,6 +280,7 @@ Options:
   -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
       --auto-approve         Alias for --yes
       --json                 Emit JSON Lines on stdout (headless 'run' only)
+      --no-stream            Wait for the complete response instead of streaming it
   -v, --version              Print version information
   -h, --help                 Show help banner
 ```
@@ -284,6 +313,8 @@ src/
     │   ├── types.cr         # Provider-neutral Request, Response, Message & ToolSpec
     │   ├── provider.cr      # Abstract Provider base class
     │   ├── retry.cr         # Exponential backoff retry handler
+    │   ├── sse.cr           # SSE framing & OpenAI-shaped stream reader
+    │   ├── anthropic_stream.cr # Anthropic Messages stream reader
     │   ├── openrouter.cr    # OpenRouter API client adapter
     │   ├── ollama.cr        # Ollama API client adapter
     │   ├── anthropic.cr     # Anthropic Messages API client adapter
