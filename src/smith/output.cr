@@ -80,6 +80,11 @@ module Smith::Output
             end
           end
         end
+      when Events::PlanPresented
+        @io.puts "\n📋 Plan\n"
+        @io.puts event.plan
+      when Events::ModeChanged
+        @io.puts "\n🧭 Switched to #{event.mode.to_s.downcase} mode."
       when Events::HistoryCompacted
         @io.puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens"
       when Events::TurnError
@@ -150,6 +155,16 @@ module Smith::Output
               end
             end
           end
+        end
+      when Events::PlanPresented
+        emit do |json|
+          json.field "type", "plan_presented"
+          json.field "plan", event.plan
+        end
+      when Events::ModeChanged
+        emit do |json|
+          json.field "type", "mode_changed"
+          json.field "mode", event.mode.to_s.downcase
         end
       when Events::HistoryCompacted
         emit do |json|

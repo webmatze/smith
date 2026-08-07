@@ -41,6 +41,10 @@ module Smith::Subagents
     getter count : Int32 = 0
     getter approver : Smith::Tools::Approver
 
+    # Plan mode is a property of the whole run, not just the main thread:
+    # without this, `agent(mode: "work")` would be a trivial way around it.
+    property plan_mode : Bool = false
+
     # Children build their own registry, so without this a work-mode subagent
     # would run bash straight past the parent's approval gate.
     def initialize(@approver : Smith::Tools::Approver = Smith::Tools::AutoApprover.new)
@@ -64,6 +68,9 @@ module Smith::Subagents
 
       @count += 1
       node_id = "subagent-#{@count}"
+
+      # In plan mode nothing may change, delegated or not.
+      mode = Mode::Inspect if @plan_mode
 
       # Construct child tool registry based on mode
       registry = build_child_registry(mode)

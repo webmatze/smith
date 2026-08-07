@@ -1,5 +1,6 @@
 require "./llm/types"
 require "./todos"
+require "./mode"
 
 module Smith::Events
   abstract class Event
@@ -79,6 +80,21 @@ module Smith::Events
     getter items : Array(Smith::TodoList::Item)
 
     def initialize(@items : Array(Smith::TodoList::Item))
+    end
+  end
+
+  # The agent finished researching and wants the plan approved.
+  class PlanPresented < Event
+    getter plan : String
+
+    def initialize(@plan : String)
+    end
+  end
+
+  class ModeChanged < Event
+    getter mode : Smith::Mode
+
+    def initialize(@mode : Smith::Mode)
     end
   end
 

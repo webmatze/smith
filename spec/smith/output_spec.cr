@@ -222,3 +222,34 @@ describe "todo rendering" do
     todos[1]["status"].as_s.should eq("pending")
   end
 end
+
+describe "plan mode rendering" do
+  it "renders the plan and the mode switch (human)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    renderer.handle(Smith::Events::ModeChanged.new(Smith::Mode::Plan))
+    renderer.handle(Smith::Events::PlanPresented.new("1. Read the file\n2. Patch it"))
+    renderer.handle(Smith::Events::ModeChanged.new(Smith::Mode::Normal))
+
+    text = stdout_io.to_s
+    text.should contain("📋 Plan")
+    text.should contain("1. Read the file")
+    text.should contain("2. Patch it")
+    text.should contain("plan mode")
+    text.should contain("normal mode")
+  end
+
+  it "emits plan_presented and mode_changed (json)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new)
+
+    renderer.handle(Smith::Events::ModeChanged.new(Smith::Mode::Plan))
+    renderer.handle(Smith::Events::PlanPresented.new("1. Read\n2. Patch"))
+
+    lines = parsed_lines(stdout_io)
+    lines.map(&.["type"].as_s).should eq(%w[mode_changed plan_presented])
+    lines[0]["mode"].as_s.should eq("plan")
+    lines[1]["plan"].as_s.should eq("1. Read\n2. Patch")
+  end
+end

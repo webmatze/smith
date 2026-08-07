@@ -1,5 +1,6 @@
 require "toml"
 require "./paths"
+require "./mode"
 
 module Smith
   # Resolved configuration, merged from (lowest to highest priority):
@@ -31,6 +32,7 @@ module Smith
     DEFAULT_CONNECT_TIMEOUT    =  10
     DEFAULT_READ_TIMEOUT       = 120
     DEFAULT_APPROVAL_MODE      = "prompt"
+    DEFAULT_MODE               = "normal"
     DEFAULT_MAX_CONTEXT_TOKENS = 120_000
 
     struct HTTPSettings
@@ -147,6 +149,15 @@ module Smith
     def stream? : Bool
       value = lookup("defaults", "stream").try(&.as_bool?)
       value.nil? ? DEFAULT_STREAM : value
+    end
+
+    # Consumed by CLI#effective_mode, below the --plan flag.
+    def mode : Mode
+      Mode.from_string(
+        env("SMITH_MODE") ||
+        lookup("defaults", "mode").try(&.as_s?) ||
+        DEFAULT_MODE
+      )
     end
 
     def model_for(provider_name : String) : String

@@ -34,6 +34,24 @@ module Smith::Tools
     end
   end
 
+  # Plan mode. Refuses every mutating tool without asking — the point of plan
+  # mode is that nothing changes until the user has seen a plan, so there is
+  # nothing to prompt about.
+  #
+  # `bash` is blocked wholesale rather than only for writing commands: telling
+  # a reading shell command from a writing one is not reliably decidable (see
+  # the caveats on AllowList below).
+  class PlanApprover < Approver
+    def approve?(tool : Tool, call : CallRequest) : Bool
+      false
+    end
+
+    def denial_message(tool : Tool) : String
+      "Tool '#{tool.name}' is unavailable in plan mode. Research the codebase " \
+      "with read_file/grep/glob and call exit_plan_mode with your plan when ready."
+    end
+  end
+
   # Asks the user, remembering [a]lways answers for the rest of the session.
   class PromptApprover < Approver
     getter allowlist : Array(String)
