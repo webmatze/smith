@@ -126,7 +126,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `OLLAMA_HOST`, 
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. The `[context]` section is parsed and exposed today but not yet acted upon; it is wired up by the context-compaction feature.
+`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction).
 
 ### Approval Mode
 
@@ -156,6 +156,23 @@ An allowlist entry matches a command exactly or as a whole first word (`git stat
 Without an interactive terminal there is nobody to ask, so `prompt` mode refuses mutating tools rather than running them. Pass `--yes` for headless runs.
 
 Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one.
+
+### Context Compaction
+
+Every turn resends the whole transcript, and a single `bash` result may be up to 256 KiB, so a long session would otherwise run into the provider's context limit mid-task. Before each request smith estimates the transcript size and, if it exceeds `[context] max_tokens`, shrinks it in two stages:
+
+1. **Truncate tool results**, oldest first, stopping as soon as the budget is met — so the results the model is actively working with usually survive whole, while one oversized `cat` still gets cut down.
+2. **Summarize the oldest turns** via a separate, tool-free provider call, replacing them with a single summary message. If that call fails, the prefix is dropped outright rather than failing the turn.
+
+Both stages preserve the pairing between `tool_use` and `tool_result` blocks — providers reject a request where one half is missing, so compaction only ever shortens content or removes whole turns.
+
+Compaction is announced on screen:
+
+```text
+🗜️  Context compacted (truncated): ~2779 → ~548 tokens
+```
+
+**This is destructive.** The compacted transcript is what gets saved, so `smith resume` on a long session shows the summary rather than the original exchange.
 
 Every key is optional; unknown keys are ignored, and a malformed file produces a warning on stderr rather than a crash.
 
@@ -227,6 +244,7 @@ src/
     ├── atomic_file.cr       # Atomic write helper for safe persistence
     ├── paths.cr             # Resolves ~/.smith (honours SMITH_HOME)
     ├── config.cr            # config.toml discovery, merging & precedence chain
+    ├── context.cr           # Transcript size estimation & two-stage compaction
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── session.cr           # Session persistence store (~/.smith/sessions/)
