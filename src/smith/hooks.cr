@@ -149,7 +149,7 @@ module Smith::Hooks
         Process.new(
           "/bin/bash",
           ["-c", definition.command],
-          input: IO::Memory.new(envelope(event, payload)),
+          input: :pipe,
           output: stdout_io,
           error: stderr_io,
           env: {
@@ -162,6 +162,8 @@ module Smith::Hooks
         warn(definition, "could not be started: #{ex.message}")
         return nil
       end
+
+      feed(process, envelope(event, payload))
 
       status = wait_with_timeout(process, definition.timeout)
       if status.nil?
@@ -176,6 +178,30 @@ module Smith::Hooks
       @on_fire.try &.call(event, definition.command, !!result.try(&.blocked?))
 
       result
+    end
+
+    # Hooks are not obliged to read their stdin — `exit 2` does not, and
+    # neither does a formatter. Handing Process an IO would leave that case to
+    # its internal copy fiber, where the resulting EPIPE escapes unhandled; and
+    # a payload larger than the pipe buffer (a write_file carrying a big file)
+    # would block that fiber forever, taking Process#wait with it.
+    #
+    # So the pipe is driven here instead: in our own fiber, so a hook that
+    # never drains it cannot stall the wait, and closed either way so the hook
+    # sees EOF.
+    private def feed(process : Process, payload : String) : Nil
+      spawn do
+        begin
+          process.input.print(payload)
+        rescue IO::Error
+          # The hook exited without reading. Entirely legitimate.
+        ensure
+          begin
+            process.input.close
+          rescue IO::Error
+          end
+        end
+      end
     end
 
     # Process#wait has no timeout of its own, so the wait happens in a fiber
