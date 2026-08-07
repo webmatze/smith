@@ -2,6 +2,7 @@ module Smith
   enum ChatCommand
     Plan
     Normal
+    Rewind
   end
 
   # Built-in slash commands for the interactive loop.
@@ -15,6 +16,7 @@ module Smith
       case input.strip.downcase
       when "/plan"   then ChatCommand::Plan
       when "/normal" then ChatCommand::Normal
+      when "/rewind" then ChatCommand::Rewind
       end
     end
   end

@@ -69,6 +69,22 @@ module Smith::Session
     end
   end
 
+  # Cutting the transcript is not a plain slice: providers reject a request
+  # where a tool_use has no matching tool_result, the same invariant
+  # Context.compact upholds.
+  module Transcript
+    def self.truncate(messages : Array(Smith::LLM::Message), index : Int32) : Array(Smith::LLM::Message)
+      kept = messages[0, Math.min(index, messages.size)]
+
+      # Drop any trailing assistant turn whose tool calls lost their results.
+      while (last = kept.last?) && last.role.assistant? && last.content.any?(&.type.tool_use?)
+        kept = kept[0, kept.size - 1]
+      end
+
+      kept
+    end
+  end
+
   class Store
     getter base_dir : String
     getter sessions_dir : String
@@ -98,24 +114,38 @@ module Smith::Session
       data
     end
 
+    # A session owns a directory now, so its checkpoints have somewhere to
+    # live next to it.
+    def session_dir(id : String) : String
+      File.join(@sessions_dir, id)
+    end
+
     def save(session : Data) : Nil
       session.updated_at = Time.local
-      session_file = File.join(@sessions_dir, "#{session.id}.json")
 
-      # Atomically write session file
-      AtomicFile.write(session_file, session.to_json)
+      AtomicFile.write(File.join(session_dir(session.id), "session.json"), session.to_json)
 
-      # Update index
+      # Sessions written before the directory layout keep working, and are
+      # migrated the first time they are saved again.
+      legacy = legacy_path(session.id)
+      File.delete(legacy) if File.exists?(legacy)
+
       update_index(session.to_index_entry)
     end
 
     def load(id : String) : Data
-      session_file = File.join(@sessions_dir, "#{id}.json")
-      unless File.exists?(session_file)
-        raise ArgumentError.new("Session '#{id}' not found at #{session_file}")
+      path = File.join(session_dir(id), "session.json")
+      path = legacy_path(id) unless File.exists?(path)
+
+      unless File.exists?(path)
+        raise ArgumentError.new("Session '#{id}' not found at #{path}")
       end
 
-      Data.from_json(File.read(session_file))
+      Data.from_json(File.read(path))
+    end
+
+    private def legacy_path(id : String) : String
+      File.join(@sessions_dir, "#{id}.json")
     end
 
     def list : Array(IndexEntry)

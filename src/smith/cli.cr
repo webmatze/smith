@@ -11,6 +11,7 @@ require "./output"
 require "./todos"
 require "./plan"
 require "./chat_commands"
+require "./checkpoints"
 require "./hooks"
 require "./trust"
 
@@ -37,6 +38,11 @@ module Smith
     @hooks : Hooks::Runner? = nil
     @session_id : String = "headless"
     @hook_context : String? = nil
+    @checkpoints : Checkpoints::Store? = nil
+    @rewind_to : String? = nil
+    @files_only : Bool = false
+    @dry_run : Bool = false
+    @force : Bool = false
     @mode : Mode? = nil
     @plan : PlanSession? = nil
     @real_approver : Tools::Approver? = nil
@@ -84,7 +90,9 @@ module Smith
           str.puts "  chat                       Start an interactive chat session (default)"
           str.puts "  run <prompt>               Run a single prompt in headless mode and exit"
           str.puts "  resume [<session_id>]      Resume an existing session (or latest session)"
-          str.puts "  sessions, list             List all saved local chat sessions\n"
+          str.puts "  sessions, list             List all saved local chat sessions"
+          str.puts "  checkpoints [<session_id>] List the file snapshots taken during a session"
+          str.puts "  rewind [<session_id>]      Undo a session's file changes\n"
           str.puts "Options:"
         end
 
@@ -102,6 +110,22 @@ module Smith
 
         opts.on("--auto-approve", "Alias for --yes") do
           @auto_approve = true
+        end
+
+        opts.on("--to CHECKPOINT", "rewind: undo this checkpoint and everything after it (default: only the newest)") do |value|
+          @rewind_to = value
+        end
+
+        opts.on("--files-only", "rewind: restore files but leave the transcript alone") do
+          @files_only = true
+        end
+
+        opts.on("--dry-run", "rewind: show what would change, change nothing") do
+          @dry_run = true
+        end
+
+        opts.on("--force", "rewind: overwrite files changed outside smith since the snapshot") do
+          @force = true
         end
 
         opts.on("--agent NAME", "Run the main thread as the agent defined in .smith/agents/NAME.md") do |name|
@@ -172,6 +196,10 @@ module Smith
         run_resume(session_id)
       when "sessions", "list"
         list_sessions
+      when "checkpoints"
+        list_checkpoints(@args[1]?)
+      when "rewind"
+        run_rewind(@args[1]?)
       else
         prompt = @args.join(" ")
         if prompt.empty?
@@ -182,7 +210,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume sessions list]
+    KNOWN_COMMANDS = %w[run chat interactive resume sessions list checkpoints rewind]
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -381,6 +409,7 @@ module Smith
       approver = (@real_approver ||= build_approver)
       registry = Tools::Registry.default(approver, todos: @todos)
       registry.hooks = hooks
+      registry.checkpoints = @checkpoints
 
       # Fired before the system prompt is built, so a hook can inject context
       # into it — the branch, the open tickets, whatever the project needs.
@@ -537,6 +566,11 @@ module Smith
     private def start_session_loop(session_data : Session::Data)
       # Set before the runner is built, so hooks see the real session id.
       @session_id = session_data.id
+
+      settings = @config.checkpoints
+      store = Checkpoints::Store.new(@session_store.session_dir(session_data.id), enabled: settings.enabled?)
+      store.prune(max: settings.max_per_session, retention: settings.retention)
+      @checkpoints = store
       provider = build_provider(session_data.provider)
       agent = build_agent(provider, session_data.messages)
       effective_model = agent.model
@@ -575,7 +609,7 @@ module Smith
         # Before expand_prompt on purpose: the skill catalog claims any /name
         # that matches a skill, so a skill called "plan" would shadow /plan.
         if command = ChatCommands.parse(trimmed)
-          run_chat_command(command)
+          run_chat_command(command, session_data)
           next
         end
 
@@ -589,11 +623,16 @@ module Smith
         @session_store.save(session_data)
       end
 
-      puts "Session saved to #{@session_store.sessions_dir}/#{session_data.id}.json"
+      puts "Session saved to #{@session_store.session_dir(session_data.id)}/session.json"
       puts "Goodbye! ⚒️"
     end
 
-    private def run_chat_command(command : ChatCommand) : Nil
+    private def run_chat_command(command : ChatCommand, session_data : Session::Data) : Nil
+      if command.rewind?
+        rewind_from_chat(session_data)
+        return
+      end
+
       plan = plan_session
       target = command.plan? ? Mode::Plan : Mode::Normal
 
@@ -603,6 +642,39 @@ module Smith
       end
 
       plan.mode = target
+    end
+
+    # The chat equivalent of `smith rewind`: undo everything back to the
+    # oldest checkpoint of this session, transcript included.
+    private def rewind_from_chat(session_data : Session::Data) : Nil
+      store = @checkpoints
+      entries = store.try(&.list) || [] of Checkpoints::Entry
+
+      if store.nil? || entries.empty?
+        puts "   Nothing to rewind."
+        return
+      end
+
+      result = store.rewind_to(entries.last, force: false)
+      result.restored.each { |path| puts "   restored #{path}" }
+      result.deleted.each { |path| puts "   deleted  #{path}" }
+
+      unless result.conflicts.empty?
+        puts "   ⚠️  changed outside smith, left alone: #{result.conflicts.join(", ")}"
+        puts "      use `smith rewind #{session_data.id} --force` to overwrite them"
+      end
+
+      unless result.applied?
+        puts "   🚫 Nothing was changed."
+        return
+      end
+
+      if index = result.message_index
+        session_data.messages = Session::Transcript.truncate(session_data.messages, index)
+        @session_store.save(session_data)
+      end
+
+      puts "   ⏪ Rewound. Changes made by bash are not covered."
     end
 
     # Without this, Ctrl+C kills the process outright and the turn in flight is
@@ -621,6 +693,118 @@ module Smith
         puts "   Resume with: smith resume #{session_data.id}"
         STDOUT.flush
         exit(130)
+      end
+    end
+
+    # Both commands work on a saved session, so they resolve the id the same
+    # way `resume` does.
+    private def resolve_session(session_id : String?) : Session::Data
+      data = session_id ? @session_store.load(session_id) : @session_store.latest
+
+      if data.nil?
+        STDERR.puts "❌ No sessions found."
+        # `smith run` is stateless, so it has no session to hang checkpoints
+        # off. Saying so beats leaving the user to guess.
+        STDERR.puts "   Checkpoints belong to a session; `smith run` does not create one."
+        STDERR.puts "   Use `smith chat` (or `smith resume`) for a run you may want to undo."
+        exit(1)
+      end
+
+      data
+    end
+
+    private def checkpoint_store_for(session : Session::Data) : Checkpoints::Store
+      Checkpoints::Store.new(@session_store.session_dir(session.id), enabled: @config.checkpoints.enabled?)
+    end
+
+    private def list_checkpoints(session_id : String?)
+      session = resolve_session(session_id)
+      entries = checkpoint_store_for(session).list
+
+      if entries.empty?
+        puts "No checkpoints for session #{session.id}."
+        puts "Note: changes made by bash are never snapshotted — see the README."
+        return
+      end
+
+      puts "🗂️  Checkpoints for #{session.id}:"
+      puts "--------------------------------------------------------------------------------"
+      printf "%-6s %-20s %-12s %s\n", "ID", "WHEN", "TOOL", "PATH"
+      puts "--------------------------------------------------------------------------------"
+      entries.each do |entry|
+        printf "%-6s %-20s %-12s %s%s\n",
+          entry.id,
+          entry.created_at.to_s("%Y-%m-%d %H:%M"),
+          entry.tool,
+          entry.path,
+          entry.created? ? "  (created)" : ""
+      end
+      puts "--------------------------------------------------------------------------------"
+      puts "Rewind with: smith rewind #{session.id} --to <ID>"
+      puts "Changes made by bash are not covered."
+    end
+
+    private def run_rewind(session_id : String?)
+      session = resolve_session(session_id)
+      store = checkpoint_store_for(session)
+      entries = store.list
+
+      if entries.empty?
+        puts "Nothing to rewind in session #{session.id}."
+        return
+      end
+
+      # Without --to this undoes the newest checkpoint only — one invocation,
+      # one step back.
+      target = if wanted = @rewind_to
+                 found = entries.find { |entry| entry.id == wanted || entry.sequence.to_s == wanted }
+                 if found.nil?
+                   STDERR.puts "❌ Error: no checkpoint '#{wanted}' in session #{session.id}."
+                   STDERR.puts "   Known: #{entries.map(&.id).join(", ")}"
+                   exit(1)
+                 end
+                 found
+               else
+                 entries.last
+               end
+
+      undone = entries.count { |entry| entry.sequence >= target.sequence }
+      scope = undone == 1 ? "checkpoint #{target.id}" : "checkpoints #{target.id}–#{entries.last.id}"
+
+      result = store.rewind_to(target, force: @force, dry_run: @dry_run)
+
+      if @dry_run
+        puts "🔍 Dry run — nothing was changed. Undoing #{scope} would:"
+      elsif result.applied?
+        puts "⏪ Undid #{scope} — back to the state before #{target.id}."
+      else
+        puts "🚫 Undoing #{scope} stopped — nothing was changed."
+      end
+
+      result.restored.each { |path| puts "   #{result.applied? ? "restored" : "would restore"} #{path}" }
+      # Spelled out: the file is gone because it did not exist before this point.
+      result.deleted.each { |path| puts "   #{result.applied? ? "deleted " : "would delete"} #{path} (did not exist before #{target.id})" }
+
+      unless result.conflicts.empty?
+        puts "\n⚠️  Changed outside smith since the snapshot:"
+        result.conflicts.each { |path| puts "   #{path}" }
+        puts "   Re-run with --force to overwrite them. The checkpoints are kept until then."
+      end
+
+      if result.restored.empty? && result.deleted.empty? && result.conflicts.empty?
+        puts "   (no file changes to undo)"
+      end
+
+      remaining = store.list.size
+      puts "   #{remaining} earlier checkpoint#{remaining == 1 ? "" : "s"} left — run rewind again to go further." if remaining > 0 && result.applied? && !@dry_run
+
+      puts "\nChanges made by bash are not covered by checkpoints."
+      return if @dry_run || @files_only || !result.applied?
+
+      if index = result.message_index
+        session.messages = Session::Transcript.truncate(session.messages, index)
+        @session_store.save(session)
+        puts "Transcript cut back to #{session.messages.size} messages."
       end
     end
 
