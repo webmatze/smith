@@ -86,8 +86,15 @@ module Smith
         tool_uses = response.content.select { |b| b.type.tool_use? }
 
         if tool_uses.empty?
-          # Assistant finished response without invoking tools
-          @messages << LLM::Message.assistant_with_blocks(response.content)
+          # Assistant finished response without invoking tools.
+          #
+          # A response with no blocks at all — smaller models sometimes return
+          # one, e.g. when the whole answer ends up in a reasoning field — is
+          # dropped rather than recorded. It carries nothing, and it would
+          # serialize to `content: null` with no tool_calls, which providers
+          # reject: one such message breaks every later turn, since the whole
+          # transcript is resent each time.
+          @messages << LLM::Message.assistant_with_blocks(response.content) unless response.content.empty?
           emit(Events::TurnCompleted.new(turns))
           return
         else
