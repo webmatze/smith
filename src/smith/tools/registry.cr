@@ -173,8 +173,11 @@ module Smith::Tools
       # no call can route around the gate. Read-only tools are never marked
       # mutating and pass straight through — unless a hook explicitly asked
       # for this one to be confirmed.
-      if (tool.mutating? || pre.ask?) && !@approver.approve?(tool, call)
-        return CallResult.new(call.id, @approver.denial_message(tool), is_error: true)
+      # Read-only tools skip the gate — unless a rule could stop this one, which
+      # is how `deny = ["read_file(**/.ssh/**)"]` gets to act at all. The check
+      # is a set lookup, so the common case still costs nothing.
+      if (tool.mutating? || pre.ask? || @approver.governs?(tool)) && !@approver.approve?(tool, call)
+        return CallResult.new(call.id, @approver.denial_message(tool, call), is_error: true)
       end
 
       output = begin

