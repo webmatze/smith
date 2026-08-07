@@ -5,6 +5,7 @@ require "./agent"
 require "./session"
 require "./project_ctx"
 require "./skills"
+require "./agents"
 require "./config"
 require "./output"
 require "./todos"
@@ -28,6 +29,8 @@ module Smith
     @renderer : Output::Renderer? = nil
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
+    @agents_catalog : Agents::Catalog
+    @agent_name : String? = nil
     @config : Config
     @todos = TodoList.new
     @trust_hooks : Bool = false
@@ -42,12 +45,29 @@ module Smith
       @config = Config.load
       @session_store = Session::Store.new
       @skills_catalog = Skills::Catalog.discover
+      @agents_catalog = Agents::Catalog.discover
+    end
+
+    # The definition driving the *main* thread, when --agent was passed.
+    private def main_agent : Agents::Definition?
+      name = @agent_name
+      return nil if name.nil?
+
+      definition = @agents_catalog[name]
+      if definition.nil?
+        known = @agents_catalog.agents.keys
+        STDERR.puts "❌ Error: unknown agent '#{name}'."
+        STDERR.puts(known.empty? ? "   No agents are defined in .smith/agents/ or ~/.smith/agents/." : "   Known agents: #{known.join(", ")}")
+        exit(1)
+      end
+
+      definition
     end
 
     # The provider actually in effect: CLI flag (or a resumed session's
     # provider) first, otherwise whatever the config/env/default chain yields.
     private def effective_provider_name : String
-      @provider_name || @config.provider
+      @provider_name || main_agent.try(&.provider) || @config.provider
     end
 
     # Same precedence as everywhere else: flag first, then env/config/default.
@@ -84,6 +104,10 @@ module Smith
           @auto_approve = true
         end
 
+        opts.on("--agent NAME", "Run the main thread as the agent defined in .smith/agents/NAME.md") do |name|
+          @agent_name = name
+        end
+
         opts.on("--trust-hooks", "Trust this project's hooks without asking (they run arbitrary commands)") do
           @trust_hooks = true
         end
@@ -112,6 +136,8 @@ module Smith
           puts "    Reference via $skill-name or /skill-name in prompt."
           puts "  • Project Context: Instructions in SMITH.md or AGENTS.md are automatically loaded into prompt."
           puts "  • Subagents: Agent can delegate tasks using the 'agent' tool (mode: 'work' or 'inspect')."
+          puts "  • Custom Agents: Define specialists in .smith/agents/<name>.md or ~/.smith/agents/<name>.md"
+          puts "    Delegate via agent_type, or run one directly with --agent <name>."
           puts "  • Persistence: Sessions are saved under ~/.smith/sessions/ and can be resumed with 'smith resume'."
           puts "  • Plan Mode: --plan (or [defaults] mode = \"plan\") researches first and asks before changing anything."
           puts "    In chat, /plan and /normal switch at runtime; these built-ins win over a skill of the same name."
@@ -210,6 +236,14 @@ module Smith
     end
 
     private def build_system_prompt : String
+      # A definition replaces the built-in preamble outright — the point of
+      # --agent is a single-purpose runner, not smith wearing a hat.
+      if agent = main_agent
+        blocks = [agent.system_prompt]
+        blocks << @hook_context.not_nil! if @hook_context
+        return blocks.join("\n\n")
+      end
+
       base_prompt = String.build do |str|
         str.puts "You are Smith, an autonomous coding agent written in Crystal."
         str.puts "\nSkill Storage Policy:"
@@ -340,7 +374,7 @@ module Smith
     end
 
     private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
-      effective_model = @model || provider.default_model
+      effective_model = @model || main_agent.try(&.model) || provider.default_model
 
       # Built once and kept, so the [a]lways answers survive a plan-mode
       # detour instead of being asked again afterwards.
@@ -365,11 +399,29 @@ module Smith
         max_depth: subagents.max_depth,
         budget: Subagents::SpawnBudget.new(subagents.max_children)
       )
+      # Building a provider needs API keys and the config chain, which belong
+      # here rather than duplicated in the supervisor.
+      supervisor.provider_factory = ->(name : String) { build_provider(name) }
 
       # max_children = 0 means "no subagents at all", so the tool is not even
       # advertised — offering one that always refuses just wastes turns.
       unless subagents.max_children.zero?
-        registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: effective_model))
+        registry.register(Tools::AgentTool.new(
+          supervisor: supervisor,
+          provider: provider,
+          model: effective_model,
+          agents: @agents_catalog
+        ))
+      end
+
+      # --agent narrows the main thread's tools the same way a definition
+      # narrows a child's. Done last, after every tool is registered, so the
+      # agent tool is subject to it too: a definition has to ask for `agent`
+      # to get it, on the main thread as much as in a child.
+      if agent = main_agent
+        registry.specs.map(&.name).each do |registered|
+          registry.unregister(registered) unless agent.tool_names.includes?(registered)
+        end
       end
 
       agent = Agent.new(
@@ -493,6 +545,12 @@ module Smith
       puts "   Session: #{session_data.id} | Provider: #{session_data.provider} | Model: #{effective_model}"
       if @skills_catalog.skills.size > 0
         puts "   Loaded Skills: #{@skills_catalog.skills.keys.join(", ")}"
+      end
+      if @agents_catalog.agents.size > 0
+        puts "   Loaded Agents: #{@agents_catalog.agents.keys.join(", ")}"
+      end
+      if agent = main_agent
+        puts "   Running as agent: #{agent.name}"
       end
       puts "   Mode: plan (research only — /normal to leave)" if plan_session.plan_mode?
       puts "   Type 'exit' or 'quit' to end session.\n\n"

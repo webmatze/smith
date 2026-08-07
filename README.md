@@ -16,7 +16,9 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📡 Provider-Neutral LLM Layer (`Smith::LLM`)**: Ships with **OpenRouter**, **Ollama** (local models), **Anthropic** (Messages API), and **OpenAI** (Chat Completions) support with exponential backoff retry logic. Default models: `qwen/qwen3.8-max` (OpenRouter) / `gemma4:latest` (Ollama) / `claude-sonnet-5` (Anthropic) / `gpt-5.6-luna` (OpenAI).
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
+  - Discovers custom agents in `.smith/agents/<name>.md` and `~/.smith/agents/`, sharing the frontmatter parser with skills.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **🎭 Custom Agents (`Smith::Agents`)**: Specialists defined in `.smith/agents/<name>.md` — own system prompt, tools, model and provider. Delegate to one via `agent_type`, or run the main thread as one with `--agent`.
 - **🔐 Permission Rules (`Smith::Tools::RuleSet`)**: `allow` / `ask` / `deny` rules with path scoping and wildcards. Deny wins over everything, including `--yes`, and reaches read-only tools too.
 - **💰 Prompt Caching (Anthropic)**: The system prompt, the tool definitions and a rolling transcript prefix carry cache breakpoints, so a long session stops paying full price for the same prefix on every turn.
 - **🪝 Hooks (`Smith::Hooks`)**: Five extension points — `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `stop` — that run configured shell commands and can inject context, rewrite tool arguments, block a call, or keep the loop going until the tests pass.
@@ -300,6 +302,62 @@ Only that rule is remembered, and a deny rule still outranks it.
 
 `allowlist = [...]` keeps working, mapped to `allow = ["bash(<entry>)"]`, with a deprecation notice on stderr.
 
+### Custom Agents
+
+Subagents came in exactly two flavours — a work agent and an inspect agent, both with prompts compiled into smith. A definition file gives you a specialist instead: a reviewer with its own checklist, a researcher on a cheaper model, a test runner that cannot write.
+
+`.smith/agents/reviewer.md` (project) or `~/.smith/agents/reviewer.md` (global; the project wins on a name clash):
+
+```markdown
+---
+name: reviewer
+description: Reviews a diff for correctness and style. Use after implementing a change.
+tools: read_file, grep, glob
+model: claude-sonnet-5
+provider: anthropic
+mode: inspect
+---
+
+You are a code reviewer for a Crystal project.
+
+Focus on correctness before style, and name the file and line for every finding.
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | no | Defaults to the filename |
+| `description` | **yes** | Shown to the main model so it can pick the right specialist. Missing means the agent still loads, with a warning. |
+| `tools` | no | Comma list. Defaults to whatever `mode` implies. Unknown names are warned about and dropped. |
+| `model` | no | Defaults to the parent's |
+| `provider` | no | Defaults to the parent's |
+| `mode` | no | `work` (default) or `inspect`; sets the default tool list |
+
+The body is the system prompt.
+
+#### Delegating to one
+
+The `agent` tool gains an `agent_type` parameter, and its description lists what is available, so the model can choose:
+
+```json
+{"prompt": "Review the diff on the current branch", "agent_type": "reviewer"}
+```
+
+Without `agent_type` the old `mode` behaviour is unchanged. An unknown name comes back as a tool error naming the ones that exist, so the model can correct itself.
+
+#### Running one directly
+
+```bash
+smith --agent reviewer run "Review the diff on the current branch"
+```
+
+This puts the definition on the **main** thread — its prompt, its tools, its model — which makes smith usable as a single-purpose runner in a script.
+
+#### Two rules that still apply
+
+**A definition may ask for the `agent` tool**, and then it can delegate further. That is bounded by the [nesting depth and the shared spawn budget](#subagent-limits); at the deepest level the tool is simply not offered, since every call would be refused.
+
+**[Plan mode](#plan-mode) overrides a definition's tool list.** A file declaring `tools: bash, write_file` must not be a way around it.
+
 ### Subagent Limits
 
 Delegation is bounded in two directions.
@@ -562,6 +620,7 @@ Options:
   -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
   -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
       --auto-approve         Alias for --yes
+      --agent NAME           Run the main thread as the agent defined in .smith/agents/NAME.md
       --trust-hooks          Trust this project's hooks without asking (they run arbitrary commands)
       --plan                 Start in plan mode: research only, until you approve a plan
       --json                 Emit JSON Lines on stdout (headless 'run' only)
@@ -590,6 +649,8 @@ src/
     ├── output.cr            # Human & JSON Lines renderers for the event stream
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
+    ├── agents.cr            # Custom agent definitions in .smith/agents/<name>.md
+    ├── frontmatter.cr       # Shared --- header parser for skills and agents
     ├── todos.cr             # Todo list state, validation & change callback
     ├── mode.cr              # Normal / plan mode enum
     ├── plan.cr              # Plan session state & approval gates (prompt/auto/halting)

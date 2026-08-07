@@ -1,6 +1,7 @@
 require "path"
 require "file_utils"
 require "./paths"
+require "./frontmatter"
 
 module Smith::Skills
   struct Skill
@@ -54,27 +55,14 @@ module Smith::Skills
     end
 
     private def parse_skill_file(dir_name : String, file_path : String) : Skill?
-      content = File.read(file_path)
+      document = Frontmatter.parse(File.read(file_path))
 
-      name = dir_name
-      description = "No description provided."
-      body = content
-
-      # Simple YAML frontmatter parser
-      if match = content.match(/\A---\s*\n(.*?)\n---\s*\n(.*)\Z/m)
-        frontmatter = match[1]
-        body = match[2]
-
-        frontmatter.each_line do |line|
-          if line.starts_with?("name:")
-            name = line.split(":", 2)[1].strip.delete("\"'")
-          elsif line.starts_with?("description:")
-            description = line.split(":", 2)[1].strip.delete("\"'")
-          end
-        end
-      end
-
-      Skill.new(name: name, description: description, body: body, path: file_path)
+      Skill.new(
+        name: document["name"] || dir_name,
+        description: document["description"] || "No description provided.",
+        body: document.body,
+        path: file_path
+      )
     end
 
     def summary_prompt : String?
