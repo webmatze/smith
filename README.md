@@ -17,6 +17,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **💰 Prompt Caching (Anthropic)**: The system prompt, the tool definitions and a rolling transcript prefix carry cache breakpoints, so a long session stops paying full price for the same prefix on every turn.
 - **🪝 Hooks (`Smith::Hooks`)**: Five extension points — `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `stop` — that run configured shell commands and can inject context, rewrite tool arguments, block a call, or keep the loop going until the tests pass.
 - **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
@@ -109,6 +110,7 @@ host  = "http://localhost:11434"
 
 [providers.anthropic]
 model = "claude-sonnet-5"
+cache = true                     # prompt caching, see below
 
 [providers.openai]
 model = "gpt-5.6-luna"
@@ -131,7 +133,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
+`[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
 
 ### Streaming
 
@@ -157,6 +159,44 @@ Two details worth knowing:
 
 - **Ollama streams OpenAI-shaped SSE, not NDJSON**, because smith talks to its `/v1/chat/completions` endpoint. OpenRouter, OpenAI and Ollama therefore share one reader; Anthropic has its own for its named-event format.
 - **A stream that dies after text has already appeared is not retried.** Replaying the request would print the same text a second time. Failures before the first token — connection, HTTP status — still go through the normal retry handler.
+
+### Prompt Caching
+
+Every turn resends the whole transcript, so a 50-turn session pays for the system prompt and all tool definitions 50 times. For Anthropic, smith marks that prefix as cacheable — reads cost 0.1x the normal input price.
+
+Three breakpoints:
+
+1. **the system prompt**, which includes the skills catalog and `SMITH.md`
+2. **the tool definitions**, marked on the last entry so everything before it is covered
+3. **a rolling transcript prefix**, on the second-to-last user turn — the newest one changes with the next request, so a breakpoint there would write a cache nothing ever reads
+
+That is 3 of Anthropic's 4 allowed breakpoints.
+
+The effect on a plain one-shot run, same prompt, caching off versus on:
+
+| | prompt tokens billed in full | read from cache |
+|---|---|---|
+| `cache = false` | 1953 | 0 |
+| `cache = true` (default) | **81** | 1872 |
+
+The saving is visible in the usage line:
+
+```text
+📊 Usage: 81 prompt (1872 cached) + 4 completion = 85 total tokens
+```
+
+and under `--json` as `cache_creation_tokens` / `cache_read_tokens` in the `usage` object.
+
+Turn it off per provider when your prompts are short — caching needs a minimum prefix of 1024 tokens (2048 on Haiku), below which the 1.25x write surcharge buys nothing:
+
+```toml
+[providers.anthropic]
+cache = false
+```
+
+Two caveats. [Context compaction](#context-compaction) rewrites the transcript prefix and therefore invalidates that breakpoint; the system prompt and tools stay cached regardless. And the tool order must stay stable for the tools breakpoint to hit — `Registry#specs` relies on Crystal's `Hash` preserving insertion order, so do not sort it.
+
+Only Anthropic. OpenRouter accepts the same syntax when it routes to an Anthropic model, but that is deliberately left for later; `ollama`, `openai` and `openrouter` build byte-identical requests to before.
 
 ### Approval Mode
 

@@ -15,10 +15,16 @@ module Smith::LLM
     getter api_key : String
     getter default_model : String
 
+    # Caching needs a minimum prefix length (1024 tokens on Sonnet/Opus, 2048
+    # on Haiku); below that the 1.25x write surcharge buys nothing, hence the
+    # switch.
+    getter? cache : Bool
+
     def initialize(
       @api_key : String = ENV.fetch("ANTHROPIC_API_KEY", ""),
       @default_model : String = DEFAULT_MODEL,
       @timeouts : Timeouts = Timeouts.default,
+      @cache : Bool = true,
     )
       if @api_key.empty?
         raise ArgumentError.new("Anthropic API key is missing. Set ANTHROPIC_API_KEY environment variable.")
@@ -77,7 +83,22 @@ module Smith::LLM
             json.field "stream", true if streaming
 
             if sys = request.system
-              json.field "system", sys
+              json.field "system" do
+                if @cache
+                  # cache_control needs the block form. System prompt and tool
+                  # definitions are byte-identical for the whole session — the
+                  # ideal prefix to cache, and otherwise paid for on every turn.
+                  json.array do
+                    json.object do
+                      json.field "type", "text"
+                      json.field "text", sys
+                      cache_control(json)
+                    end
+                  end
+                else
+                  json.scalar sys
+                end
+              end
             end
 
             if temp = request.temperature
@@ -85,12 +106,14 @@ module Smith::LLM
             end
 
             # Messages serialization
+            breakpoint = @cache ? transcript_breakpoint(request.messages) : nil
+
             json.field "messages" do
               json.array do
-                request.messages.each do |msg|
+                request.messages.each_with_index do |msg, index|
                   # System messages handled in top-level system field
                   next if msg.role.system?
-                  serialize_message(json, msg)
+                  serialize_message(json, msg, cache: index == breakpoint)
                 end
               end
             end
@@ -100,11 +123,15 @@ module Smith::LLM
               unless tools.empty?
                 json.field "tools" do
                   json.array do
-                    tools.each do |tool|
+                    # Marking the last entry caches every tool before it, so
+                    # the order must stay stable — Registry#specs relies on
+                    # Hash preserving insertion order. Do not sort this.
+                    tools.each_with_index do |tool, index|
                       json.object do
                         json.field "name", tool.name
                         json.field "description", tool.description
                         json.field "input_schema", tool.parameters
+                        cache_control(json) if @cache && index == tools.size - 1
                       end
                     end
                   end
@@ -116,19 +143,46 @@ module Smith::LLM
       end
     end
 
-    private def serialize_message(json : JSON::Builder, msg : Message)
+    private def cache_control(json : JSON::Builder) : Nil
+      json.field "cache_control" do
+        json.object { json.field "type", "ephemeral" }
+      end
+    end
+
+    # The index of the message to mark, or nil when there is nothing worth
+    # marking yet.
+    #
+    # The *second-to-last* user turn, not the last: the newest one changes with
+    # the next request, so a breakpoint there would write a cache nothing ever
+    # reads. Tool results count — Anthropic receives them as user turns.
+    #
+    # Note this is invalidated whenever Context.compact rewrites the prefix.
+    # That is unavoidable and correct; the system prompt and tools stay cached
+    # either way.
+    private def transcript_breakpoint(messages : Array(Message)) : Int32?
+      user_turns = Array(Int32).new
+      messages.each_with_index do |msg, index|
+        user_turns << index if msg.role.user? || msg.role.tool?
+      end
+      return nil if user_turns.size < 2
+
+      user_turns[-2]
+    end
+
+    private def serialize_message(json : JSON::Builder, msg : Message, cache : Bool = false)
       case msg.role
       when Role::User
+        blocks = msg.content.select { |b| b.type.text? && b.text }
+
         json.object do
           json.field "role", "user"
           json.field "content" do
             json.array do
-              msg.content.each do |b|
-                if b.type.text? && (txt = b.text)
-                  json.object do
-                    json.field "type", "text"
-                    json.field "text", txt
-                  end
+              blocks.each_with_index do |b, index|
+                json.object do
+                  json.field "type", "text"
+                  json.field "text", b.text
+                  cache_control(json) if cache && index == blocks.size - 1
                 end
               end
             end
@@ -168,8 +222,8 @@ module Smith::LLM
           json.field "role", "user"
           json.field "content" do
             json.array do
-              msg.content.each do |b|
-                next unless b.type.tool_result?
+              results = msg.content.select(&.type.tool_result?)
+              results.each_with_index do |b, index|
                 json.object do
                   json.field "type", "tool_result"
                   json.field "tool_use_id", b.tool_call_id
@@ -177,6 +231,7 @@ module Smith::LLM
                   if b.is_error
                     json.field "is_error", true
                   end
+                  cache_control(json) if cache && index == results.size - 1
                 end
               end
             end
@@ -243,7 +298,13 @@ module Smith::LLM
         prompt_tokens = u["input_tokens"]?.try(&.as_i) || 0
         completion_tokens = u["output_tokens"]?.try(&.as_i) || 0
         total_tokens = prompt_tokens + completion_tokens
-        usage = Usage.new(prompt_tokens, completion_tokens, total_tokens)
+        usage = Usage.new(
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          cache_creation_tokens: u["cache_creation_input_tokens"]?.try(&.as_i?) || 0,
+          cache_read_tokens: u["cache_read_input_tokens"]?.try(&.as_i?) || 0
+        )
       end
 
       Response.new(

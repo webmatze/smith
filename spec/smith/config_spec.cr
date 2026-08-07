@@ -343,3 +343,22 @@ describe "hook configuration" do
     end
   end
 end
+
+describe "anthropic caching setting" do
+  it "is on by default" do
+    with_sandbox do |temp_dir, _home|
+      Smith::Config.load(make_project(temp_dir)).cache_for("anthropic").should be_true
+    end
+  end
+
+  it "can be switched off per provider" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [providers.anthropic]
+        cache = false
+        TOML
+
+      Smith::Config.load(project).cache_for("anthropic").should be_false
+    end
+  end
+end
