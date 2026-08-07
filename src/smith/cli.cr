@@ -7,6 +7,7 @@ require "./project_ctx"
 require "./skills"
 require "./config"
 require "./output"
+require "./todos"
 
 module Smith
   class CLI
@@ -24,6 +25,7 @@ module Smith
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
     @config : Config
+    @todos = TodoList.new
 
     def initialize(@args : Array(String))
       @config = Config.load
@@ -221,7 +223,15 @@ module Smith
       effective_model = @model || provider.default_model
 
       approver = build_approver
-      registry = Tools::Registry.default(approver)
+      registry = Tools::Registry.default(approver, todos: @todos)
+
+      # Tools have no access to the agent's event bus, and giving them one
+      # would put event knowledge into the policy-free core. The list's
+      # on_change hook is the seam instead.
+      @todos.on_change = ->(items : Array(TodoList::Item)) do
+        renderer.handle(Events::TodosUpdated.new(items))
+      end
+
       supervisor = Subagents::Supervisor.new(approver)
       registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: effective_model))
 
@@ -305,6 +315,10 @@ module Smith
       end
       puts "   Type 'exit' or 'quit' to end session.\n\n"
 
+      # Resuming without the plan would leave the model to reconstruct it from
+      # a transcript that compaction may already have shortened.
+      @todos.replace(session_data.todos) unless session_data.todos.empty?
+
       install_interrupt_handler(session_data, agent)
 
       loop do
@@ -326,6 +340,7 @@ module Smith
 
         session_data.messages = agent.messages
         session_data.usage = agent.cumulative_usage
+        session_data.todos = @todos.items
         @session_store.save(session_data)
       end
 
@@ -342,6 +357,7 @@ module Smith
       Signal::INT.trap do
         session_data.messages = agent.messages
         session_data.usage = agent.cumulative_usage
+        session_data.todos = @todos.items
         @session_store.save(session_data)
 
         puts "\n\n⚠️  Interrupted — session saved."

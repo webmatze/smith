@@ -3,6 +3,7 @@ require "file_utils"
 require "./atomic_file"
 require "./paths"
 require "./llm/types"
+require "./todos"
 
 module Smith::Session
   struct IndexEntry
@@ -30,6 +31,9 @@ module Smith::Session
     property messages : Array(Smith::LLM::Message)
     property usage : Smith::LLM::Usage
 
+    # Sessions written before the todo tool existed simply have no field.
+    property todos : Array(Smith::TodoList::Item) = Array(Smith::TodoList::Item).new
+
     def initialize(
       @id : String,
       @cwd : String,
@@ -37,6 +41,7 @@ module Smith::Session
       @provider : String,
       @messages : Array(Smith::LLM::Message) = Array(Smith::LLM::Message).new,
       @usage : Smith::LLM::Usage = Smith::LLM::Usage.new(0, 0, 0),
+      @todos : Array(Smith::TodoList::Item) = Array(Smith::TodoList::Item).new,
       @created_at : Time = Time.local,
       @updated_at : Time = Time.local,
     )

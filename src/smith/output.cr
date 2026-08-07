@@ -67,6 +67,19 @@ module Smith::Output
         else
           @io.puts "✅ Tool \e[32m#{event.tool_name}\e[0m finished."
         end
+      when Events::TodosUpdated
+        if event.items.empty?
+          @io.puts "\n📋 Todos cleared."
+        else
+          @io.puts "\n📋 Todos:"
+          event.items.each do |item|
+            case item.status
+            when .completed?   then @io.puts "   \e[2m☑ #{item.content}\e[0m"
+            when .in_progress? then @io.puts "   \e[1m▶ #{item.content}\e[0m"
+            else                    @io.puts "   ☐ #{item.content}"
+            end
+          end
+        end
       when Events::HistoryCompacted
         @io.puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens"
       when Events::TurnError
@@ -123,6 +136,20 @@ module Smith::Output
           json.field "tool", event.tool_name
           json.field "is_error", event.is_error
           json.field "result", event.result
+        end
+      when Events::TodosUpdated
+        emit do |json|
+          json.field "type", "todos_updated"
+          json.field "todos" do
+            json.array do
+              event.items.each do |item|
+                json.object do
+                  json.field "content", item.content
+                  json.field "status", item.status
+                end
+              end
+            end
+          end
         end
       when Events::HistoryCompacted
         emit do |json|

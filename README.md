@@ -17,6 +17,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
 - **⚡ Native Performance**: Compiles to a lightweight native binary; the test suite runs in well under a second.
 
@@ -156,7 +157,7 @@ Two details worth knowing:
 
 ### Approval Mode
 
-`bash`, `write_file` and `edit_file` change things outside smith, so every call passes an approval gate before it runs. The read-only tools (`read_file`, `grep`, `glob`) bypass it entirely.
+`bash`, `write_file` and `edit_file` change things outside smith, so every call passes an approval gate before it runs. The other tools (`read_file`, `grep`, `glob`, `todo_write`) bypass it entirely — they change nothing outside smith.
 
 In `prompt` mode — the default — each call asks:
 
@@ -182,6 +183,31 @@ An allowlist entry matches a command exactly or as a whole first word (`git stat
 Without an interactive terminal there is nobody to ask, so `prompt` mode refuses mutating tools rather than running them. Pass `--yes` for headless runs.
 
 Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one.
+
+### Todo List
+
+Multi-step runs lose their plan first: every turn resends the whole transcript, and [context compaction](#context-compaction) summarizes the *oldest* turns — which is exactly where the plan was stated. The `todo_write` tool gives the model somewhere else to keep it.
+
+Each call replaces the complete list, so it cannot desynchronize from what the model believes it is doing. Exactly one item may be `in_progress`; a second one is handed back as a tool error so the model corrects itself. An empty list means the plan is finished or dropped.
+
+After every update the list is printed:
+
+```text
+📋 Todos:
+   ☑ Add the todo_write tool
+   ▶ Wire the renderer up
+   ☐ Update the README
+```
+
+The tool changes nothing outside smith, so it never passes the approval gate. It is not parallel-safe either — it writes shared state and therefore always runs on its own.
+
+Under `--json` the same update arrives as one line:
+
+```json
+{"type":"todos_updated","todos":[{"content":"Wire the renderer up","status":"in_progress"}]}
+```
+
+The list is part of the saved session, so `smith resume` brings the plan back along with the transcript.
 
 ### Context Compaction
 
@@ -243,7 +269,7 @@ smith --json run "..." | jq -r 'select(.type=="result") | .text'
 
 While streaming, each token also arrives as `{"type":"assistant_text_delta","text":"..."}`. `assistant_text` and `result` are unchanged, so a consumer written against the non-streaming format keeps working.
 
-Other event types are `history_compacted` and `turn_error`.
+Other event types are `todos_updated`, `history_compacted` and `turn_error`.
 
 **Exit codes** (both modes, not just `--json`): `0` on success, `1` when the turn failed — a provider error or the turn limit. A tool that returns an error is *not* a failed run; that is ordinary agent flow the model handles itself.
 
@@ -305,6 +331,7 @@ src/
     ├── output.cr            # Human & JSON Lines renderers for the event stream
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
+    ├── todos.cr             # Todo list state, validation & change callback
     ├── session.cr           # Session persistence store (~/.smith/sessions/)
     ├── subagents.cr         # Child agent supervisor & report handling
     ├── llm.cr               # Requires all LLM provider adapters
@@ -329,6 +356,7 @@ src/
         ├── edit_file.cr     # Precise string replacement tool
         ├── grep.cr          # Regex search tool
         ├── glob.cr          # File pattern search tool
+        ├── todo_write.cr    # Structured plan for multi-step runs
         └── agent_tool.cr    # Delegated subagent execution tool
 ```
 

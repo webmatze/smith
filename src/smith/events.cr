@@ -1,4 +1,5 @@
 require "./llm/types"
+require "./todos"
 
 module Smith::Events
   abstract class Event
@@ -69,6 +70,15 @@ module Smith::Events
     getter strategy : String
 
     def initialize(@before_tokens : Int32, @after_tokens : Int32, @strategy : String)
+    end
+  end
+
+  # Emitted whenever the agent rewrote its plan. Carries the complete list,
+  # because todo_write replaces it wholesale.
+  class TodosUpdated < Event
+    getter items : Array(Smith::TodoList::Item)
+
+    def initialize(@items : Array(Smith::TodoList::Item))
     end
   end
 
