@@ -187,3 +187,32 @@ describe "the stop hook" do
     provider.calls.should eq(Smith::Agent::MAX_STOP_CONTINUATIONS + 1)
   end
 end
+
+describe "a turn that produced nothing" do
+  it "says so, instead of looking like nothing happened" do
+    provider = EmptyResponseProvider.new
+    agent = Smith::Agent.new(provider: provider, registry: Smith::Tools::Registry.new)
+
+    seen = [] of Smith::Events::Event
+    agent.on_event { |event| seen << event }
+
+    agent.send("hello")
+
+    seen.any?(Smith::Events::EmptyResponse).should be_true
+    # Still a completed turn, not a provider failure.
+    seen.any?(Smith::Events::TurnCompleted).should be_true
+    seen.any?(Smith::Events::TurnError).should be_false
+  end
+
+  it "stays quiet when the model did answer" do
+    provider = TextOnlyProvider.new
+    agent = Smith::Agent.new(provider: provider, registry: Smith::Tools::Registry.new)
+
+    seen = [] of Smith::Events::Event
+    agent.on_event { |event| seen << event }
+
+    agent.send("hello")
+
+    seen.any?(Smith::Events::EmptyResponse).should be_false
+  end
+end

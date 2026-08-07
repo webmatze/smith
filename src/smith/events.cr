@@ -111,5 +111,12 @@ module Smith::Events
     end
   end
 
+  # The provider answered with nothing at all — no text, no tool calls. Small
+  # local models do this occasionally. The message is dropped rather than
+  # recorded, since an empty assistant turn breaks the next request, but the
+  # turn must not simply look like a no-op to whoever is watching.
+  class EmptyResponse < Event
+  end
+
   alias Listener = Proc(Event, Nil)
 end

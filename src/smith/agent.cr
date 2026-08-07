@@ -113,7 +113,11 @@ module Smith
           # serialize to `content: null` with no tool_calls, which providers
           # reject: one such message breaks every later turn, since the whole
           # transcript is resent each time.
-          @messages << LLM::Message.assistant_with_blocks(response.content) unless response.content.empty?
+          if response.content.empty?
+            emit(Events::EmptyResponse.new)
+          else
+            @messages << LLM::Message.assistant_with_blocks(response.content)
+          end
 
           # A stop hook that blocks keeps the loop alive — that is how
           # "the tests must pass before you call it done" is expressed.
