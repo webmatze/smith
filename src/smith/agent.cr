@@ -143,6 +143,11 @@ module Smith
             Tools::CallRequest.new(call_id, tool_name, args)
           end
 
+          # Where a rewind would cut the transcript: before the assistant turn
+          # carrying these calls is recorded. Handed over rather than looked
+          # up, so the registry stays free of transcript knowledge.
+          @registry.checkpoints.try(&.current_message_index = @messages.size)
+
           # Execute tools concurrently or serially via registry
           tool_result_blocks = @registry.execute_calls(call_requests)
 

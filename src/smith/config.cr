@@ -39,6 +39,10 @@ module Smith
     DEFAULT_MODE               = "normal"
     DEFAULT_MAX_CONTEXT_TOKENS = 120_000
 
+    DEFAULT_CHECKPOINTS_ENABLED = true
+    DEFAULT_MAX_CHECKPOINTS     = 100
+    DEFAULT_RETENTION_DAYS      =  30
+
     struct HTTPSettings
       getter connect_timeout : Int32
       getter read_timeout : Int32
@@ -61,6 +65,19 @@ module Smith
         @ask : Array(String) = Array(String).new,
         @deny : Array(String) = Array(String).new,
       )
+      end
+    end
+
+    struct CheckpointSettings
+      getter? enabled : Bool
+      getter max_per_session : Int32
+      getter retention_days : Int32
+
+      def initialize(@enabled : Bool, @max_per_session : Int32, @retention_days : Int32)
+      end
+
+      def retention : Time::Span
+        @retention_days.days
       end
     end
 
@@ -331,6 +348,17 @@ module Smith
         matcher: matcher,
         timeout: fields["timeout"]?.try(&.as_i?) || Hooks::DEFAULT_TIMEOUT,
         once: fields["once"]?.try(&.as_bool?) || false
+      )
+    end
+
+    # Consumed by Checkpoints::Store via CLI#build_agent.
+    def checkpoints : CheckpointSettings
+      enabled = lookup("checkpoints", "enabled").try(&.as_bool?)
+
+      CheckpointSettings.new(
+        enabled: enabled.nil? ? DEFAULT_CHECKPOINTS_ENABLED : enabled,
+        max_per_session: lookup("checkpoints", "max_per_session").try(&.as_i?) || DEFAULT_MAX_CHECKPOINTS,
+        retention_days: lookup("checkpoints", "retention_days").try(&.as_i?) || DEFAULT_RETENTION_DAYS
       )
     end
 

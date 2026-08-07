@@ -216,3 +216,19 @@ describe "a turn that produced nothing" do
     seen.any?(Smith::Events::EmptyResponse).should be_false
   end
 end
+
+describe "the transcript position handed to checkpoints" do
+  it "is the size before the assistant turn is recorded" do
+    provider = MockProvider.new
+    registry = Smith::Tools::Registry.default
+    store = Smith::Checkpoints::Store.new(File.join(Dir.tempdir, "smith_idx_#{Random::Secure.hex(4)}"), enabled: false)
+    registry.checkpoints = store
+
+    agent = Smith::Agent.new(provider: provider, registry: registry)
+    agent.send("Read spec_helper file please")
+
+    # One user message was in the transcript when the tool call was made, so a
+    # rewind to that point drops the assistant turn and everything after it.
+    store.current_message_index.should eq(1)
+  end
+end

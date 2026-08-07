@@ -416,3 +416,31 @@ describe "permission rules" do
     end
   end
 end
+
+describe "checkpoint settings" do
+  it "is on by default with sane limits" do
+    with_sandbox do |temp_dir, _home|
+      settings = Smith::Config.load(make_project(temp_dir)).checkpoints
+
+      settings.enabled?.should be_true
+      settings.max_per_session.should eq(100)
+      settings.retention_days.should eq(30)
+    end
+  end
+
+  it "can be switched off and tuned" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [checkpoints]
+        enabled = false
+        max_per_session = 5
+        retention_days = 1
+        TOML
+
+      settings = Smith::Config.load(project).checkpoints
+      settings.enabled?.should be_false
+      settings.max_per_session.should eq(5)
+      settings.retention_days.should eq(1)
+    end
+  end
+end

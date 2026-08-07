@@ -4,6 +4,7 @@ require "./approval"
 require "./todo_write"
 require "../llm/types"
 require "../hooks"
+require "../checkpoints"
 
 module Smith::Tools
   struct CallRequest
@@ -39,6 +40,10 @@ module Smith::Tools
     # Same reasoning as approver: an empty runner keeps Registry usable as a
     # plain library component, and the CLI attaches the configured one.
     property hooks : Smith::Hooks::Runner
+
+    # Snapshots taken before a mutating call, so a run can be undone. nil
+    # leaves the registry exactly as it was.
+    property checkpoints : Smith::Checkpoints::Store?
 
     def initialize(@approver : Approver = AutoApprover.new, @hooks : Smith::Hooks::Runner = Smith::Hooks::Runner.new)
     end
@@ -180,10 +185,21 @@ module Smith::Tools
         return CallResult.new(call.id, @approver.denial_message(tool, call), is_error: true)
       end
 
+      # After the gate, so a refused call leaves no checkpoint behind, and
+      # after any hook rewrote the arguments, so the snapshot follows the call
+      # that actually runs rather than the one the model asked for.
+      checkpoint = @checkpoints.try(&.snapshot(call.name, call.args))
+
       output = begin
         tool.run(call.args)
       rescue ex : Exception
         return CallResult.new(call.id, "Tool execution failed: #{ex.message}", is_error: true)
+      end
+
+      # Records what smith left behind, which is what a later rewind compares
+      # against to spot a change made outside smith since.
+      if entry = checkpoint
+        @checkpoints.try(&.seal(entry))
       end
 
       post = @hooks.run(Smith::Hooks::Event::PostToolUse, tool_payload(call, output))

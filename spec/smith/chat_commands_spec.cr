@@ -29,3 +29,10 @@ describe Smith::ChatCommands do
     Smith::ChatCommands.parse("/plan").should eq(Smith::ChatCommand::Plan)
   end
 end
+
+describe "the rewind command" do
+  it "is recognised as a built-in" do
+    Smith::ChatCommands.parse("/rewind").should eq(Smith::ChatCommand::Rewind)
+    Smith::ChatCommands.parse("  /REWIND ").should eq(Smith::ChatCommand::Rewind)
+  end
+end

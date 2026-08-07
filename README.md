@@ -18,6 +18,7 @@ It is inspired by and built according to the policy-free agent loop principles o
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers custom agents in `.smith/agents/<name>.md` and `~/.smith/agents/`, sharing the frontmatter parser with skills.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **⏪ Checkpoints & Rewind (`Smith::Checkpoints`)**: Every `write_file` and `edit_file` is snapshotted first, content-addressed, so a run can be taken back — files and transcript — without having committed anything.
 - **🎭 Custom Agents (`Smith::Agents`)**: Specialists defined in `.smith/agents/<name>.md` — own system prompt, tools, model and provider. Delegate to one via `agent_type`, or run the main thread as one with `--agent`.
 - **🔐 Permission Rules (`Smith::Tools::RuleSet`)**: `allow` / `ask` / `deny` rules with path scoping and wildcards. Deny wins over everything, including `--yes`, and reaches read-only tools too.
 - **💰 Prompt Caching (Anthropic)**: The system prompt, the tool definitions and a rolling transcript prefix carry cache breakpoints, so a long session stops paying full price for the same prefix on every turn.
@@ -134,6 +135,11 @@ max_tokens = 120000
 [subagents]
 max_depth    = 3                 # levels of nesting; 0 disables delegation
 max_children = 20                # total spawns per run, shared across levels
+
+[checkpoints]
+enabled         = true           # snapshot files before write_file / edit_file
+max_per_session = 100
+retention_days  = 30
 ```
 
 Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `OLLAMA_HOST`, `SMITH_HOME`.
@@ -142,7 +148,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
+`[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
 
 ### Streaming
 
@@ -590,6 +596,57 @@ Other event types are `todos_updated`, `plan_presented`, `mode_changed`, `hook_f
 
 `--json` applies to headless runs only; `smith chat --json` exits with an error rather than quietly doing something else.
 
+### Checkpoints & Rewind
+
+smith may write and edit files. Without a way back, the only recovery is git — which helps only if you happened to commit first, and mid-session you rarely have. Checkpoints make a run reversible, which is what lowers the cost of letting smith write at all.
+
+Before every `write_file` and `edit_file`, the file's current content is snapshotted. Blobs are content-addressed and shared across the session, so ten edits of one file do not keep ten copies.
+
+```bash
+smith checkpoints                  # list them for the latest session
+smith rewind --dry-run             # show what would change
+smith rewind                       # undo files and cut the transcript back
+smith rewind --to 0003             # only back to a specific point
+smith rewind --files-only          # leave the transcript alone
+```
+
+`/rewind` does the same inside a chat session. Like `/plan`, it is resolved before skill expansion.
+
+```text
+🗂️  Checkpoints for session-1786137247-7ea976:
+ID     WHEN                 TOOL         PATH
+0001   2026-08-07 23:14     write_file   /tmp/cptest/notes.txt
+0002   2026-08-07 23:14     write_file   /tmp/cptest/extra.txt  (created)
+```
+
+A file the run *created* is deleted again on rewind, not merely emptied.
+
+#### `bash` is not covered
+
+**Changes made by `bash` are never snapshotted.** What a shell command touches is not predictable, and a rewind that claims more than it delivers is worse than none, so the limit is stated wherever the feature appears rather than hidden. Snapshotting a git tree before each shell call would cover it, but only inside a git repo and only for tracked files — a later step, not this one.
+
+#### Changes made outside smith
+
+Before restoring, smith compares each file against what it left there. If something else changed it since, the rewind **stops and changes nothing**:
+
+```text
+🚫 Rewind to checkpoint 0001 stopped — nothing was changed.
+
+⚠️  Changed outside smith since the snapshot:
+   /tmp/cptest2/notes.txt
+   Re-run with --force to overwrite them. The checkpoints are kept until then.
+```
+
+Either the whole rewind happens or none of it does — a partial one would leave files and transcript describing different worlds. The checkpoints survive a stopped rewind, so `--force` still has something to act on.
+
+#### Transcript
+
+By default the transcript is cut back to the point before the undone calls. That cut never separates a `tool_use` from its `tool_result` — providers reject a request with one half missing, the same invariant [context compaction](#context-compaction) upholds.
+
+#### Storage
+
+A session now owns a directory, `~/.smith/sessions/<id>/`, with `session.json` next to `checkpoints/`. Sessions written in the old flat layout are still read, listed and resumed, and migrate the next time they are saved.
+
 ### Session Persistence
 
 List saved sessions:
@@ -614,12 +671,18 @@ Commands:
   run <prompt>               Run a single prompt in headless mode and exit
   resume [<session_id>]      Resume an existing session (or latest session)
   sessions, list             List all saved local chat sessions
+  checkpoints [<session_id>] List the file snapshots taken during a session
+  rewind [<session_id>]      Undo a session's file changes
 
 Options:
   -m MODEL, --model=MODEL    Specify the LLM model (default: provider's default model)
   -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
   -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
       --auto-approve         Alias for --yes
+      --to CHECKPOINT        rewind: the checkpoint to go back to (default: the oldest)
+      --files-only           rewind: restore files but leave the transcript alone
+      --dry-run              rewind: show what would change, change nothing
+      --force                rewind: overwrite files changed outside smith since the snapshot
       --agent NAME           Run the main thread as the agent defined in .smith/agents/NAME.md
       --trust-hooks          Trust this project's hooks without asking (they run arbitrary commands)
       --plan                 Start in plan mode: research only, until you approve a plan
@@ -657,7 +720,8 @@ src/
     ├── chat_commands.cr     # Built-in /plan and /normal, resolved before skills
     ├── hooks.cr             # Hook definitions & subprocess runner (both response protocols)
     ├── trust.cr             # Trust store & prompt for project-defined hooks
-    ├── session.cr           # Session persistence store (~/.smith/sessions/)
+    ├── session.cr           # Session persistence store (~/.smith/sessions/<id>/) & transcript trimming
+    ├── checkpoints.cr       # File snapshots before mutating calls, and rewind
     ├── subagents.cr         # Child agent supervisor & report handling
     ├── llm.cr               # Requires all LLM provider adapters
     ├── tools.cr             # Requires all tool implementations
