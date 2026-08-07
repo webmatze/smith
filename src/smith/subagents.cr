@@ -2,6 +2,7 @@ require "json"
 require "./llm"
 require "./tools"
 require "./agent"
+require "./agents"
 
 module Smith::Subagents
   enum Mode
@@ -84,12 +85,18 @@ module Smith::Subagents
     #
     # `node_path` is this supervisor's own position ("2.1"), which its children
     # extend — an id is then unambiguous across levels.
+    # A definition may name a different provider, but building one needs API
+    # keys and config that belong in the CLI — so the CLI injects a factory
+    # rather than having that logic duplicated here.
+    property provider_factory : Proc(String, Smith::LLM::Provider)?
+
     def initialize(
       @approver : Smith::Tools::Approver = Smith::Tools::AutoApprover.new,
       @max_depth : Int32 = MAX_DEPTH,
       budget : SpawnBudget? = nil,
       @depth : Int32 = 0,
       @node_path : String = "",
+      @warn_io : IO = STDERR,
     )
       @budget = budget || SpawnBudget.new
     end
@@ -104,10 +111,18 @@ module Smith::Subagents
         max_depth: @max_depth,
         budget: @budget,
         depth: @depth + 1,
-        node_path: node_path
+        node_path: node_path,
+        warn_io: @warn_io
       )
       supervisor.plan_mode = @plan_mode
+      supervisor.provider_factory = @provider_factory
       supervisor
+    end
+
+    # Whether a child of this supervisor could itself delegate. Used to decide
+    # whether offering the agent tool is worth the tokens.
+    def children_may_nest? : Bool
+      @depth + 1 < @max_depth
     end
 
     def run_child(
@@ -115,6 +130,7 @@ module Smith::Subagents
       mode : Mode,
       provider : Smith::LLM::Provider,
       model : String,
+      definition : Smith::Agents::Definition? = nil,
     ) : Report
       # Depth before budget: a run that has gone too deep should be told so,
       # not told it is out of spawns.
@@ -127,25 +143,29 @@ module Smith::Subagents
       end
 
       @count += 1
-      node_id = "subagent-#{@node_path.empty? ? @count : "#{@node_path}.#{@count}"}"
+      path = @node_path.empty? ? @count.to_s : "#{@node_path}.#{@count}"
+      node_id = "subagent-#{path}"
 
-      # In plan mode nothing may change, delegated or not.
+      mode = definition.mode if definition
+      # In plan mode nothing may change, delegated or not — a definition's own
+      # tool list must not be a way around that.
       mode = Mode::Inspect if @plan_mode
 
-      # Construct child tool registry based on mode
-      registry = build_child_registry(mode)
+      child_model = definition.try(&.model) || model
+      child_provider = resolve_provider(definition, provider)
+      registry = build_child_registry(tool_names(definition, mode), path, child_provider, child_model)
 
-      child_system_prompt = case mode
-                            when Mode::Inspect
-                              "You are an inspection subagent. Your task is read-only research and analysis. Provide clear, accurate summaries."
-                            else
-                              "You are an autonomous child worker agent. Complete the requested task efficiently and report your results."
-                            end
+      child_system_prompt = definition.try(&.system_prompt.presence) || case mode
+      when Mode::Inspect
+        "You are an inspection subagent. Your task is read-only research and analysis. Provide clear, accurate summaries."
+      else
+        "You are an autonomous child worker agent. Complete the requested task efficiently and report your results."
+      end
 
       child_agent = Smith::Agent.new(
-        provider: provider,
+        provider: child_provider,
         registry: registry,
-        model: model,
+        model: child_model,
         system_prompt: child_system_prompt
       )
 
@@ -194,19 +214,73 @@ module Smith::Subagents
       )
     end
 
-    private def build_child_registry(mode : Mode) : Smith::Tools::Registry
-      registry = Smith::Tools::Registry.new(@approver)
-      registry.register(Smith::Tools::ReadFile.new)
-      registry.register(Smith::Tools::Grep.new)
-      registry.register(Smith::Tools::Glob.new)
+    private def resolve_provider(definition : Smith::Agents::Definition?, fallback : Smith::LLM::Provider) : Smith::LLM::Provider
+      name = definition.try(&.provider)
+      return fallback if name.nil?
 
-      if mode.work?
-        registry.register(Smith::Tools::Bash.new)
-        registry.register(Smith::Tools::WriteFile.new)
-        registry.register(Smith::Tools::EditFile.new)
+      factory = @provider_factory
+      return fallback if factory.nil?
+
+      factory.call(name)
+    end
+
+    # Plan mode wins over a definition's list, for the same reason it forces
+    # Inspect: otherwise `tools: bash` in a markdown file would undo it.
+    private def tool_names(definition : Smith::Agents::Definition?, mode : Mode) : Array(String)
+      names = definition.try(&.tool_names) || (mode.inspect? ? Smith::Agents::Definition::INSPECT_TOOLS : Smith::Agents::Definition::WORK_TOOLS)
+      return names unless mode.inspect?
+
+      names & Smith::Agents::Definition::INSPECT_TOOLS
+    end
+
+    private def build_child_registry(
+      names : Array(String),
+      node_path : String,
+      provider : Smith::LLM::Provider,
+      model : String,
+    ) : Smith::Tools::Registry
+      registry = Smith::Tools::Registry.new(@approver)
+
+      names.each do |name|
+        # Withheld rather than unknown: at the deepest level every call to it
+        # would be refused, so it is simply not offered.
+        next if name == "agent" && !children_may_nest?
+
+        tool = build_tool(name, node_path, provider, model)
+        if tool.nil?
+          @warn_io.puts "⚠️  Unknown tool '#{name}' in agent definition — ignored."
+          next
+        end
+
+        registry.register(tool)
       end
 
       registry
+    end
+
+    private def build_tool(
+      name : String,
+      node_path : String,
+      provider : Smith::LLM::Provider,
+      model : String,
+    ) : Smith::Tools::Tool?
+      case name
+      when "read_file"  then Smith::Tools::ReadFile.new
+      when "grep"       then Smith::Tools::Grep.new
+      when "glob"       then Smith::Tools::Glob.new
+      when "bash"       then Smith::Tools::Bash.new
+      when "write_file" then Smith::Tools::WriteFile.new
+      when "edit_file"  then Smith::Tools::EditFile.new
+      when "agent"
+        # A definition may ask to delegate further. The child supervisor
+        # carries the depth and the shared budget, so this stays bounded —
+        # the invariant #20 put in place.
+        Smith::Tools::AgentTool.new(
+          supervisor: child_supervisor(node_path),
+          provider: provider,
+          model: model
+        )
+      end
     end
   end
 end
