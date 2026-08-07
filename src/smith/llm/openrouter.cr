@@ -3,6 +3,7 @@ require "json"
 require "./provider"
 require "./types"
 require "./retry"
+require "./sse"
 
 module Smith::LLM
   class OpenRouter < Provider
@@ -36,11 +37,51 @@ module Smith::LLM
       end
     end
 
-    private def build_payload(model : String, request : Request) : String
+    def complete_streaming(request : Request, &on_delta : String -> Nil) : Response
+      return deliver_without_streaming(request, on_delta) unless request.stream?
+
+      model_to_use = request.model.empty? ? @default_model : request.model
+      payload = build_payload(model_to_use, request, streaming: true)
+      emitted = false
+
+      Retry.with_retry do
+        begin
+          stream_request(URI.parse(DEFAULT_ENDPOINT), stream_headers, payload, "OpenRouter") do |body_io|
+            OpenAIStream.read(body_io, @default_model) do |chunk|
+              emitted = true
+              on_delta.call(chunk)
+            end
+          end
+        rescue ex : Exception
+          # Replaying now would print the already-visible text a second time.
+          raise Retry::Fatal.new(ex) if emitted
+          raise ex
+        end
+      end
+    end
+
+    private def stream_headers : HTTP::Headers
+      HTTP::Headers{
+        "Authorization" => "Bearer #{@api_key}",
+        "HTTP-Referer"  => DEFAULT_SITE_URL,
+        "X-Title"       => DEFAULT_APP_NAME,
+        "Content-Type"  => "application/json",
+        "Accept"        => "text/event-stream",
+      }
+    end
+
+    private def build_payload(model : String, request : Request, streaming : Bool = false) : String
       String.build do |str|
         JSON.build(str) do |json|
           json.object do
             json.field "model", model
+
+            if streaming
+              json.field "stream", true
+              json.field "stream_options" do
+                json.object { json.field "include_usage", true }
+              end
+            end
 
             if max_tok = request.max_tokens
               json.field "max_tokens", max_tok

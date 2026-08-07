@@ -16,6 +16,7 @@ module Smith
     getter cumulative_usage : LLM::Usage
     getter listeners : Array(Events::Listener)
     getter max_context_tokens : Int32
+    getter? stream : Bool
 
     def initialize(
       @provider : LLM::Provider,
@@ -24,6 +25,7 @@ module Smith
       @system_prompt : String = "You are Smith, an autonomous coding agent written in Crystal.",
       messages : Array(LLM::Message)? = nil,
       @max_context_tokens : Int32 = Config::DEFAULT_MAX_CONTEXT_TOKENS,
+      @stream : Bool = true,
     )
       @messages = messages || Array(LLM::Message).new
       @cumulative_usage = LLM::Usage.new(0, 0, 0)
@@ -55,11 +57,14 @@ module Smith
           model: @model,
           system: @system_prompt,
           messages: @messages,
-          tools: @registry.specs
+          tools: @registry.specs,
+          stream: @stream
         )
 
         response = begin
-          @provider.complete(request)
+          @provider.complete_streaming(request) do |delta|
+            emit(Events::AssistantTextDelta.new(delta))
+          end
         rescue ex : Exception
           emit(Events::TurnError.new("Provider completion failed: #{ex.message}"))
           return

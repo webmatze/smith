@@ -3,6 +3,7 @@ require "json"
 require "./provider"
 require "./types"
 require "./retry"
+require "./sse"
 
 module Smith::LLM
   class Ollama < Provider
@@ -35,12 +36,55 @@ module Smith::LLM
       end
     end
 
-    private def build_payload(model : String, request : Request) : String
+    # smith talks to Ollama through its OpenAI-compatible endpoint, so the
+    # stream is plain OpenAI-shaped SSE rather than Ollama's own NDJSON.
+    def complete_streaming(request : Request, &on_delta : String -> Nil) : Response
+      return deliver_without_streaming(request, on_delta) unless request.stream?
+
+      model_to_use = request.model.empty? ? @default_model : request.model
+      payload = build_payload(model_to_use, request, streaming: true)
+      emitted = false
+
+      Retry.with_retry do
+        begin
+          uri = URI.parse("#{@host}/v1/chat/completions")
+          headers = HTTP::Headers{
+            "Content-Type" => "application/json",
+            "Accept"       => "text/event-stream",
+          }
+
+          stream_request(uri, headers, payload, "Ollama") do |body_io|
+            OpenAIStream.read(body_io, @default_model) do |chunk|
+              emitted = true
+              on_delta.call(chunk)
+            end
+          end
+        rescue ex : Socket::ConnectError | Socket::Error
+          raise Retry::Fatal.new(ex) if emitted
+          raise ResponseError.new(
+            503,
+            "Failed to connect to Ollama at #{@host}. Make sure Ollama service is running (`ollama serve`)."
+          )
+        rescue ex : Exception
+          # Replaying now would print the already-visible text a second time.
+          raise Retry::Fatal.new(ex) if emitted
+          raise ex
+        end
+      end
+    end
+
+    private def build_payload(model : String, request : Request, streaming : Bool = false) : String
       String.build do |str|
         JSON.build(str) do |json|
           json.object do
             json.field "model", model
-            json.field "stream", false
+            json.field "stream", streaming
+
+            if streaming
+              json.field "stream_options" do
+                json.object { json.field "include_usage", true }
+              end
+            end
 
             if max_tok = request.max_tokens
               json.field "max_tokens", max_tok

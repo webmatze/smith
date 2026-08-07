@@ -126,6 +126,7 @@ describe Smith::Output::HumanRenderer do
     renderer = Smith::Output::HumanRenderer.new(stdout_io)
 
     renderer.banner("ollama", "gemma4:12b-mlx", ["test-skill"])
+    renderer.handle(Smith::Events::AssistantTextDelta.new("hello"))
     renderer.handle(Smith::Events::AssistantText.new("hello"))
     renderer.handle(tool_start)
     renderer.handle(Smith::Events::ToolFinished.new("call_1", "bash", "ok", false))
@@ -140,6 +141,21 @@ describe Smith::Output::HumanRenderer do
     text.should contain("finished")
     text.should contain("Context compacted")
     text.should contain("📊 Usage:")
+  end
+
+  it "prints deltas once, not twice" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    # The agent emits both: deltas for live display, then the finished block.
+    # Printing both would show the answer twice.
+    renderer.handle(Smith::Events::AssistantTextDelta.new("There are "))
+    renderer.handle(Smith::Events::AssistantTextDelta.new("12 files."))
+    renderer.handle(Smith::Events::AssistantText.new("There are 12 files."))
+
+    stdout_io.to_s.should eq("There are 12 files.")
+    # The answer still comes from AssistantText, which is what `result` uses.
+    renderer.answer.should eq("There are 12 files.")
   end
 
   it "shares the exit-code rule with the JSON renderer" do

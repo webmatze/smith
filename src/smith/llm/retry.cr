@@ -1,5 +1,16 @@
 module Smith::LLM
   class Retry
+    # Marks an error that must not be retried whatever its type. Streaming
+    # uses it once the first delta has reached the screen: replaying the call
+    # would print the same text twice.
+    class Fatal < Exception
+      getter inner : Exception
+
+      def initialize(@inner : Exception)
+        super(@inner.message)
+      end
+    end
+
     struct Config
       property max_retries : Int32
       property initial_delay : Time::Span
@@ -23,6 +34,9 @@ module Smith::LLM
         begin
           return yield
         rescue ex : Exception
+          # Unwrap so callers see the original failure, not the marker.
+          raise ex.inner if ex.is_a?(Fatal)
+
           retries += 1
           if retries > config.max_retries || !retryable?(ex)
             raise ex

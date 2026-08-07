@@ -17,7 +17,52 @@ describe Smith::LLM::Timeouts do
   end
 end
 
+private class CannedProvider < Smith::LLM::Provider
+  getter completions = 0
+
+  def name : String
+    "canned"
+  end
+
+  def default_model : String
+    "canned-model"
+  end
+
+  def complete(request : Smith::LLM::Request) : Smith::LLM::Response
+    @completions += 1
+
+    Smith::LLM::Response.new(
+      id: "canned-1",
+      model: default_model,
+      content: [
+        Smith::LLM::ContentBlock.text("first block"),
+        Smith::LLM::ContentBlock.tool_use("c1", "bash", JSON.parse(%({"command": "ls"}))),
+        Smith::LLM::ContentBlock.text("second block"),
+      ],
+      stop_reason: "stop"
+    )
+  end
+end
+
 describe Smith::LLM::Provider do
+  describe "the non-streaming default" do
+    # This default is what makes deltas universal: callers never have to ask
+    # whether the provider streams.
+    it "yields one delta per text block and returns the same response" do
+      provider = CannedProvider.new
+      request = Smith::LLM::Request.new(model: "m", messages: [Smith::LLM::Message.user("hi")])
+
+      deltas = [] of String
+      response = provider.complete_streaming(request) { |chunk| deltas << chunk }
+
+      deltas.should eq(["first block", "second block"])
+      provider.completions.should eq(1)
+      response.id.should eq("canned-1")
+      response.content.size.should eq(3)
+      response.content[1].tool_name.should eq("bash")
+    end
+  end
+
   it "gives providers the default timeouts when none are passed" do
     provider = Smith::LLM::Ollama.new(host: "http://localhost:11434")
 

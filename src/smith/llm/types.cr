@@ -111,6 +111,7 @@ module Smith::LLM
     getter tools : Array(ToolSpec)?
     getter max_tokens : Int32?
     getter temperature : Float64?
+    getter? stream : Bool
 
     def initialize(
       @model : String,
@@ -119,6 +120,7 @@ module Smith::LLM
       @tools : Array(ToolSpec)? = nil,
       @max_tokens : Int32? = nil,
       @temperature : Float64? = nil,
+      @stream : Bool = true,
     )
     end
   end
