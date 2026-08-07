@@ -192,7 +192,8 @@ module Smith
         registry: registry,
         model: effective_model,
         system_prompt: build_system_prompt,
-        messages: messages
+        messages: messages,
+        max_context_tokens: @config.context.max_tokens
       )
 
       agent.on_event do |event|
@@ -208,6 +209,8 @@ module Smith
           else
             puts "✅ Tool \e[32m#{event.tool_name}\e[0m finished."
           end
+        when Events::HistoryCompacted
+          puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens"
         when Events::TurnError
           puts "\n❌ Error: #{event.error}"
         end

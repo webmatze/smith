@@ -51,5 +51,16 @@ module Smith::Events
     end
   end
 
+  # Emitted when the transcript was shrunk to stay inside the context window,
+  # so a user never silently wonders where their context went.
+  class HistoryCompacted < Event
+    getter before_tokens : Int32
+    getter after_tokens : Int32
+    getter strategy : String
+
+    def initialize(@before_tokens : Int32, @after_tokens : Int32, @strategy : String)
+    end
+  end
+
   alias Listener = Proc(Event, Nil)
 end

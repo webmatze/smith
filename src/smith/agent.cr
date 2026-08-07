@@ -2,6 +2,7 @@ require "./llm"
 require "./tools"
 require "./events"
 require "./config"
+require "./context"
 
 module Smith
   class Agent
@@ -14,6 +15,7 @@ module Smith
     getter messages : Array(LLM::Message)
     getter cumulative_usage : LLM::Usage
     getter listeners : Array(Events::Listener)
+    getter max_context_tokens : Int32
 
     def initialize(
       @provider : LLM::Provider,
@@ -21,6 +23,7 @@ module Smith
       @model : String = Config::DEFAULT_MODEL,
       @system_prompt : String = "You are Smith, an autonomous coding agent written in Crystal.",
       messages : Array(LLM::Message)? = nil,
+      @max_context_tokens : Int32 = Config::DEFAULT_MAX_CONTEXT_TOKENS,
     )
       @messages = messages || Array(LLM::Message).new
       @cumulative_usage = LLM::Usage.new(0, 0, 0)
@@ -45,6 +48,8 @@ module Smith
 
       while turns < MAX_TURNS
         turns += 1
+
+        compact_history
 
         request = LLM::Request.new(
           model: @model,
@@ -113,6 +118,44 @@ module Smith
       end
 
       emit(Events::TurnError.new("Exceeded max limit of #{MAX_TURNS} turns."))
+    end
+
+    # Runs before every request, so the history can never outgrow the window
+    # mid-conversation. Below the budget this is a no-op and leaves @messages
+    # byte-identical.
+    private def compact_history
+      result = Context.compact(@messages, @max_context_tokens) do |prefix|
+        summarize_prefix(prefix)
+      end
+
+      return unless result.compacted?
+
+      @messages = result.messages
+      emit(Events::HistoryCompacted.new(
+        result.before_tokens,
+        result.after_tokens,
+        result.strategy.to_s.downcase
+      ))
+    end
+
+    # A separate, tool-free call so summarizing cannot itself trigger tool use
+    # or drag the main conversation's history along.
+    private def summarize_prefix(prefix : Array(LLM::Message)) : String
+      transcript = prefix.map do |message|
+        text = message.content.compact_map(&.text).join("\n")
+        "#{message.role}: #{text}"
+      end.join("\n\n")
+
+      response = @provider.complete(LLM::Request.new(
+        model: @model,
+        system: "You compress conversation transcripts. Reply with a dense factual summary " \
+                "covering decisions made, files touched and open questions. No preamble.",
+        messages: [LLM::Message.user(transcript)]
+      ))
+
+      summary = response.content.compact_map(&.text).join("\n").strip
+      raise "empty summary" if summary.empty?
+      summary
     end
 
     private def update_usage(u : LLM::Usage)
