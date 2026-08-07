@@ -164,7 +164,7 @@ module Smith
       )
     end
 
-    # Consumed by issue #2 (approval mode).
+    # Consumed by Tools::Approver via CLI#build_approver.
     def approval : ApprovalSettings
       allowlist = lookup("approval", "allowlist").try(&.as_a?)
         .try(&.compact_map(&.as_s?)) || Array(String).new

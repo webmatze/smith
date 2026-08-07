@@ -4,6 +4,8 @@ require "./tool"
 
 module Smith::Tools
   class Bash < Tool
+    include MutatingTool
+
     MAX_OUTPUT_BYTES = 256 * 1024 # 256 KiB limit
 
     def name : String

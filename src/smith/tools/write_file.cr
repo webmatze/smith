@@ -4,6 +4,8 @@ require "./tool"
 
 module Smith::Tools
   class WriteFile < Tool
+    include MutatingTool
+
     def name : String
       "write_file"
     end
