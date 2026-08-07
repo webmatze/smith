@@ -35,6 +35,11 @@ module Smith::LLM
   end
 
   abstract class Provider
+    # Live thinking chunks, when a provider produces them. A property rather
+    # than a second block parameter, so the streaming signature every adapter
+    # implements stays as it is.
+    property on_thinking : Proc(String, Nil)?
+
     @timeouts : Timeouts = Timeouts.default
 
     getter timeouts : Timeouts

@@ -379,3 +379,42 @@ describe "a continued response" do
     line["attempt"].as_i.should eq(2)
   end
 end
+
+describe "thinking output" do
+  it "sets reasoning apart from the answer (human)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    renderer.handle(Smith::Events::ThinkingDelta.new("weighing options"))
+    renderer.handle(Smith::Events::AssistantTextDelta.new("the answer"))
+
+    text = stdout_io.to_s
+    text.should contain("weighing options")
+    text.should contain("the answer")
+    # Dimmed and italic, so it cannot be mistaken for the answer.
+    text.should contain("\e[2;3m")
+  end
+
+  it "notes redacted thinking without showing it" do
+    stdout_io = IO::Memory.new
+    Smith::Output::HumanRenderer.new(stdout_io)
+      .handle(Smith::Events::ThinkingBlock.new("encrypted-payload", redacted: true))
+
+    stdout_io.to_s.should contain("redacted")
+    stdout_io.to_s.should_not contain("encrypted-payload")
+  end
+
+  it "uses its own event types, leaving assistant_text consumers alone (json)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new)
+
+    renderer.handle(Smith::Events::ThinkingDelta.new("weighing"))
+    renderer.handle(Smith::Events::ThinkingBlock.new("secret", redacted: true))
+
+    lines = parsed_lines(stdout_io)
+    lines.map(&.["type"].as_s).should eq(["thinking_delta", "thinking_block"])
+    lines[0]["text"].as_s.should eq("weighing")
+    lines[1]["redacted"].as_bool.should be_true
+    lines[1]["text"].as_s.should be_empty
+  end
+end

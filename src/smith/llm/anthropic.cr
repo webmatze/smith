@@ -61,7 +61,7 @@ module Smith::LLM
           }
 
           stream_request(URI.parse(DEFAULT_ENDPOINT), headers, payload, "Anthropic") do |body_io|
-            AnthropicStream.read(body_io, @default_model) do |chunk|
+            AnthropicStream.read(body_io, @default_model, on_thinking: @on_thinking) do |chunk|
               emitted = true
               on_delta.call(chunk)
             end
@@ -78,9 +78,45 @@ module Smith::LLM
       String.build do |str|
         JSON.build(str) do |json|
           json.object do
+            max_tokens = request.max_tokens || DEFAULT_MAX_TOKENS
+
             json.field "model", model
-            json.field "max_tokens", request.max_tokens || DEFAULT_MAX_TOKENS
+            json.field "max_tokens", max_tokens
             json.field "stream", true if streaming
+
+            if budget = request.thinking_budget
+              # The legacy form, for models older than 4.6. The provider's own
+              # error for an oversized budget reads as an opaque API complaint;
+              # caught here it says what to change.
+              if budget >= max_tokens
+                raise ArgumentError.new(
+                  "thinking budget (#{budget}) must be smaller than max_tokens (#{max_tokens}); " \
+                  "raise max_tokens or lower [providers.anthropic] thinking_budget"
+                )
+              end
+
+              json.field "thinking" do
+                json.object do
+                  json.field "type", "enabled"
+                  json.field "budget_tokens", budget
+                end
+              end
+            elsif effort = request.thinking_effort
+              json.field "thinking" do
+                json.object do
+                  json.field "type", "adaptive"
+                  # Without this the blocks arrive with empty text, and there
+                  # would be nothing to show.
+                  json.field "display", "summarized"
+                end
+              end
+
+              json.field "output_config" do
+                json.object do
+                  json.field "effort", effort
+                end
+              end
+            end
 
             if sys = request.system
               json.field "system" do
@@ -202,6 +238,19 @@ module Smith::LLM
                       json.field "text", txt
                     end
                   end
+                when ContentBlock::BlockType::Thinking
+                  json.object do
+                    json.field "type", "thinking"
+                    json.field "thinking", b.text || ""
+                    # Byte for byte: an altered signature makes the whole
+                    # request invalid.
+                    json.field "signature", b.signature if b.signature
+                  end
+                when ContentBlock::BlockType::RedactedThinking
+                  json.object do
+                    json.field "type", "redacted_thinking"
+                    json.field "data", b.text || ""
+                  end
                 when ContentBlock::BlockType::ToolUse
                   json.object do
                     json.field "type", "tool_use"
@@ -284,6 +333,13 @@ module Smith::LLM
             if txt = item["text"]?.try(&.as_s)
               blocks << ContentBlock.text(txt)
             end
+          when "thinking"
+            blocks << ContentBlock.thinking(
+              item["thinking"]?.try(&.as_s?) || "",
+              item["signature"]?.try(&.as_s?)
+            )
+          when "redacted_thinking"
+            blocks << ContentBlock.redacted_thinking(item["data"]?.try(&.as_s?) || "")
           when "tool_use"
             tu_id = item["id"].as_s
             tu_name = item["name"].as_s

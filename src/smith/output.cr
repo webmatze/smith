@@ -84,6 +84,14 @@ module Smith::Output
         @io.puts "\n⏱️  Background job #{event.id} started: #{event.command}"
       when Events::BashJobExited
         @io.puts "\n⏱️  Background job #{event.id} #{event.status}"
+      when Events::ThinkingDelta
+        # Dimmed and italic, so reasoning never reads as the answer.
+        @io.print "\e[2;3m#{event.text}\e[0m"
+        @io.flush
+      when Events::ThinkingBlock
+        # Deltas already printed it while streaming; only the redacted marker
+        # has nothing to show and is worth a line of its own.
+        @io.puts "\n💭 \e[2m(redacted thinking)\e[0m" if event.redacted?
       when Events::ResponseContinued
         @io.puts "\n↩️  Response hit the output limit — continuing (#{event.attempt}/#{event.limit})"
       when Events::EmptyResponse
@@ -185,6 +193,18 @@ module Smith::Output
           json.field "type", "bash_job_exited"
           json.field "id", event.id
           json.field "status", event.status
+        end
+      when Events::ThinkingDelta
+        emit do |json|
+          json.field "type", "thinking_delta"
+          json.field "text", event.text
+        end
+      when Events::ThinkingBlock
+        emit do |json|
+          json.field "type", "thinking_block"
+          json.field "redacted", event.redacted?
+          # Redacted content is encrypted, so it is never emitted in the clear.
+          json.field "text", event.redacted? ? "" : event.text
         end
       when Events::ResponseContinued
         emit do |json|
