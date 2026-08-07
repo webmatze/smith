@@ -39,6 +39,10 @@ module Smith
     DEFAULT_MODE               = "normal"
     DEFAULT_MAX_CONTEXT_TOKENS = 120_000
 
+    DEFAULT_BASH_TIMEOUT        = 120
+    DEFAULT_MAX_BACKGROUND_JOBS =  10
+    DEFAULT_MAX_OUTPUT_BYTES    = 256 * 1024
+
     DEFAULT_CHECKPOINTS_ENABLED = true
     DEFAULT_MAX_CHECKPOINTS     = 100
     DEFAULT_RETENTION_DAYS      =  30
@@ -65,6 +69,15 @@ module Smith
         @ask : Array(String) = Array(String).new,
         @deny : Array(String) = Array(String).new,
       )
+      end
+    end
+
+    struct BashSettings
+      getter timeout : Int32
+      getter max_background_jobs : Int32
+      getter max_output_bytes : Int32
+
+      def initialize(@timeout : Int32, @max_background_jobs : Int32, @max_output_bytes : Int32)
       end
     end
 
@@ -348,6 +361,15 @@ module Smith
         matcher: matcher,
         timeout: fields["timeout"]?.try(&.as_i?) || Hooks::DEFAULT_TIMEOUT,
         once: fields["once"]?.try(&.as_bool?) || false
+      )
+    end
+
+    # Consumed by Tools::Bash and Tools::BashJobs via CLI#build_agent.
+    def bash : BashSettings
+      BashSettings.new(
+        timeout: lookup("bash", "timeout").try(&.as_i?) || DEFAULT_BASH_TIMEOUT,
+        max_background_jobs: lookup("bash", "max_background_jobs").try(&.as_i?) || DEFAULT_MAX_BACKGROUND_JOBS,
+        max_output_bytes: lookup("bash", "max_output_bytes").try(&.as_i?) || DEFAULT_MAX_OUTPUT_BYTES
       )
     end
 
