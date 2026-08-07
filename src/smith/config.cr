@@ -39,6 +39,11 @@ module Smith
     DEFAULT_MODE               = "normal"
     DEFAULT_MAX_CONTEXT_TOKENS = 120_000
 
+    DEFAULT_WEB_ALLOW_PRIVATE = false
+    DEFAULT_WEB_MAX_BYTES     = 256 * 1024
+    DEFAULT_SEARCH_PROVIDER   = "none"
+    DEFAULT_SEARXNG_HOST      = "http://localhost:8888"
+
     DEFAULT_BASH_TIMEOUT        = 120
     DEFAULT_MAX_BACKGROUND_JOBS =  10
     DEFAULT_MAX_OUTPUT_BYTES    = 256 * 1024
@@ -69,6 +74,16 @@ module Smith
         @ask : Array(String) = Array(String).new,
         @deny : Array(String) = Array(String).new,
       )
+      end
+    end
+
+    struct WebSettings
+      getter allow_private : Bool
+      getter max_bytes : Int32
+      getter search_provider : String
+      getter searxng_host : String
+
+      def initialize(@allow_private : Bool, @max_bytes : Int32, @search_provider : String, @searxng_host : String)
       end
     end
 
@@ -361,6 +376,19 @@ module Smith
         matcher: matcher,
         timeout: fields["timeout"]?.try(&.as_i?) || Hooks::DEFAULT_TIMEOUT,
         once: fields["once"]?.try(&.as_bool?) || false
+      )
+    end
+
+    # Consumed by Tools::WebFetch and Tools::WebSearch via CLI#build_agent.
+    # API keys are not here — they stay in the environment, like every other key.
+    def web : WebSettings
+      allow_private = lookup("web", "allow_private").try(&.as_bool?)
+
+      WebSettings.new(
+        allow_private: allow_private.nil? ? DEFAULT_WEB_ALLOW_PRIVATE : allow_private,
+        max_bytes: lookup("web", "max_bytes").try(&.as_i?) || DEFAULT_WEB_MAX_BYTES,
+        search_provider: lookup("web", "search_provider").try(&.as_s?) || DEFAULT_SEARCH_PROVIDER,
+        searxng_host: lookup("web", "searxng_host").try(&.as_s?) || DEFAULT_SEARXNG_HOST
       )
     end
 

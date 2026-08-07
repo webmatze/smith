@@ -232,6 +232,9 @@ module Smith::Tools
       jobs : BashJobs? = nil,
       bash_timeout : Int32 = Bash::DEFAULT_TIMEOUT,
       max_output_bytes : Int32 = Bash::MAX_OUTPUT_BYTES,
+      web_allow_private : Bool = false,
+      web_max_bytes : Int32 = WebFetch::DEFAULT_MAX,
+      search : Smith::Web::SearchProvider? = nil,
     ) : Registry
       registry = Registry.new(approver)
 
@@ -245,6 +248,12 @@ module Smith::Tools
       registry.register(Grep.new)
       registry.register(Glob.new)
       registry.register(TodoWrite.new(todos))
+      registry.register(WebFetch.new(allow_private: web_allow_private, max_bytes: web_max_bytes))
+
+      # Only offered when a provider is actually configured — a tool that can
+      # only ever fail is worse than no tool.
+      registry.register(WebSearch.new(search)) if search
+
       registry
     end
   end
