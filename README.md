@@ -18,6 +18,7 @@ It is inspired by and built according to the policy-free agent loop principles o
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers custom agents in `.smith/agents/<name>.md` and `~/.smith/agents/`, sharing the frontmatter parser with skills.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **↩️ Auto-Continue at the output limit**: A response cut off mid-sentence is continued automatically; a tool call cut off mid-JSON is discarded rather than half-executed.
 - **🌐 Web Tools (`Smith::Web`)**: `web_fetch` turns a page into markdown, `web_search` sits behind a provider adapter. Both mark their output as untrusted, and fetching is guarded against SSRF **after** DNS resolution.
 - **⏱️ Background Commands (`Smith::Tools::BashJobs`)**: Dev servers and log tails run in the background, and a foreground command that outruns its timeout is moved there rather than killed — so its output is never thrown away.
 - **⏪ Checkpoints & Rewind (`Smith::Checkpoints`)**: Every `write_file` and `edit_file` is snapshotted first, content-addressed, so a run can be taken back — files and transcript — without having committed anything.
@@ -543,6 +544,20 @@ Under `--json` the same update arrives as one line:
 
 The list is part of the saved session, so `smith resume` brings the plan back along with the transcript.
 
+### Auto-Continue at the Output Limit
+
+When a model runs into its output token limit the answer stops mid-sentence — or, worse, mid `tool_use`. smith notices, because every provider reports it: Anthropic as `max_tokens`, the OpenAI shape (OpenAI, OpenRouter, Ollama) as `length`. Both streaming readers carry it too, which matters since streaming is the default.
+
+**Cut-off text** is kept and continued:
+
+```text
+↩️  Response hit the output limit — continuing (1/3)
+```
+
+**A cut-off tool call is discarded**, not completed. Half a call cannot be finished, and a `tool_use` without a matching `tool_result` is rejected by every provider. The model is told to retry with a smaller payload — which is the case that actually bites, when a large `write_file` runs out of room. Any text it managed to produce is kept; the incomplete call never reaches the transcript and the tool never runs.
+
+Capped at three continuations per prompt, after which the turn fails rather than costing without bound. The count is per prompt, so a long session cannot exhaust it.
+
 ### Context Compaction
 
 Every turn resends the whole transcript, and a single `bash` result may be up to 256 KiB, so a long session would otherwise run into the provider's context limit mid-task. Before each request smith estimates the transcript size and, if it exceeds `[context] max_tokens`, shrinks it in two stages:
@@ -603,7 +618,7 @@ smith --json run "..." | jq -r 'select(.type=="result") | .text'
 
 While streaming, each token also arrives as `{"type":"assistant_text_delta","text":"..."}`. `assistant_text` and `result` are unchanged, so a consumer written against the non-streaming format keeps working.
 
-Other event types are `bash_job_started`, `bash_job_exited`, `todos_updated`, `plan_presented`, `mode_changed`, `hook_fired`, `history_compacted` and `turn_error`.
+Other event types are `response_continued`, `bash_job_started`, `bash_job_exited`, `todos_updated`, `plan_presented`, `mode_changed`, `hook_fired`, `history_compacted` and `turn_error`.
 
 **Exit codes** (both modes, not just `--json`): `0` on success, `1` when the turn failed — a provider error or the turn limit. A tool that returns an error is *not* a failed run; that is ordinary agent flow the model handles itself.
 

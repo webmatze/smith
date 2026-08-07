@@ -136,5 +136,16 @@ module Smith::Events
     end
   end
 
+  # The model ran into its output token limit and smith asked it to carry on.
+  # Worth showing: the extra provider calls would otherwise appear in the usage
+  # figures with no explanation.
+  class ResponseContinued < Event
+    getter attempt : Int32
+    getter limit : Int32
+
+    def initialize(@attempt : Int32, @limit : Int32)
+    end
+  end
+
   alias Listener = Proc(Event, Nil)
 end

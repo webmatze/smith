@@ -360,3 +360,22 @@ describe "background job reporting" do
     lines[1]["status"].as_s.should eq("killed")
   end
 end
+
+describe "a continued response" do
+  it "explains the extra provider calls (human)" do
+    stdout_io = IO::Memory.new
+    Smith::Output::HumanRenderer.new(stdout_io).handle(Smith::Events::ResponseContinued.new(1, 3))
+
+    stdout_io.to_s.should contain("output limit")
+    stdout_io.to_s.should contain("(1/3)")
+  end
+
+  it "is its own event (json)" do
+    stdout_io = IO::Memory.new
+    Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new).handle(Smith::Events::ResponseContinued.new(2, 3))
+
+    line = parsed_lines(stdout_io).first
+    line["type"].as_s.should eq("response_continued")
+    line["attempt"].as_i.should eq(2)
+  end
+end
