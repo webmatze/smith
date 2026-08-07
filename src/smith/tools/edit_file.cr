@@ -3,6 +3,8 @@ require "./tool"
 
 module Smith::Tools
   class EditFile < Tool
+    include MutatingTool
+
     def name : String
       "edit_file"
     end

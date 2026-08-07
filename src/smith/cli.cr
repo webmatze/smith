@@ -16,6 +16,7 @@ module Smith
     @args : Array(String)
     @model : String? = nil
     @provider_name : String? = nil
+    @auto_approve : Bool = false
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
     @config : Config
@@ -51,6 +52,14 @@ module Smith
 
         opts.on("-p PROVIDER", "--provider=PROVIDER", "Specify the provider: openrouter, ollama, anthropic, openai (default: from config, else openrouter)") do |p|
           @provider_name = p
+        end
+
+        opts.on("-y", "--yes", "Auto-approve mutating tools (bash, write_file, edit_file)") do
+          @auto_approve = true
+        end
+
+        opts.on("--auto-approve", "Alias for --yes") do
+          @auto_approve = true
         end
 
         opts.on("-v", "--version", "Print version information") do
@@ -158,11 +167,24 @@ module Smith
       blocks.join("\n\n")
     end
 
+    # CLI-Flag > [approval] mode. Without a TTY there is nobody to ask, so
+    # prompt mode degrades to refusing rather than silently running.
+    private def build_approver : Tools::Approver
+      return Tools::AutoApprover.new if @auto_approve
+
+      approval = @config.approval
+      return Tools::AutoApprover.new if approval.mode.downcase == "auto"
+      return Tools::DenyApprover.new unless STDIN.tty?
+
+      Tools::PromptApprover.new(allowlist: approval.allowlist)
+    end
+
     private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
       effective_model = @model || provider.default_model
 
-      registry = Tools::Registry.default
-      supervisor = Subagents::Supervisor.new
+      approver = build_approver
+      registry = Tools::Registry.default(approver)
+      supervisor = Subagents::Supervisor.new(approver)
       registry.register(Tools::AgentTool.new(supervisor: supervisor, provider: provider, model: effective_model))
 
       agent = Agent.new(

@@ -39,6 +39,12 @@ module Smith::Subagents
     MAX_CHILDREN_PER_SESSION = 20
 
     getter count : Int32 = 0
+    getter approver : Smith::Tools::Approver
+
+    # Children build their own registry, so without this a work-mode subagent
+    # would run bash straight past the parent's approval gate.
+    def initialize(@approver : Smith::Tools::Approver = Smith::Tools::AutoApprover.new)
+    end
 
     def run_child(
       prompt : String,
@@ -110,7 +116,7 @@ module Smith::Subagents
     end
 
     private def build_child_registry(mode : Mode) : Smith::Tools::Registry
-      registry = Smith::Tools::Registry.new
+      registry = Smith::Tools::Registry.new(@approver)
       registry.register(Smith::Tools::ReadFile.new)
       registry.register(Smith::Tools::Grep.new)
       registry.register(Smith::Tools::Glob.new)

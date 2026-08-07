@@ -1,5 +1,6 @@
 require "json"
 require "./tool"
+require "./approval"
 require "../llm/types"
 
 module Smith::Tools
@@ -27,6 +28,14 @@ module Smith::Tools
 
   class Registry
     @tools = Hash(String, Tool).new
+
+    # Defaults to allowing everything so Registry stays usable as a plain
+    # library component. Callers that have a user in front of them — the CLI —
+    # must attach a real approver.
+    property approver : Approver
+
+    def initialize(@approver : Approver = AutoApprover.new)
+    end
 
     def register(tool : Tool)
       @tools[tool.name] = tool
@@ -136,6 +145,13 @@ module Smith::Tools
         return CallResult.new(call.id, "Error: Unknown tool '#{call.name}'", is_error: true)
       end
 
+      # The single choke point for both the serial and the parallel path, so
+      # no call can route around the gate. Read-only tools are never marked
+      # mutating and pass straight through.
+      if tool.mutating? && !@approver.approve?(tool, call)
+        return CallResult.new(call.id, @approver.denial_message(tool), is_error: true)
+      end
+
       begin
         output = tool.run(call.args)
         CallResult.new(call.id, output, is_error: false)
@@ -145,8 +161,8 @@ module Smith::Tools
     end
 
     # Factory helper to register default standard toolset
-    def self.default : Registry
-      registry = Registry.new
+    def self.default(approver : Approver = AutoApprover.new) : Registry
+      registry = Registry.new(approver)
       registry.register(Bash.new)
       registry.register(ReadFile.new)
       registry.register(WriteFile.new)
