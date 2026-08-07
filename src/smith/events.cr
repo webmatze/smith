@@ -1,6 +1,7 @@
 require "./llm/types"
 require "./todos"
 require "./mode"
+require "./hooks"
 
 module Smith::Events
   abstract class Event
@@ -95,6 +96,18 @@ module Smith::Events
     getter mode : Smith::Mode
 
     def initialize(@mode : Smith::Mode)
+    end
+  end
+
+  # A user-configured hook ran. Worth showing: hooks are invisible policy
+  # otherwise, and a blocked call is easier to understand with the culprit
+  # named.
+  class HookFired < Event
+    getter hook_event : Smith::Hooks::Event
+    getter command : String
+    getter? blocked : Bool
+
+    def initialize(@hook_event : Smith::Hooks::Event, @command : String, @blocked : Bool)
     end
   end
 

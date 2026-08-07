@@ -3,10 +3,15 @@ require "./tools"
 require "./events"
 require "./config"
 require "./context"
+require "./hooks"
 
 module Smith
   class Agent
     MAX_TURNS = 500
+
+    # A stop hook that never goes green — `make test` on a red suite — would
+    # otherwise keep the loop alive until MAX_TURNS.
+    MAX_STOP_CONTINUATIONS = 3
 
     getter provider : LLM::Provider
     getter registry : Tools::Registry
@@ -18,6 +23,7 @@ module Smith
     getter listeners : Array(Events::Listener)
     getter max_context_tokens : Int32
     getter? stream : Bool
+    getter hooks : Hooks::Runner
 
     def initialize(
       @provider : LLM::Provider,
@@ -27,6 +33,7 @@ module Smith
       messages : Array(LLM::Message)? = nil,
       @max_context_tokens : Int32 = Config::DEFAULT_MAX_CONTEXT_TOKENS,
       @stream : Bool = true,
+      @hooks : Hooks::Runner = Hooks::Runner.new,
     )
       @messages = messages || Array(LLM::Message).new
       @cumulative_usage = LLM::Usage.new(0, 0, 0)
@@ -57,6 +64,7 @@ module Smith
 
     private def run_loop
       turns = 0
+      continuations = 0
       @stop_requested = false
 
       while turns < MAX_TURNS
@@ -106,6 +114,18 @@ module Smith
           # reject: one such message breaks every later turn, since the whole
           # transcript is resent each time.
           @messages << LLM::Message.assistant_with_blocks(response.content) unless response.content.empty?
+
+          # A stop hook that blocks keeps the loop alive — that is how
+          # "the tests must pass before you call it done" is expressed.
+          if continuations < MAX_STOP_CONTINUATIONS
+            outcome = @hooks.run(Hooks::Event::Stop, stop_payload(response))
+            if outcome.blocked?
+              continuations += 1
+              @messages << LLM::Message.user(outcome.reason || "A stop hook asked you to keep going.")
+              next
+            end
+          end
+
           emit(Events::TurnCompleted.new(turns))
           return
         else
@@ -148,6 +168,14 @@ module Smith
       end
 
       emit(Events::TurnError.new("Exceeded max limit of #{MAX_TURNS} turns."))
+    end
+
+    private def stop_payload(response : LLM::Response) : JSON::Any
+      text = response.content.compact_map(&.text).join("\n")
+
+      JSON.parse(JSON.build do |json|
+        json.object { json.field "last_assistant_text", text }
+      end)
     end
 
     # Runs before every request, so the history can never outgrow the window

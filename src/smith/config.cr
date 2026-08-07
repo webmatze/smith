@@ -1,6 +1,8 @@
 require "toml"
+require "digest/sha256"
 require "./paths"
 require "./mode"
+require "./hooks"
 
 module Smith
   # Resolved configuration, merged from (lowest to highest priority):
@@ -64,7 +66,20 @@ module Smith
 
     @table : Hash(String, TOML::Any)
 
-    def initialize(@table : Hash(String, TOML::Any) = Hash(String, TOML::Any).new, @sources : Array(String) = Array(String).new)
+    # Hook sections are kept per origin rather than read out of the merged
+    # table, for two reasons: deep_merge replaces arrays, so merging would drop
+    # the global hooks; and a *project* config that defines hooks is arbitrary
+    # code from whoever wrote the repo, which needs a trust decision that
+    # global hooks do not.
+    @global_hooks : TOML::Any?
+    @project_hooks : TOML::Any?
+
+    def initialize(
+      @table : Hash(String, TOML::Any) = Hash(String, TOML::Any).new,
+      @sources : Array(String) = Array(String).new,
+      @global_hooks : TOML::Any? = nil,
+      @project_hooks : TOML::Any? = nil,
+    )
     end
 
     # Reads the global config, then the nearest project config, and merges them
@@ -72,15 +87,24 @@ module Smith
     def self.load(start_dir : String = Dir.current) : Config
       table = Hash(String, TOML::Any).new
       sources = Array(String).new
+      global_hooks = nil
+      project_hooks = nil
+      project = project_path(start_dir)
 
-      [global_path, project_path(start_dir)].each do |path|
+      [global_path, project].each do |path|
         next unless path
         next unless parsed = parse_file(path)
         table = deep_merge(table, parsed)
         sources << path
+
+        if path == project
+          project_hooks = parsed["hooks"]?
+        else
+          global_hooks = parsed["hooks"]?
+        end
       end
 
-      new(table, sources)
+      new(table, sources, global_hooks, project_hooks)
     end
 
     def self.global_path : String
@@ -196,6 +220,74 @@ module Smith
     def context : ContextSettings
       ContextSettings.new(
         max_tokens: lookup("context", "max_tokens").try(&.as_i?) || DEFAULT_MAX_CONTEXT_TOKENS
+      )
+    end
+
+    # Hooks run arbitrary commands with the user's rights, so a project config
+    # that defines them has to be trusted once. nil means the project config
+    # defines no hooks at all; the digest changes whenever they do.
+    def project_hooks_digest : String?
+      hooks = @project_hooks
+      return nil if hooks.nil?
+
+      # TOML::Any renders its raw value; parse order follows file order, so
+      # the same file always yields the same digest.
+      Digest::SHA256.hexdigest(hooks.to_s)
+    end
+
+    # Global first, then project — the order hooks fire in.
+    def hooks : Array(Hooks::Definition)
+      global_hooks + parse_hooks(@project_hooks)
+    end
+
+    # Everything except the project config's hooks. Used when the user has not
+    # trusted this project: their own global hooks still run.
+    def global_hooks : Array(Hooks::Definition)
+      parse_hooks(@global_hooks)
+    end
+
+    private def parse_hooks(section : TOML::Any?) : Array(Hooks::Definition)
+      definitions = Array(Hooks::Definition).new
+      table = section.try(&.as_h?)
+      return definitions if table.nil?
+
+      table.each do |key, entries|
+        event = Hooks::Event.from_key(key)
+        next if event.nil?
+
+        entries.as_a?.try &.each do |entry|
+          definition = build_hook(event, entry)
+          definitions << definition if definition
+        end
+      end
+
+      definitions
+    end
+
+    # A malformed hook is skipped rather than raised on: a broken entry in a
+    # config file must not be able to stop smith from starting.
+    private def build_hook(event : Hooks::Event, entry : TOML::Any) : Hooks::Definition?
+      fields = entry.as_h?
+      return nil if fields.nil?
+
+      command = fields["command"]?.try(&.as_s?)
+      return nil if command.nil? || command.strip.empty?
+
+      matcher = fields["matcher"]?.try(&.as_s?).try do |pattern|
+        begin
+          Regex.new(pattern)
+        rescue ArgumentError
+          STDERR.puts "⚠️  Ignoring hook '#{command}': invalid matcher #{pattern.inspect}"
+          return nil
+        end
+      end
+
+      Hooks::Definition.new(
+        event: event,
+        command: command,
+        matcher: matcher,
+        timeout: fields["timeout"]?.try(&.as_i?) || Hooks::DEFAULT_TIMEOUT,
+        once: fields["once"]?.try(&.as_bool?) || false
       )
     end
 

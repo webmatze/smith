@@ -80,6 +80,12 @@ module Smith::Output
             end
           end
         end
+      when Events::HookFired
+        if event.blocked?
+          @io.puts "🪝 #{event.hook_event.to_key} \e[31mblocked\e[0m: #{event.command}"
+        else
+          @io.puts "🪝 #{event.hook_event.to_key}: #{event.command}"
+        end
       when Events::PlanPresented
         @io.puts "\n📋 Plan\n"
         @io.puts event.plan
@@ -155,6 +161,13 @@ module Smith::Output
               end
             end
           end
+        end
+      when Events::HookFired
+        emit do |json|
+          json.field "type", "hook_fired"
+          json.field "event", event.hook_event.to_key
+          json.field "command", event.command
+          json.field "blocked", event.blocked?
         end
       when Events::PlanPresented
         emit do |json|
