@@ -194,6 +194,33 @@ Run a single prompt in headless mode and exit:
 ./bin/smith run "Inspect src/smith/agent.cr and summarize its responsibility"
 ```
 
+#### Machine-readable output
+
+`--json` turns stdout into a JSON Lines stream — one self-contained object per line, nothing else — so it can be piped straight into `jq`. All decoration (banner, loaded skills, approval prompts) goes to stderr instead.
+
+```bash
+smith --json run "Run: ls. Then say how many entries you saw." | jq -c .
+```
+
+```json
+{"type":"tool_start","id":"call_1","tool":"bash","args":{"command":"ls"}}
+{"type":"tool_finished","id":"call_1","tool":"bash","is_error":false,"result":"README.md\n..."}
+{"type":"assistant_text","text":"There are 12 entries."}
+{"type":"result","text":"There are 12 entries.","usage":{"prompt_tokens":7126,"completion_tokens":132,"total_tokens":7258}}
+```
+
+`assistant_text` may arrive in several blocks; `result` is always the last line and carries the complete answer, so the usual one-liner is:
+
+```bash
+smith --json run "..." | jq -r 'select(.type=="result") | .text'
+```
+
+Other event types are `history_compacted` and `turn_error`.
+
+**Exit codes** (both modes, not just `--json`): `0` on success, `1` when the turn failed — a provider error or the turn limit. A tool that returns an error is *not* a failed run; that is ordinary agent flow the model handles itself.
+
+`--json` applies to headless runs only; `smith chat --json` exits with an error rather than quietly doing something else.
+
 ### Session Persistence
 
 List saved sessions:
@@ -224,6 +251,7 @@ Options:
   -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
   -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
       --auto-approve         Alias for --yes
+      --json                 Emit JSON Lines on stdout (headless 'run' only)
   -v, --version              Print version information
   -h, --help                 Show help banner
 ```
@@ -245,6 +273,7 @@ src/
     ├── paths.cr             # Resolves ~/.smith (honours SMITH_HOME)
     ├── config.cr            # config.toml discovery, merging & precedence chain
     ├── context.cr           # Transcript size estimation & two-stage compaction
+    ├── output.cr            # Human & JSON Lines renderers for the event stream
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── session.cr           # Session persistence store (~/.smith/sessions/)

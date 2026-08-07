@@ -6,6 +6,7 @@ require "./session"
 require "./project_ctx"
 require "./skills"
 require "./config"
+require "./output"
 
 module Smith
   class CLI
@@ -17,6 +18,8 @@ module Smith
     @model : String? = nil
     @provider_name : String? = nil
     @auto_approve : Bool = false
+    @json_output : Bool = false
+    @renderer : Output::Renderer? = nil
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
     @config : Config
@@ -62,6 +65,10 @@ module Smith
           @auto_approve = true
         end
 
+        opts.on("--json", "Emit JSON Lines on stdout (headless 'run' only)") do
+          @json_output = true
+        end
+
         opts.on("-v", "--version", "Print version information") do
           puts "smith version #{Smith::VERSION}"
           exit
@@ -83,12 +90,19 @@ module Smith
 
       command = @args.first? || "chat"
 
+      # JSON Lines only make sense for a single headless run; anything else
+      # would silently do something other than what was asked.
+      if @json_output && !headless?(command)
+        STDERR.puts "❌ Error: --json is only supported for headless runs ('smith run')."
+        exit(1)
+      end
+
       case command
       when "run"
         prompt = @args[1..-1]?.try(&.join(" ")) || ""
         if prompt.empty?
-          puts "Error: 'smith run' requires a prompt argument."
-          puts "Example: smith run \"Refactor src/smith.cr\""
+          STDERR.puts "Error: 'smith run' requires a prompt argument."
+          STDERR.puts "Example: smith run \"Refactor src/smith.cr\""
           exit(1)
         end
         run_headless(prompt)
@@ -109,6 +123,23 @@ module Smith
       end
     end
 
+    KNOWN_COMMANDS = %w[run chat interactive resume sessions list]
+
+    # `run <prompt>`, or a bare prompt with no subcommand — both end up in
+    # run_headless.
+    private def headless?(command : String) : Bool
+      return true if command == "run"
+      !KNOWN_COMMANDS.includes?(command) && !@args.join(" ").strip.empty?
+    end
+
+    private def renderer : Output::Renderer
+      @renderer ||= if @json_output
+                      Output::JsonRenderer.new
+                    else
+                      Output::HumanRenderer.new
+                    end
+    end
+
     private def build_provider(provider_name : String = effective_provider_name) : LLM::Provider
       name = provider_name.downcase
       # -m wins over the config/env chain; nil means "ask the config".
@@ -127,8 +158,8 @@ module Smith
       when "openai"
         LLM::OpenAI.new(api_key: require_api_key("OPENAI_API_KEY"), default_model: default_m, timeouts: timeouts)
       else
-        puts "❌ Error: Unknown provider '#{provider_name}'."
-        puts "   Known providers: #{Config::BUILTIN_MODELS.keys.join(", ")}"
+        STDERR.puts "❌ Error: Unknown provider '#{provider_name}'."
+        STDERR.puts "   Known providers: #{Config::BUILTIN_MODELS.keys.join(", ")}"
         exit(1)
       end
     end
@@ -138,8 +169,8 @@ module Smith
     private def require_api_key(var_name : String) : String
       api_key = ENV[var_name]?
       if api_key.nil? || api_key.empty?
-        puts "❌ Error: #{var_name} environment variable is not set."
-        puts "   Please set it via: export #{var_name}=\"your_key_here\""
+        STDERR.puts "❌ Error: #{var_name} environment variable is not set."
+        STDERR.puts "   Please set it via: export #{var_name}=\"your_key_here\""
         exit(1)
       end
       api_key
@@ -176,7 +207,9 @@ module Smith
       return Tools::AutoApprover.new if approval.mode.downcase == "auto"
       return Tools::DenyApprover.new unless STDIN.tty?
 
-      Tools::PromptApprover.new(allowlist: approval.allowlist)
+      # In JSON mode the prompt must not land on stdout, or it would corrupt
+      # the JSONL stream mid-line.
+      Tools::PromptApprover.new(allowlist: approval.allowlist, output: renderer.prompt_io)
     end
 
     private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
@@ -197,23 +230,7 @@ module Smith
       )
 
       agent.on_event do |event|
-        case event
-        when Events::AssistantText
-          print event.text
-          STDOUT.flush
-        when Events::ToolStart
-          puts "\n🔧 Executing tool: \e[33m#{event.tool_name}\e[0m with args: #{event.args.to_json}"
-        when Events::ToolFinished
-          if event.is_error
-            puts "❌ Tool \e[31m#{event.tool_name}\e[0m failed: #{event.result}"
-          else
-            puts "✅ Tool \e[32m#{event.tool_name}\e[0m finished."
-          end
-        when Events::HistoryCompacted
-          puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens"
-        when Events::TurnError
-          puts "\n❌ Error: #{event.error}"
-        end
+        renderer.handle(event)
       end
 
       agent
@@ -222,20 +239,13 @@ module Smith
     private def run_headless(prompt : String)
       provider = build_provider
       agent = build_agent(provider)
-      effective_model = agent.model
 
-      expanded_prompt = @skills_catalog.expand_prompt(prompt)
+      renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
+      agent.send(@skills_catalog.expand_prompt(prompt))
+      renderer.finish(agent.cumulative_usage)
 
-      puts "⚒️  Running Smith Headless [Provider: #{provider.name} | Model: #{effective_model}]"
-      if @skills_catalog.skills.size > 0
-        puts "   Loaded Skills: #{@skills_catalog.skills.keys.join(", ")}"
-      end
-      puts "--------------------------------------------------"
-      agent.send(expanded_prompt)
-      puts "\n--------------------------------------------------"
-      if usage = agent.cumulative_usage
-        puts "📊 Usage: #{usage.prompt_tokens} prompt + #{usage.completion_tokens} completion = #{usage.total_tokens} total tokens"
-      end
+      # A failed provider call must not report success to a calling script.
+      exit(renderer.exit_code)
     end
 
     private def run_interactive
