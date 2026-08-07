@@ -113,3 +113,77 @@ describe "a response with no content blocks" do
     completed.should eq(1)
   end
 end
+
+class TextOnlyProvider < Smith::LLM::Provider
+  getter calls = 0
+
+  def name : String
+    "mock"
+  end
+
+  def default_model : String
+    "mock-model"
+  end
+
+  def complete(request : Smith::LLM::Request) : Smith::LLM::Response
+    @calls += 1
+    Smith::LLM::Response.new("resp_#{@calls}", request.model, [
+      Smith::LLM::ContentBlock.text("All done."),
+    ])
+  end
+end
+
+private def stop_hook(command : String)
+  Smith::Hooks::Runner.new(
+    [Smith::Hooks::Definition.new(event: Smith::Hooks::Event::Stop, command: command)],
+    warn_io: IO::Memory.new
+  )
+end
+
+private def agent_with(provider, hooks)
+  Smith::Agent.new(
+    provider: provider,
+    registry: Smith::Tools::Registry.new,
+    model: "mock-model",
+    hooks: hooks
+  )
+end
+
+describe "the stop hook" do
+  it "lets the turn end when it does not block" do
+    provider = TextOnlyProvider.new
+    agent_with(provider, stop_hook("echo 'tests pass'")).send("hi")
+
+    provider.calls.should eq(1)
+  end
+
+  it "continues the loop when it blocks, handing the reason to the model" do
+    provider = TextOnlyProvider.new
+    agent = agent_with(provider, stop_hook(%(
+      if [ -f #{Process::INITIAL_PWD}/.smith-stop-marker ]; then exit 0; fi
+      touch #{Process::INITIAL_PWD}/.smith-stop-marker
+      echo 'the tests are red' >&2
+      exit 2
+    )))
+
+    begin
+      agent.send("hi")
+
+      # One extra round-trip, and the model was told why.
+      provider.calls.should eq(2)
+      last_user = agent.messages.select(&.role.user?).last
+      last_user.content.first.text.not_nil!.should contain("the tests are red")
+    ensure
+      File.delete("#{Process::INITIAL_PWD}/.smith-stop-marker") if File.exists?("#{Process::INITIAL_PWD}/.smith-stop-marker")
+    end
+  end
+
+  it "gives up after a bounded number of continuations" do
+    provider = TextOnlyProvider.new
+
+    # A hook that never goes green would otherwise loop until MAX_TURNS.
+    agent_with(provider, stop_hook("echo 'still red' >&2; exit 2")).send("hi")
+
+    provider.calls.should eq(Smith::Agent::MAX_STOP_CONTINUATIONS + 1)
+  end
+end

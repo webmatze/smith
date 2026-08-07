@@ -3,6 +3,7 @@ require "./tool"
 require "./approval"
 require "./todo_write"
 require "../llm/types"
+require "../hooks"
 
 module Smith::Tools
   struct CallRequest
@@ -35,7 +36,11 @@ module Smith::Tools
     # must attach a real approver.
     property approver : Approver
 
-    def initialize(@approver : Approver = AutoApprover.new)
+    # Same reasoning as approver: an empty runner keeps Registry usable as a
+    # plain library component, and the CLI attaches the configured one.
+    property hooks : Smith::Hooks::Runner
+
+    def initialize(@approver : Approver = AutoApprover.new, @hooks : Smith::Hooks::Runner = Smith::Hooks::Runner.new)
     end
 
     def register(tool : Tool)
@@ -152,19 +157,48 @@ module Smith::Tools
         return CallResult.new(call.id, "Error: Unknown tool '#{call.name}'", is_error: true)
       end
 
+      # Runs before the approval gate: a hook that says no is policy, and there
+      # is no point asking the user about a call that policy already refused.
+      pre = @hooks.run(Smith::Hooks::Event::PreToolUse, tool_payload(call))
+      if pre.blocked?
+        return CallResult.new(call.id, pre.reason || "Blocked by a pre_tool_use hook.", is_error: true)
+      end
+
+      # A hook may rewrite the arguments — redirect a path, strip a secret,
+      # normalise a command (Claude Code v2.0.10).
+      args = pre.updated_input || call.args
+      call = CallRequest.new(call.id, call.name, args)
+
       # The single choke point for both the serial and the parallel path, so
       # no call can route around the gate. Read-only tools are never marked
-      # mutating and pass straight through.
-      if tool.mutating? && !@approver.approve?(tool, call)
+      # mutating and pass straight through — unless a hook explicitly asked
+      # for this one to be confirmed.
+      if (tool.mutating? || pre.ask?) && !@approver.approve?(tool, call)
         return CallResult.new(call.id, @approver.denial_message(tool), is_error: true)
       end
 
-      begin
-        output = tool.run(call.args)
-        CallResult.new(call.id, output, is_error: false)
+      output = begin
+        tool.run(call.args)
       rescue ex : Exception
-        CallResult.new(call.id, "Tool execution failed: #{ex.message}", is_error: true)
+        return CallResult.new(call.id, "Tool execution failed: #{ex.message}", is_error: true)
       end
+
+      post = @hooks.run(Smith::Hooks::Event::PostToolUse, tool_payload(call, output))
+      if context = post.additional_context
+        output = "#{output}\n\n#{context}"
+      end
+
+      CallResult.new(call.id, output, is_error: false)
+    end
+
+    private def tool_payload(call : CallRequest, result : String? = nil) : JSON::Any
+      JSON.parse(JSON.build do |json|
+        json.object do
+          json.field "tool_name", call.name
+          json.field "tool_args", call.args
+          json.field "tool_result", result if result
+        end
+      end)
     end
 
     # Factory helper to register default standard toolset.

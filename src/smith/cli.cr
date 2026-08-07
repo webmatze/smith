@@ -10,6 +10,8 @@ require "./output"
 require "./todos"
 require "./plan"
 require "./chat_commands"
+require "./hooks"
+require "./trust"
 
 module Smith
   class CLI
@@ -28,6 +30,10 @@ module Smith
     @skills_catalog : Skills::Catalog
     @config : Config
     @todos = TodoList.new
+    @trust_hooks : Bool = false
+    @hooks : Hooks::Runner? = nil
+    @session_id : String = "headless"
+    @hook_context : String? = nil
     @mode : Mode? = nil
     @plan : PlanSession? = nil
     @real_approver : Tools::Approver? = nil
@@ -76,6 +82,10 @@ module Smith
 
         opts.on("--auto-approve", "Alias for --yes") do
           @auto_approve = true
+        end
+
+        opts.on("--trust-hooks", "Trust this project's hooks without asking (they run arbitrary commands)") do
+          @trust_hooks = true
         end
 
         opts.on("--plan", "Start in plan mode: research only, until you approve a plan") do
@@ -228,6 +238,10 @@ module Smith
         blocks << project_instructions
       end
 
+      if hook_context = @hook_context
+        blocks << hook_context
+      end
+
       blocks.join("\n\n")
     end
 
@@ -243,6 +257,39 @@ module Smith
       # In JSON mode the prompt must not land on stdout, or it would corrupt
       # the JSONL stream mid-line.
       Tools::PromptApprover.new(allowlist: approval.allowlist, output: renderer.prompt_io)
+    end
+
+    # A project config that defines hooks is code from whoever wrote the repo,
+    # so it needs a one-time trust decision. `--yes` deliberately does not
+    # grant it — that flag is about tools the *model* chose, not about code a
+    # checkout brought with it. `--trust-hooks` is the explicit opt-in.
+    private def hooks : Hooks::Runner
+      @hooks ||= begin
+        definitions = if (digest = @config.project_hooks_digest) && !project_hooks_allowed?(digest)
+                        STDERR.puts "⚠️  This project's hooks are not trusted — running global hooks only."
+                        @config.global_hooks
+                      else
+                        @config.hooks
+                      end
+
+        runner = Hooks::Runner.new(definitions, session_id: @session_id)
+        runner.on_fire = ->(event : Hooks::Event, command : String, blocked : Bool) do
+          renderer.handle(Events::HookFired.new(event, command, blocked))
+        end
+        runner
+      end
+    end
+
+    private def project_hooks_allowed?(digest : String) : Bool
+      project = Config.project_path
+      return false if project.nil?
+
+      TrustPrompt.new(
+        TrustStore.new,
+        input: STDIN,
+        output: renderer.prompt_io,
+        preapproved: @trust_hooks
+      ).allow?(project, digest, @config.hooks.map(&.command))
     end
 
     private def plan_session : PlanSession
@@ -281,6 +328,11 @@ module Smith
       # detour instead of being asked again afterwards.
       approver = (@real_approver ||= build_approver)
       registry = Tools::Registry.default(approver, todos: @todos)
+      registry.hooks = hooks
+
+      # Fired before the system prompt is built, so a hook can inject context
+      # into it — the branch, the open tickets, whatever the project needs.
+      @hook_context ||= hooks.run(Hooks::Event::SessionStart).additional_context
 
       # Tools have no access to the agent's event bus, and giving them one
       # would put event knowledge into the policy-free core. The list's
@@ -299,7 +351,8 @@ module Smith
         system_prompt: build_system_prompt,
         messages: messages,
         max_context_tokens: @config.context.max_tokens,
-        stream: @stream.nil? ? @config.stream? : @stream.not_nil!
+        stream: @stream.nil? ? @config.stream? : @stream.not_nil!,
+        hooks: hooks
       )
 
       agent.on_event do |event|
@@ -324,6 +377,28 @@ module Smith
       agent
     end
 
+    # Every prompt passes through here, so a user_prompt_submit hook cannot be
+    # bypassed by using a different entry point.
+    private def submit(agent : Agent, text : String) : Bool
+      payload = JSON.parse(JSON.build do |json|
+        json.object { json.field "prompt", text }
+      end)
+
+      outcome = hooks.run(Hooks::Event::UserPromptSubmit, payload)
+      if outcome.blocked?
+        renderer.handle(Events::TurnError.new(outcome.reason || "Prompt blocked by a user_prompt_submit hook."))
+        return false
+      end
+
+      expanded = @skills_catalog.expand_prompt(text)
+      if context = outcome.additional_context
+        expanded = "#{expanded}\n\n#{context}"
+      end
+
+      agent.send(expanded)
+      true
+    end
+
     private def run_headless(prompt : String)
       provider = build_provider
       agent = build_agent(provider)
@@ -333,7 +408,7 @@ module Smith
       # announced here — otherwise a --plan run would look like a normal one.
       renderer.handle(Events::ModeChanged.new(Mode::Plan)) if plan_session.plan_mode?
 
-      agent.send(@skills_catalog.expand_prompt(prompt))
+      submit(agent, prompt)
       renderer.finish(agent.cumulative_usage)
 
       # A failed provider call must not report success to a calling script.
@@ -380,6 +455,8 @@ module Smith
     end
 
     private def start_session_loop(session_data : Session::Data)
+      # Set before the runner is built, so hooks see the real session id.
+      @session_id = session_data.id
       provider = build_provider(session_data.provider)
       agent = build_agent(provider, session_data.messages)
       effective_model = agent.model
@@ -416,10 +493,8 @@ module Smith
           next
         end
 
-        expanded_input = @skills_catalog.expand_prompt(trimmed)
-
         puts ""
-        agent.send(expanded_input)
+        submit(agent, trimmed)
         puts ""
 
         session_data.messages = agent.messages

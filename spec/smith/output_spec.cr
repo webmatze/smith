@@ -253,3 +253,32 @@ describe "plan mode rendering" do
     lines[1]["plan"].as_s.should eq("1. Read\n2. Patch")
   end
 end
+
+describe "hook rendering" do
+  it "names the event and the command, and marks a block (human)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    renderer.handle(Smith::Events::HookFired.new(Smith::Hooks::Event::PostToolUse, "format.sh", false))
+    renderer.handle(Smith::Events::HookFired.new(Smith::Hooks::Event::PreToolUse, "deny.sh", true))
+
+    text = stdout_io.to_s
+    text.should contain("post_tool_use")
+    text.should contain("format.sh")
+    text.should contain("pre_tool_use")
+    text.should contain("blocked")
+  end
+
+  it "emits hook_fired (json)" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new)
+
+    renderer.handle(Smith::Events::HookFired.new(Smith::Hooks::Event::Stop, "make test", true))
+
+    line = parsed_lines(stdout_io).first
+    line["type"].as_s.should eq("hook_fired")
+    line["event"].as_s.should eq("stop")
+    line["command"].as_s.should eq("make test")
+    line["blocked"].as_bool.should be_true
+  end
+end

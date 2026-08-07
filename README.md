@@ -17,6 +17,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **🪝 Hooks (`Smith::Hooks`)**: Five extension points — `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `stop` — that run configured shell commands and can inject context, rewrite tool arguments, block a call, or keep the loop going until the tests pass.
 - **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
@@ -130,7 +131,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
+`[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
 
 ### Streaming
 
@@ -185,6 +186,90 @@ An allowlist entry matches a command exactly or as a whole first word (`git stat
 Without an interactive terminal there is nobody to ask, so `prompt` mode refuses mutating tools rather than running them. Pass `--yes` for headless runs.
 
 Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one.
+
+### Hooks
+
+smith calls itself a policy-free core. Hooks are where the policy goes: user-configured shell commands that run at five points in the loop, so wishes that would otherwise each need a patch become configuration.
+
+```toml
+[[hooks.post_tool_use]]
+matcher = "write_file|edit_file"     # regex on the tool name; omit to match all
+command = "crystal tool format"
+timeout = 30                          # seconds, default 60
+once    = false                       # run only once per session
+
+[[hooks.stop]]
+command = "crystal spec"
+```
+
+| Event | When | Can |
+|---|---|---|
+| `session_start` | before the first turn | append context to the system prompt |
+| `user_prompt_submit` | after a prompt is entered, before the request | append context to the user turn, or block the prompt |
+| `pre_tool_use` | before the approval gate | allow, deny, force a prompt, or rewrite the arguments |
+| `post_tool_use` | after the tool ran | append text to the tool result |
+| `stop` | when the loop would end without tool calls | send the model back to work |
+
+Hooks from the global and the project config are **concatenated**, global first.
+
+#### Protocol
+
+The command runs through the shell and receives JSON on **stdin**:
+
+```json
+{
+  "hook_event_name": "pre_tool_use",
+  "session_id": "session-1786121371-db7352",
+  "cwd": "/path/to/project",
+  "tool_name": "write_file",
+  "tool_args": { "path": "src/foo.cr", "content": "..." }
+}
+```
+
+Plus `SMITH_PROJECT_DIR`, `SMITH_SESSION_ID` and `SMITH_HOOK_EVENT` in the environment.
+
+It answers in one of two ways. The **exit code** covers the simple cases:
+
+| Exit | Effect |
+|---|---|
+| `0` | carry on; stdout is handed to the model as context |
+| `2` | **block**; stderr becomes the reason the model is shown |
+| anything else | warning on stderr, the run carries on |
+
+Or print a **JSON object** on stdout (with exit 0) for the rest:
+
+```json
+{
+  "decision": "allow" | "deny" | "ask",
+  "reason": "...",
+  "updated_input": { "path": "src/foo.cr" },
+  "additional_context": "..."
+}
+```
+
+`updated_input` replaces the tool arguments. `ask` forces an approval prompt even for a tool that would otherwise bypass the gate. Note the consequence of the two-way protocol: a hook whose stdout happens to be a JSON *object* is always read as a control response — use `additional_context` to pass text deliberately.
+
+A `stop` hook that blocks does not end the run; its reason goes back to the model as a new user turn and the loop continues. That is how "the tests have to be green before you call it done" is expressed. It is capped at **3 continuations** per prompt, so a suite that never goes green cannot spin forever.
+
+**A broken hook never takes smith down.** A missing command, an unexpected exit code, a timeout, malformed JSON — each is a warning on stderr and the run continues. Only an explicit `exit 2` or a JSON `deny` blocks anything.
+
+#### Trust
+
+> **Hooks run arbitrary shell commands with your permissions and do not pass the approval gate.** A `.smith/config.toml` that came with somebody else's repository is a code-execution vector.
+
+The first time a **project** config defines hooks, smith asks:
+
+```text
+⚠️  This project defines hooks
+   /path/to/project/.smith/config.toml
+   Hooks run shell commands with your permissions and do not pass the approval gate:
+     • crystal tool format
+   Trust this project's hooks? [y]es / [N]o:
+```
+
+The answer is stored in `~/.smith/trusted.json` as the project path plus a digest of its hook section — change the hooks and smith asks again. Refusing, or having no terminal to ask at, disables the project's hooks; your own global hooks still run.
+
+`--yes` deliberately does **not** grant this. That flag is about tools the model chose, not about code a checkout brought with it. The explicit opt-in is `--trust-hooks`.
 
 ### Plan Mode
 
@@ -305,7 +390,7 @@ smith --json run "..." | jq -r 'select(.type=="result") | .text'
 
 While streaming, each token also arrives as `{"type":"assistant_text_delta","text":"..."}`. `assistant_text` and `result` are unchanged, so a consumer written against the non-streaming format keeps working.
 
-Other event types are `todos_updated`, `plan_presented`, `mode_changed`, `history_compacted` and `turn_error`.
+Other event types are `todos_updated`, `plan_presented`, `mode_changed`, `hook_fired`, `history_compacted` and `turn_error`.
 
 **Exit codes** (both modes, not just `--json`): `0` on success, `1` when the turn failed — a provider error or the turn limit. A tool that returns an error is *not* a failed run; that is ordinary agent flow the model handles itself.
 
@@ -341,6 +426,7 @@ Options:
   -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
   -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
       --auto-approve         Alias for --yes
+      --trust-hooks          Trust this project's hooks without asking (they run arbitrary commands)
       --plan                 Start in plan mode: research only, until you approve a plan
       --json                 Emit JSON Lines on stdout (headless 'run' only)
       --no-stream            Wait for the complete response instead of streaming it
@@ -372,6 +458,8 @@ src/
     ├── mode.cr              # Normal / plan mode enum
     ├── plan.cr              # Plan session state & approval gates (prompt/auto/halting)
     ├── chat_commands.cr     # Built-in /plan and /normal, resolved before skills
+    ├── hooks.cr             # Hook definitions & subprocess runner (both response protocols)
+    ├── trust.cr             # Trust store & prompt for project-defined hooks
     ├── session.cr           # Session persistence store (~/.smith/sessions/)
     ├── subagents.cr         # Child agent supervisor & report handling
     ├── llm.cr               # Requires all LLM provider adapters

@@ -223,3 +223,123 @@ describe Smith::Config do
     end
   end
 end
+
+describe "hook configuration" do
+  it "has no hooks by default" do
+    with_sandbox do |temp_dir, _home|
+      Smith::Config.load(make_project(temp_dir)).hooks.should be_empty
+    end
+  end
+
+  it "parses a hook table with its defaults" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [[hooks.pre_tool_use]]
+        command = "check.sh"
+        TOML
+
+      hook = Smith::Config.load(project).hooks.first
+      hook.event.should eq(Smith::Hooks::Event::PreToolUse)
+      hook.command.should eq("check.sh")
+      hook.matcher.should be_nil
+      hook.timeout.should eq(60)
+      hook.once?.should be_false
+    end
+  end
+
+  it "parses matcher, timeout and once" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [[hooks.post_tool_use]]
+        matcher = "write_file|edit_file"
+        command = "crystal tool format"
+        timeout = 30
+        once = true
+        TOML
+
+      hook = Smith::Config.load(project).hooks.first
+      hook.event.should eq(Smith::Hooks::Event::PostToolUse)
+      hook.matcher.not_nil!.source.should eq("write_file|edit_file")
+      hook.timeout.should eq(30)
+      hook.once?.should be_true
+    end
+  end
+
+  it "concatenates global and project hooks instead of replacing them" do
+    with_sandbox do |temp_dir, home_dir|
+      File.write(File.join(home_dir, "config.toml"), <<-TOML)
+        [[hooks.pre_tool_use]]
+        command = "global.sh"
+        TOML
+
+      project = make_project(temp_dir, <<-TOML)
+        [[hooks.pre_tool_use]]
+        command = "project.sh"
+        TOML
+
+      Smith::Config.load(project).hooks.map(&.command).should eq(["global.sh", "project.sh"])
+    end
+  end
+
+  it "leaves other arrays overriding, as before" do
+    with_sandbox do |temp_dir, home_dir|
+      File.write(File.join(home_dir, "config.toml"), <<-TOML)
+        [approval]
+        allowlist = ["ls"]
+        TOML
+
+      project = make_project(temp_dir, <<-TOML)
+        [approval]
+        allowlist = ["git status"]
+        TOML
+
+      Smith::Config.load(project).approval.allowlist.should eq(["git status"])
+    end
+  end
+
+  it "ignores unknown events and malformed entries rather than failing the run" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [[hooks.not_an_event]]
+        command = "nope.sh"
+
+        [[hooks.pre_tool_use]]
+        matcher = "["
+        command = "bad-regex.sh"
+
+        [[hooks.pre_tool_use]]
+        command = "good.sh"
+        TOML
+
+      Smith::Config.load(project).hooks.map(&.command).should eq(["good.sh"])
+    end
+  end
+
+  it "reports whether the project config is the source of any hook" do
+    with_sandbox do |temp_dir, home_dir|
+      File.write(File.join(home_dir, "config.toml"), <<-TOML)
+        [[hooks.stop]]
+        command = "global.sh"
+        TOML
+
+      # Global-only hooks are the user's own doing and need no trust prompt.
+      Smith::Config.load(make_project(temp_dir)).project_hooks_digest.should be_nil
+
+      project = make_project(temp_dir, <<-TOML)
+        [[hooks.stop]]
+        command = "project.sh"
+        TOML
+
+      Smith::Config.load(project).project_hooks_digest.should_not be_nil
+    end
+  end
+
+  it "changes the digest when the project hook section changes" do
+    with_sandbox do |temp_dir, _home|
+      before = Smith::Config.load(make_project(temp_dir, %([[hooks.stop]]\ncommand = "a.sh"))).project_hooks_digest
+      after = Smith::Config.load(make_project(temp_dir, %([[hooks.stop]]\ncommand = "b.sh"))).project_hooks_digest
+
+      before.should_not eq(after)
+    end
+  end
+end
