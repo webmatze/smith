@@ -32,4 +32,4 @@ jobs:
         run: crystal spec
 
       - name: Build binary
-        run: crystal build src/smith.cr -o bin/smith
+        run: mkdir -p bin && crystal build src/smith.cr -o bin/smith
