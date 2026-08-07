@@ -472,3 +472,33 @@ describe "bash settings" do
     end
   end
 end
+
+describe "web settings" do
+  it "blocks private addresses and disables search by default" do
+    with_sandbox do |temp_dir, _home|
+      settings = Smith::Config.load(make_project(temp_dir)).web
+
+      settings.allow_private.should be_false
+      settings.search_provider.should eq("none")
+      settings.max_bytes.should eq(262_144)
+    end
+  end
+
+  it "reads the web section" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [web]
+        allow_private = true
+        search_provider = "searxng"
+        searxng_host = "http://localhost:9999"
+        max_bytes = 1024
+        TOML
+
+      settings = Smith::Config.load(project).web
+      settings.allow_private.should be_true
+      settings.search_provider.should eq("searxng")
+      settings.searxng_host.should eq("http://localhost:9999")
+      settings.max_bytes.should eq(1024)
+    end
+  end
+end

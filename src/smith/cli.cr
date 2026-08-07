@@ -445,12 +445,17 @@ module Smith
         created
       end)
 
+      web = @config.web
+
       registry = Tools::Registry.default(
         approver,
         todos: @todos,
         jobs: jobs,
         bash_timeout: bash.timeout,
-        max_output_bytes: bash.max_output_bytes
+        max_output_bytes: bash.max_output_bytes,
+        web_allow_private: web.allow_private,
+        web_max_bytes: web.max_bytes,
+        search: Web::SearchProvider.build(web.search_provider, searxng_host: web.searxng_host)
       )
       registry.hooks = hooks
       registry.checkpoints = @checkpoints
