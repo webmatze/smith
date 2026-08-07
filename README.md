@@ -17,6 +17,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+- **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
 - **⚡ Native Performance**: Compiles to a lightweight native binary; the test suite runs in well under a second.
@@ -96,6 +97,7 @@ A full example with every supported key:
 [defaults]
 provider = "openrouter"          # openrouter | ollama | anthropic | openai
 stream   = true                  # stream responses token by token
+mode     = "normal"              # normal | plan
 
 [providers.openrouter]
 model = "qwen/qwen3.8-max"
@@ -122,13 +124,13 @@ allowlist = ["ls", "git status"]
 max_tokens = 120000
 ```
 
-Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `OLLAMA_HOST`, `SMITH_HOME`.
+Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `OLLAMA_HOST`, `SMITH_HOME`.
 
 **API keys are never read from the config file.** They stay in environment variables only, so a plaintext config never becomes a place secrets get committed from.
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming).
+`[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
 
 ### Streaming
 
@@ -183,6 +185,40 @@ An allowlist entry matches a command exactly or as a whole first word (`git stat
 Without an interactive terminal there is nobody to ask, so `prompt` mode refuses mutating tools rather than running them. Pass `--yes` for headless runs.
 
 Subagents inherit the parent's approver, so a delegated `bash` call is asked for just like a direct one.
+
+### Plan Mode
+
+For anything touching more than one file, "research first, then act" is the cheapest guard against a run that does something you never asked for. In plan mode smith reads the codebase, proposes a plan, and changes nothing until you approve it.
+
+```bash
+smith --plan run "Add rate limiting to the API client"
+```
+
+Persistently via `[defaults] mode = "plan"`, or per-session with `/plan` and `/normal` in the chat loop.
+
+While planning:
+
+- `bash`, `write_file` and `edit_file` are refused outright — not prompted for, refused. The denial explains why, so the model routes around it instead of retrying.
+- `bash` is blocked **wholesale**, including read-only-looking commands. Telling a reading shell command from a writing one is not reliably decidable — the same reason the approval allowlist errs towards asking too often.
+- Subagents are forced into `inspect` mode, so `agent(mode: "work")` is not a way around any of it.
+- `read_file`, `grep` and `glob` work as usual.
+
+When the agent is ready it calls `exit_plan_mode`, which shows the plan and asks:
+
+```text
+📋 Plan
+
+1. Add a token-bucket limiter to src/smith/llm/retry.cr
+2. Wire it into Provider#complete
+
+   Proceed? [y]es / [n]o (with feedback) / [q]uit:
+```
+
+**y** switches to normal mode — the regular approval gate comes back, `[a]lways` answers from before the detour included — and the agent implements the plan. **n** asks for free-text feedback and hands it to the agent, which revises and asks again; it stays locked down meanwhile. **q** ends the turn.
+
+Without an interactive terminal there is nobody to ask, so `exit_plan_mode` returns the plan and the run **stops**. A headless run never slides from planning into execution on its own. Pass `--yes` to approve automatically.
+
+In the chat loop, `/plan` and `/normal` are resolved *before* skill expansion, so a skill named `plan` cannot shadow the built-in command.
 
 ### Todo List
 
@@ -269,7 +305,7 @@ smith --json run "..." | jq -r 'select(.type=="result") | .text'
 
 While streaming, each token also arrives as `{"type":"assistant_text_delta","text":"..."}`. `assistant_text` and `result` are unchanged, so a consumer written against the non-streaming format keeps working.
 
-Other event types are `todos_updated`, `history_compacted` and `turn_error`.
+Other event types are `todos_updated`, `plan_presented`, `mode_changed`, `history_compacted` and `turn_error`.
 
 **Exit codes** (both modes, not just `--json`): `0` on success, `1` when the turn failed — a provider error or the turn limit. A tool that returns an error is *not* a failed run; that is ordinary agent flow the model handles itself.
 
@@ -305,6 +341,7 @@ Options:
   -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
   -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
       --auto-approve         Alias for --yes
+      --plan                 Start in plan mode: research only, until you approve a plan
       --json                 Emit JSON Lines on stdout (headless 'run' only)
       --no-stream            Wait for the complete response instead of streaming it
   -v, --version              Print version information
@@ -332,6 +369,9 @@ src/
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── todos.cr             # Todo list state, validation & change callback
+    ├── mode.cr              # Normal / plan mode enum
+    ├── plan.cr              # Plan session state & approval gates (prompt/auto/halting)
+    ├── chat_commands.cr     # Built-in /plan and /normal, resolved before skills
     ├── session.cr           # Session persistence store (~/.smith/sessions/)
     ├── subagents.cr         # Child agent supervisor & report handling
     ├── llm.cr               # Requires all LLM provider adapters
@@ -349,7 +389,7 @@ src/
     └── tools/
         ├── tool.cr          # Abstract Tool base class & ParallelTool/MutatingTool markers
         ├── registry.cr      # Tool registry, approval gate & Fiber parallel execution scheduler
-        ├── approval.cr      # Approver strategies (prompt/auto/deny) & bash allowlist matching
+        ├── approval.cr      # Approver strategies (prompt/auto/deny/plan) & bash allowlist matching
         ├── bash.cr          # Shell command execution tool
         ├── read_file.cr     # File reading tool
         ├── write_file.cr    # File writing tool
@@ -357,6 +397,7 @@ src/
         ├── grep.cr          # Regex search tool
         ├── glob.cr          # File pattern search tool
         ├── todo_write.cr    # Structured plan for multi-step runs
+        ├── exit_plan_mode.cr # Presents a plan for approval & leaves plan mode
         └── agent_tool.cr    # Delegated subagent execution tool
 ```
 

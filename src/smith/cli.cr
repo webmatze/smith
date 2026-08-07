@@ -8,6 +8,8 @@ require "./skills"
 require "./config"
 require "./output"
 require "./todos"
+require "./plan"
+require "./chat_commands"
 
 module Smith
   class CLI
@@ -26,6 +28,9 @@ module Smith
     @skills_catalog : Skills::Catalog
     @config : Config
     @todos = TodoList.new
+    @mode : Mode? = nil
+    @plan : PlanSession? = nil
+    @real_approver : Tools::Approver? = nil
 
     def initialize(@args : Array(String))
       @config = Config.load
@@ -37,6 +42,11 @@ module Smith
     # provider) first, otherwise whatever the config/env/default chain yields.
     private def effective_provider_name : String
       @provider_name || @config.provider
+    end
+
+    # Same precedence as everywhere else: flag first, then env/config/default.
+    private def effective_mode : Mode
+      @mode || @config.mode
     end
 
     def run
@@ -68,6 +78,10 @@ module Smith
           @auto_approve = true
         end
 
+        opts.on("--plan", "Start in plan mode: research only, until you approve a plan") do
+          @mode = Mode::Plan
+        end
+
         opts.on("--json", "Emit JSON Lines on stdout (headless 'run' only)") do
           @json_output = true
         end
@@ -89,6 +103,8 @@ module Smith
           puts "  • Project Context: Instructions in SMITH.md or AGENTS.md are automatically loaded into prompt."
           puts "  • Subagents: Agent can delegate tasks using the 'agent' tool (mode: 'work' or 'inspect')."
           puts "  • Persistence: Sessions are saved under ~/.smith/sessions/ and can be resumed with 'smith resume'."
+          puts "  • Plan Mode: --plan (or [defaults] mode = \"plan\") researches first and asks before changing anything."
+          puts "    In chat, /plan and /normal switch at runtime; these built-ins win over a skill of the same name."
           exit
         end
       end
@@ -194,6 +210,16 @@ module Smith
 
       blocks = [base_prompt]
 
+      if plan_session.plan_mode?
+        blocks << <<-PLAN
+        Plan Mode — you are researching, not building:
+          • Every mutating tool (bash, write_file, edit_file) is unavailable, and subagents are forced into read-only inspect mode. Do not try to work around that.
+          • Understand the code first with read_file, grep and glob.
+          • Then call exit_plan_mode with a concrete, step-by-step plan that names the files you intend to change. Writing the plan as prose and stopping does not work — the user only sees it through exit_plan_mode.
+          • If the request needs no changes at all, simply answer it.
+        PLAN
+      end
+
       if skill_summary = @skills_catalog.summary_prompt
         blocks << skill_summary
       end
@@ -219,10 +245,41 @@ module Smith
       Tools::PromptApprover.new(allowlist: approval.allowlist, output: renderer.prompt_io)
     end
 
+    private def plan_session : PlanSession
+      @plan ||= PlanSession.new(effective_mode, build_plan_gate)
+    end
+
+    # Mirrors build_approver: --yes trusts the run outright, and without a TTY
+    # there is nobody to ask — in which case presenting the plan is as far as
+    # the run goes. Headless must never slide into execution on its own.
+    private def build_plan_gate : PlanGate
+      return AutoPlanGate.new if @auto_approve
+      return HaltingPlanGate.new unless STDIN.tty?
+
+      PromptPlanGate.new(STDIN, renderer.prompt_io)
+    end
+
+    # The whole feature is this method plus a swapped approver: Registry#approver
+    # is a property, so a mode switch needs no structural change.
+    private def apply_mode(registry : Tools::Registry, supervisor : Subagents::Supervisor, mode : Mode) : Nil
+      case mode
+      in Mode::Plan
+        registry.approver = Tools::PlanApprover.new
+        registry.register(Tools::ExitPlanMode.new(plan_session))
+        supervisor.plan_mode = true
+      in Mode::Normal
+        registry.approver = @real_approver || build_approver
+        registry.unregister("exit_plan_mode")
+        supervisor.plan_mode = false
+      end
+    end
+
     private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
       effective_model = @model || provider.default_model
 
-      approver = build_approver
+      # Built once and kept, so the [a]lways answers survive a plan-mode
+      # detour instead of being asked again afterwards.
+      approver = (@real_approver ||= build_approver)
       registry = Tools::Registry.default(approver, todos: @todos)
 
       # Tools have no access to the agent's event bus, and giving them one
@@ -249,6 +306,21 @@ module Smith
         renderer.handle(event)
       end
 
+      plan = plan_session
+      plan.on_plan = ->(text : String) do
+        renderer.handle(Events::PlanPresented.new(text))
+      end
+      plan.on_halt = -> { agent.stop! }
+      plan.on_mode_change = ->(mode : Mode) do
+        apply_mode(registry, supervisor, mode)
+        # The mode is part of the system prompt, so a runtime switch has to
+        # rebuild it — otherwise the model keeps its old marching orders.
+        agent.system_prompt = build_system_prompt
+        renderer.handle(Events::ModeChanged.new(mode))
+      end
+
+      apply_mode(registry, supervisor, plan.mode)
+
       agent
     end
 
@@ -257,6 +329,10 @@ module Smith
       agent = build_agent(provider)
 
       renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
+      # on_mode_change only fires on a *switch*, so the starting mode is
+      # announced here — otherwise a --plan run would look like a normal one.
+      renderer.handle(Events::ModeChanged.new(Mode::Plan)) if plan_session.plan_mode?
+
       agent.send(@skills_catalog.expand_prompt(prompt))
       renderer.finish(agent.cumulative_usage)
 
@@ -313,6 +389,7 @@ module Smith
       if @skills_catalog.skills.size > 0
         puts "   Loaded Skills: #{@skills_catalog.skills.keys.join(", ")}"
       end
+      puts "   Mode: plan (research only — /normal to leave)" if plan_session.plan_mode?
       puts "   Type 'exit' or 'quit' to end session.\n\n"
 
       # Resuming without the plan would leave the model to reconstruct it from
@@ -332,6 +409,13 @@ module Smith
         next if trimmed.empty?
         break if trimmed == "exit" || trimmed == "quit"
 
+        # Before expand_prompt on purpose: the skill catalog claims any /name
+        # that matches a skill, so a skill called "plan" would shadow /plan.
+        if command = ChatCommands.parse(trimmed)
+          run_chat_command(command)
+          next
+        end
+
         expanded_input = @skills_catalog.expand_prompt(trimmed)
 
         puts ""
@@ -346,6 +430,18 @@ module Smith
 
       puts "Session saved to #{@session_store.sessions_dir}/#{session_data.id}.json"
       puts "Goodbye! ⚒️"
+    end
+
+    private def run_chat_command(command : ChatCommand) : Nil
+      plan = plan_session
+      target = command.plan? ? Mode::Plan : Mode::Normal
+
+      if plan.mode == target
+        puts "   Already in #{target.to_s.downcase} mode."
+        return
+      end
+
+      plan.mode = target
     end
 
     # Without this, Ctrl+C kills the process outright and the turn in flight is

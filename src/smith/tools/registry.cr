@@ -42,6 +42,12 @@ module Smith::Tools
       @tools[tool.name] = tool
     end
 
+    # Used by the mode switch, which registers exit_plan_mode only while plan
+    # mode is active. Returns whether anything was actually removed.
+    def unregister(name : String) : Bool
+      !@tools.delete(name).nil?
+    end
+
     def get(name : String) : Tool?
       @tools[name]?
     end

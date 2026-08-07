@@ -11,7 +11,8 @@ module Smith
     getter provider : LLM::Provider
     getter registry : Tools::Registry
     getter model : String
-    getter system_prompt : String
+    # Writable because the mode switch rebuilds it mid-session (/plan, /normal).
+    property system_prompt : String
     getter messages : Array(LLM::Message)
     getter cumulative_usage : LLM::Usage
     getter listeners : Array(Events::Listener)
@@ -30,10 +31,19 @@ module Smith
       @messages = messages || Array(LLM::Message).new
       @cumulative_usage = LLM::Usage.new(0, 0, 0)
       @listeners = Array(Events::Listener).new
+      @stop_requested = false
     end
 
     def on_event(&block : Events::Event -> Nil)
       @listeners << block
+    end
+
+    # Ends the run after the tool results of the current turn are recorded,
+    # without sending them back to the provider. A tool reaches this through
+    # whatever callback the CLI wired — plan mode uses it so an unapproved plan
+    # never slides into execution.
+    def stop! : Nil
+      @stop_requested = true
     end
 
     private def emit(event : Events::Event)
@@ -47,6 +57,7 @@ module Smith
 
     private def run_loop
       turns = 0
+      @stop_requested = false
 
       while turns < MAX_TURNS
         turns += 1
@@ -126,6 +137,13 @@ module Smith
           # Append assistant response & tool results atomically to history
           @messages << LLM::Message.assistant_with_blocks(response.content)
           @messages << LLM::Message.tool_results(tool_result_blocks)
+
+          # Checked after the history is complete, so the transcript stays
+          # consistent — every tool_use keeps its tool_result.
+          if @stop_requested
+            emit(Events::TurnCompleted.new(turns))
+            return
+          end
         end
       end
 
