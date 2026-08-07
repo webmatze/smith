@@ -311,3 +311,24 @@ describe "cache usage reporting" do
     reported["cache_read_tokens"].as_i.should eq(5900)
   end
 end
+
+describe "an empty response" do
+  it "is visible to a human, and not counted as a failure" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(stdout_io)
+
+    renderer.handle(Smith::Events::EmptyResponse.new)
+
+    stdout_io.to_s.should contain("empty response")
+    renderer.exit_code.should eq(0)
+  end
+
+  it "is reported as its own event under --json" do
+    stdout_io = IO::Memory.new
+    renderer = Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new)
+
+    renderer.handle(Smith::Events::EmptyResponse.new)
+
+    parsed_lines(stdout_io).first["type"].as_s.should eq("empty_response")
+  end
+end

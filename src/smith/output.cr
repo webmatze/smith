@@ -80,6 +80,8 @@ module Smith::Output
             end
           end
         end
+      when Events::EmptyResponse
+        @io.puts "\n⚠️  The model returned an empty response — nothing was recorded. Try rephrasing, or a different model."
       when Events::HookFired
         if event.blocked?
           @io.puts "🪝 #{event.hook_event.to_key} \e[31mblocked\e[0m: #{event.command}"
@@ -165,6 +167,10 @@ module Smith::Output
               end
             end
           end
+        end
+      when Events::EmptyResponse
+        emit do |json|
+          json.field "type", "empty_response"
         end
       when Events::HookFired
         emit do |json|
