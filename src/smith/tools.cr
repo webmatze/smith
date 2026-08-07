@@ -1,4 +1,5 @@
 require "./tools/tool"
+require "./tools/permissions"
 require "./tools/bash"
 require "./tools/read_file"
 require "./tools/write_file"

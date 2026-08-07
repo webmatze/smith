@@ -248,15 +248,33 @@ module Smith
     # CLI-Flag > [approval] mode. Without a TTY there is nobody to ask, so
     # prompt mode degrades to refusing rather than silently running.
     private def build_approver : Tools::Approver
-      return Tools::AutoApprover.new if @auto_approve
-
       approval = @config.approval
-      return Tools::AutoApprover.new if approval.mode.downcase == "auto"
-      return Tools::DenyApprover.new unless STDIN.tty?
+      rules = Tools::RuleSet.build(
+        allow: approval.allow,
+        ask: approval.ask,
+        deny: approval.deny,
+        project_dir: Dir.current
+      )
 
-      # In JSON mode the prompt must not land on stdout, or it would corrupt
-      # the JSONL stream mid-line.
-      Tools::PromptApprover.new(allowlist: approval.allowlist, output: renderer.prompt_io)
+      inner = if @auto_approve || approval.mode.downcase == "auto"
+                Tools::AutoApprover.new
+              elsif !STDIN.tty?
+                Tools::DenyApprover.new
+              else
+                # In JSON mode the prompt must not land on stdout, or it would
+                # corrupt the JSONL stream mid-line.
+                Tools::PromptApprover.new(
+                  allowlist: approval.allowlist,
+                  output: renderer.prompt_io,
+                  rules: rules
+                )
+              end
+
+      # Wrapped even when there are no rules, so the composition is the same
+      # everywhere; an empty RuleSet decides Unset and costs a hash lookup.
+      # Wrapping is also what makes deny survive --yes: the flag only replaces
+      # the inner approver.
+      Tools::RuleApprover.new(rules, inner)
     end
 
     # A project config that defines hooks is code from whoever wrote the repo,

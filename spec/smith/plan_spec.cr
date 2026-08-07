@@ -38,7 +38,7 @@ describe Smith::Tools::PlanApprover do
   end
 
   it "explains the block so the model can route around it" do
-    message = Smith::Tools::PlanApprover.new.denial_message(Smith::Tools::WriteFile.new)
+    message = Smith::Tools::PlanApprover.new.denial_message(Smith::Tools::WriteFile.new, bash_call)
 
     message.should contain("write_file")
     message.should contain("plan mode")

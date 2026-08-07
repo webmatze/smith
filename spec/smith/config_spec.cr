@@ -362,3 +362,57 @@ describe "anthropic caching setting" do
     end
   end
 end
+
+describe "permission rules" do
+  it "parses allow, ask and deny" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [approval]
+        allow = ["bash(git *)", "read_file(**)"]
+        ask   = ["bash(git push *)"]
+        deny  = ["bash(rm -rf *)"]
+        TOML
+
+      approval = Smith::Config.load(project).approval
+      approval.allow.should eq(["bash(git *)", "read_file(**)"])
+      approval.ask.should eq(["bash(git push *)"])
+      approval.deny.should eq(["bash(rm -rf *)"])
+    end
+  end
+
+  it "still understands the old bash-only allowlist" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [approval]
+        allowlist = ["ls", "git status"]
+        TOML
+
+      approval = Smith::Config.load(project).approval
+      # Kept verbatim for PromptApprover, and mirrored into the rule syntax.
+      approval.allowlist.should eq(["ls", "git status"])
+      approval.allow.should eq(["bash(ls)", "bash(git status)"])
+    end
+  end
+
+  it "merges an old allowlist with new allow rules rather than dropping either" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [approval]
+        allowlist = ["ls"]
+        allow     = ["bash(git *)"]
+        TOML
+
+      Smith::Config.load(project).approval.allow.should eq(["bash(git *)", "bash(ls)"])
+    end
+  end
+
+  it "has no rules at all by default" do
+    with_sandbox do |temp_dir, _home|
+      approval = Smith::Config.load(make_project(temp_dir)).approval
+
+      approval.allow.should be_empty
+      approval.ask.should be_empty
+      approval.deny.should be_empty
+    end
+  end
+end

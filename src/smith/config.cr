@@ -50,8 +50,17 @@ module Smith
     struct ApprovalSettings
       getter mode : String
       getter allowlist : Array(String)
+      getter allow : Array(String)
+      getter ask : Array(String)
+      getter deny : Array(String)
 
-      def initialize(@mode : String, @allowlist : Array(String))
+      def initialize(
+        @mode : String,
+        @allowlist : Array(String),
+        @allow : Array(String) = Array(String).new,
+        @ask : Array(String) = Array(String).new,
+        @deny : Array(String) = Array(String).new,
+      )
       end
     end
 
@@ -83,6 +92,7 @@ module Smith
     # global hooks do not.
     @global_hooks : TOML::Any?
     @project_hooks : TOML::Any?
+    @allowlist_deprecated : Bool? = nil
 
     def initialize(
       @table : Hash(String, TOML::Any) = Hash(String, TOML::Any).new,
@@ -224,13 +234,29 @@ module Smith
 
     # Consumed by Tools::Approver via CLI#build_approver.
     def approval : ApprovalSettings
-      allowlist = lookup("approval", "allowlist").try(&.as_a?)
-        .try(&.compact_map(&.as_s?)) || Array(String).new
+      allowlist = string_list("approval", "allowlist")
+
+      # The old bash-only allowlist keeps working, expressed in the new
+      # syntax. It stays in `allowlist` too, so PromptApprover's existing
+      # matching is untouched.
+      unless allowlist.empty?
+        @allowlist_deprecated ||= begin
+          STDERR.puts "⚠️  [approval] allowlist is deprecated; use allow = [\"bash(<command>)\"] instead."
+          true
+        end
+      end
 
       ApprovalSettings.new(
         mode: lookup("approval", "mode").try(&.as_s?) || DEFAULT_APPROVAL_MODE,
-        allowlist: allowlist
+        allowlist: allowlist,
+        allow: string_list("approval", "allow") + allowlist.map { |entry| "bash(#{entry})" },
+        ask: string_list("approval", "ask"),
+        deny: string_list("approval", "deny")
       )
+    end
+
+    private def string_list(*keys : String) : Array(String)
+      lookup(*keys).try(&.as_a?).try(&.compact_map(&.as_s?)) || Array(String).new
     end
 
     # Consumed by issue #3 (history compaction).
