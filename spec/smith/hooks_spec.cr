@@ -242,3 +242,25 @@ describe "hook visibility" do
     fired.map(&.[2]).should eq([false, true])
   end
 end
+
+describe "a hook that ignores its stdin" do
+  # `exit 2` never reads the payload, and neither does a formatter. Writing
+  # into a pipe nobody drains is therefore the normal case, not the exception.
+  it "still gets its decision through" do
+    outcome = runner(definition("exit 2")).run(Smith::Hooks::Event::PreToolUse, payload)
+
+    outcome.blocked?.should be_true
+  end
+
+  it "does not hang when the payload outgrows the pipe buffer" do
+    # A write_file call carrying a large file produces exactly this payload.
+    # Nothing drains the pipe, so the write blocks — and with it, the wait.
+    big_args = {"path" => "big.txt", "content" => "x" * (512 * 1024)}
+
+    outcome = runner(definition("echo nope >&2; exit 2", timeout: 5))
+      .run(Smith::Hooks::Event::PreToolUse, payload("write_file", big_args))
+
+    outcome.blocked?.should be_true
+    outcome.reason.not_nil!.should contain("nope")
+  end
+end
