@@ -60,6 +60,8 @@ module Smith
     # keep the plain renderer even on a TTY.
     @interactive_tui : Bool = false
     @tui_app : UI::App? = nil
+    @tui_notice_io : IO? = nil
+    @tui_warned : Bool = false
 
     def initialize(@args : Array(String))
       @config = Config.load
@@ -300,15 +302,14 @@ module Smith
     # Fullscreen mode is the interactive default on a real terminal; the flags
     # pin it either way. Headless runs never get it, so `smith run` output
     # stays scriptable.
-    @tui_warned = false
-
     private def tui_enabled? : Bool
       return false if @json_output
       return false if @tui == false
       return true if STDIN.tty? && STDOUT.tty?
 
-      # --tui was asked for explicitly but there is no terminal to draw on —
-      # say so rather than silently downgrading.
+      # --tui asks for fullscreen explicitly. It cannot conjure a terminal to
+      # draw on — raw mode needs stdin and stdout to be one — so all it can do
+      # here is say why it is downgrading rather than doing so silently.
       if @tui == true && !@tui_warned
         @tui_warned = true
         STDERR.puts "⚠️  --tui needs an interactive terminal; falling back to the line renderer."
@@ -515,13 +516,8 @@ module Smith
     # Where diagnostics go: under the TUI they belong on screen, otherwise
     # on stderr where they have always been.
     private def notice_io : IO
-      @interactive_tui ? tui_app_notice_io : STDERR
-    end
-
-    @tui_app_notice_io : IO? = nil
-
-    private def tui_app_notice_io : IO
-      @tui_app_notice_io ||= UI::NoticeIO.new(tui_app)
+      return STDERR unless @interactive_tui
+      @tui_notice_io ||= UI::NoticeIO.new(tui_app)
     end
 
     # Same contract as the background jobs below: nothing smith started may
@@ -934,7 +930,6 @@ module Smith
       agent = build_agent(provider, session_data.messages)
 
       app = tui_app
-      app.provider_name = session_data.provider
       app.model_name = agent.model
       app.mode = plan_session.mode
 
@@ -998,25 +993,14 @@ module Smith
 
     private def tui_banner(session_data : Session::Data, agent : Agent) : Nil
       app = tui_app
+      # The head — name, version, provider · model, skills — is the renderer's
+      # banner, the same one every other mode prints. Only what is specific to
+      # an interactive session is added here.
+      renderer.banner(session_data.provider, agent.model, @skills_catalog.skills.keys)
+
       lines = Array(UI::StyledLine).new
+      lines << [UI::Span.new("session #{session_data.id[0, 18]}", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
 
-      head = UI::StyledLine.new
-      head << UI::Span.new("⚒ ", UI::Style.new(fg: UI::Palette::WARN))
-      head << UI::Span.new("smith", UI::Style.new(bold: true))
-      head << UI::Span.new(" v#{Smith::VERSION}", UI::Style.new(fg: UI::Palette::INFO))
-      lines << head
-
-      info = UI::StyledLine.new
-      info << UI::Span.new(session_data.provider, UI::Style.new(fg: UI::Palette::INFO, dim: true))
-      info << UI::Span.new(" · ", UI::Style.new(fg: UI::Palette::BORDER))
-      info << UI::Span.new(agent.model, UI::Style.new(fg: UI::Palette::INFO, dim: true))
-      info << UI::Span.new(" · ", UI::Style.new(fg: UI::Palette::BORDER))
-      info << UI::Span.new("session #{session_data.id[0, 18]}", UI::Style.new(fg: UI::Palette::INFO, dim: true))
-      lines << info
-
-      unless @skills_catalog.skills.empty?
-        lines << [UI::Span.new("skills: #{@skills_catalog.skills.keys.join(", ")}", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
-      end
       unless @agents_catalog.agents.empty?
         lines << [UI::Span.new("agents: #{@agents_catalog.agents.keys.join(", ")}", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
       end
@@ -1028,12 +1012,16 @@ module Smith
         lines << [UI::Span.new("running as agent: #{definition.name}", UI::Style.new(fg: UI::Palette::MODE_PLAN))]
       end
 
+      lines << [UI::Span.new("type /help for commands, exit to quit", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
       app.notice(lines)
-      app.notice("type /help for commands, exit to quit", UI::Style.new(fg: UI::Palette::INFO, dim: true))
     end
 
+    # How much of a resumed transcript is replayed into the UI: enough to see
+    # where the session left off, not enough to bury the prompt.
+    REPLAYED_MESSAGES = 6
+
     private def replay_tui_history(app : UI::App, session_data : Session::Data) : Nil
-      session_data.messages.last(6).each do |msg|
+      session_data.messages.last(REPLAYED_MESSAGES).each do |msg|
         text = msg.content.select { |b| b.type.text? }.map(&.text).compact.join("\n")
         next if text.strip.empty?
 

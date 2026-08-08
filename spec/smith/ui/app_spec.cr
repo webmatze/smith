@@ -23,6 +23,26 @@ private class FakeTool < Smith::Tools::Tool
   include Smith::Tools::MutatingTool
 end
 
+# The screen as it stood while an over-long approval modal was up: the frame
+# is captured before the answer is processed, since the next draw takes the
+# live region down again and teardown wipes it for good.
+private def modal_frame_lines(script : Array, width = 80, height = 24) : Array(String)
+  app = app_with(script, width: width, height: height)
+  body = Array(StyledLine).new
+  40.times { |i| body << LineUtil.line("argument line #{i}") }
+  frame = ""
+
+  app.run do |_|
+    spawn do
+      app.modal("Approval required", body, [{'y', "allow once"}], ['y'])
+      frame = app.terminal.io.as(IO::Memory).to_s
+      app.turn_finished
+    end
+  end
+
+  Screen.replay(frame, width: width, height: height).screen_lines
+end
+
 describe Smith::UI::App do
   describe "the prompt loop" do
     it "submits typed text and returns to the prompt" do
@@ -69,6 +89,27 @@ describe Smith::UI::App do
       seen.should eq(["x"])
     end
 
+    it "records a submitted prompt in the history Up walks" do
+      # Enter goes through the editor, which is the only thing that files a
+      # prompt into the history — handling it beside the editor left Up/Down
+      # walking a list nothing ever wrote to.
+      app = app_with(["first\r", :tick, "\e[A", :tick])
+
+      app.run { |_| app.turn_finished }
+
+      app.editor.history.should eq(["first"])
+      app.editor.text.should eq("first")
+    end
+
+    it "keeps blank input out of the history" do
+      app = app_with(["   \r", :tick, "\e[A", :tick])
+
+      app.run { |_| app.turn_finished }
+
+      app.editor.history.should be_empty
+      app.editor.text.should eq("")
+    end
+
     it "draws the status bar into the terminal output" do
       app = app_with(["\x03"])
       app.model_name = "claude-test"
@@ -106,6 +147,18 @@ describe Smith::UI::App do
 
       output = app.terminal.io.as(IO::Memory).to_s
       output.should contain("stopping")
+    end
+
+    it "redraws from scratch on Ctrl+L while a turn runs" do
+      # A garbled screen is likeliest mid-turn, which is exactly when the
+      # state machine used to swallow ^L.
+      app = app_with(["go\r", :tick, "\x0c", :tick, "\e", :tick, "\e"])
+      app.on_interrupt { }
+      app.on_abort { }
+
+      app.run { |_| spawn { sleep(1.second); app.turn_finished } }
+
+      app.terminal.io.as(IO::Memory).to_s.should contain("\e[2J")
     end
 
     it "ignores other keys while a turn runs" do
@@ -172,39 +225,60 @@ describe Smith::UI::App do
       app = app_with(["go\r", :tick, :tick, :tick, :tick, "y", :tick, :tick], width: 80, height: 24)
       body = Array(StyledLine).new
       40.times { |i| body << LineUtil.line("argument line #{i}") }
+      frame = ""
 
       app.run do |_|
         spawn do
           tool = ToolBlock.new("c1", "bash", "sleep 30")
           app.add_block(tool)
           app.modal("Approval required", body, [{'y', "allow once"}], ['y'])
+          # Everything written while the modal was up — the next draw takes
+          # the region back down, and teardown wipes it entirely.
+          frame = app.terminal.io.as(IO::Memory).to_s
           tool.status = ToolBlock::Status::Done
           app.turn_finished
         end
       end
 
+      # Clamped, not reprinted: redrawn in place, so no copy of the panel was
+      # ever pushed off the top.
+      Screen.replay(frame).scrollback.count(&.includes?("Approval required")).should eq(0)
       screen = Screen.replay(app.terminal.io.as(IO::Memory).to_s)
-      screen.all_lines.count(&.includes?("Approval required")).should eq(0)
       screen.all_lines.count(&.includes?("sleep 30")).should eq(1)
     end
 
     it "shows the modal's question even when its body does not fit" do
-      app = app_with(["go\r", :tick, :tick, "y"], width: 80, height: 24)
-      body = Array(StyledLine).new
-      40.times { |i| body << LineUtil.line("argument line #{i}") }
+      lines = modal_frame_lines(["go\r", :tick, :tick, "y"])
+      visible = lines.join("\n")
 
-      app.run do |_|
-        spawn do
-          app.modal("Approval required", body, [{'y', "allow once"}], ['y'])
-          app.turn_finished
-        end
-      end
-
-      output = app.terminal.io.as(IO::Memory).to_s
-      output.should contain("more lines above")
-      output.should contain("[y] allow once")
+      # The question is pinned: it is what the choices below it refer to, so
+      # dropping it first would ask the human to approve an unnamed thing.
+      visible.should contain("Approval required")
+      visible.should contain("more lines above")
+      visible.should contain("[y] allow once")
       # The tail of the body — the part next to the question — survives.
-      output.should contain("argument line 39")
+      visible.should contain("argument line 39")
+    end
+
+    it "keeps the question on a screen too small for the panel" do
+      # Six rows cannot hold question, body, choices and status bar together.
+      # What has to go is the body — never the question the choices answer.
+      lines = modal_frame_lines(["go\r", :tick, :tick, "y"], height: 6)
+      visible = lines.join("\n")
+
+      visible.should contain("Approval required")
+      visible.should contain("[y] allow once")
+    end
+
+    it "pins the question above the body it belongs to" do
+      lines = modal_frame_lines(["go\r", :tick, :tick, "y"])
+
+      title = lines.index(&.includes?("Approval required")).not_nil!
+      marker = lines.index(&.includes?("more lines above")).not_nil!
+      tail = lines.index(&.includes?("argument line 39")).not_nil!
+
+      title.should be < marker
+      marker.should be < tail
     end
 
     it "renders the modal body while it is up" do

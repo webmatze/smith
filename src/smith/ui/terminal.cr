@@ -46,10 +46,6 @@ module Smith::UI
         new(Kind::{{name.id}})
       end
     {% end %}
-
-    def kind?(kind : Kind) : Bool
-      @kind == kind
-    end
   end
 
   # Parses a byte stream into Keys. Split out from Terminal so specs can drive
@@ -388,10 +384,6 @@ module Smith::UI
 
     def clear_line : Nil
       write "\e[2K"
-    end
-
-    def clear_to_end_of_line : Nil
-      write "\e[K"
     end
 
     def hide_cursor : Nil

@@ -42,6 +42,7 @@ module Smith::UI
     @char_channel : Channel(Char)? = nil
     @text_channel : Channel(String)? = nil
     @modal_chars : Array(Char) = [] of Char
+    @modal_title : String = ""
     @modal_blocks : Array(Block) = [] of Block
     @modal_prompt : StyledLine = LineUtil::EMPTY
 
@@ -49,7 +50,6 @@ module Smith::UI
     @on_abort : Proc(Nil)? = nil
 
     # Status bar contents, updated by whoever drives the run.
-    property provider_name : String = ""
     property model_name : String = ""
     property mode : Smith::Mode = Smith::Mode::Normal
     property usage_text : String = ""
@@ -92,21 +92,9 @@ module Smith::UI
     # by draw! and never redrawn after that.
     def flush_blocks! : Nil
       while @flushed < @blocks.size
-        break unless finalized?(@blocks[@flushed])
+        break unless @blocks[@flushed].finalized?
         @flushed += 1
         @dirty = true
-      end
-    end
-
-    private def finalized?(block : Block) : Bool
-      case block
-      when UserBlock      then true
-      when NoticeBlock    then true
-      when TodosBlock     then true
-      when AssistantBlock then !block.live?
-      when ThinkingBlock  then !block.live?
-      when ToolBlock      then !block.status.running?
-      else                     true
       end
     end
 
@@ -122,14 +110,14 @@ module Smith::UI
       channel = Channel(Char).new(1)
       @char_channel = channel
       @modal_chars = chars
-      @modal_blocks = build_modal_blocks(title, body)
+      set_modal(title, body)
       @modal_prompt = [Span.new(prompt_hint(choices), Style.new(fg: Palette::ACCENT))]
       @state = State::ModalChar
       @dirty = true
 
       answer = channel.receive
       @char_channel = nil
-      @modal_blocks = [] of Block
+      clear_modal
       @modal_prompt = LineUtil::EMPTY
       @state = State::Turn
       @dirty = true
@@ -140,7 +128,7 @@ module Smith::UI
     def modal_text(title : String, body : Array(StyledLine)) : String
       channel = Channel(String).new(1)
       @text_channel = channel
-      @modal_blocks = build_modal_blocks(title, body)
+      set_modal(title, body)
       # ASCII for the same cursor-math reason as the idle prompt.
       @modal_prompt = [Span.new("> ", Style.new(fg: Palette::ACCENT, bold: true))]
       @state = State::ModalText
@@ -149,7 +137,7 @@ module Smith::UI
 
       answer = channel.receive
       @text_channel = nil
-      @modal_blocks = [] of Block
+      clear_modal
       @modal_prompt = LineUtil::EMPTY
       @state = State::Turn
       @dirty = true
@@ -162,10 +150,11 @@ module Smith::UI
       @terminal.enter! unless @terminal.raw?
       @terminal.hide_cursor
 
+      saved_title = @modal_title
       saved_blocks = @modal_blocks
       saved_prompt = @modal_prompt
       saved_state = @state
-      @modal_blocks = build_modal_blocks(title, body)
+      set_modal(title, body)
       @modal_prompt = [Span.new(prompt_hint(choices), Style.new(fg: Palette::ACCENT))]
       @state = State::ModalChar
       draw!
@@ -173,6 +162,15 @@ module Smith::UI
       answer = '\e'
       loop do
         key = @terminal.read_key
+
+        # Its own loop, so it needs its own ^L — the main loop's never sees a
+        # key while this one is up.
+        if key.kind.ctrl? && key.char == 'l'
+          redraw_all!
+          draw!
+          next
+        end
+
         char = key_to_answer(key, chars)
         next if char.nil?
 
@@ -180,6 +178,7 @@ module Smith::UI
         break
       end
 
+      @modal_title = saved_title
       @modal_blocks = saved_blocks
       @modal_prompt = saved_prompt
       @state = saved_state
@@ -193,11 +192,27 @@ module Smith::UI
       choices.map { |(char, label)| "[#{char}] #{label}" }.join("  ")
     end
 
-    private def build_modal_blocks(title : String, body : Array(StyledLine)) : Array(Block)
+    # The title is kept apart from the body on purpose: the body is droppable
+    # when the region outgrows the screen, the question above it is not.
+    private def set_modal(title : String, body : Array(StyledLine)) : Nil
+      @modal_title = title
+      @modal_blocks = body.empty? ? [] of Block : [NoticeBlock.new(body)] of Block
+    end
+
+    private def clear_modal : Nil
+      @modal_title = ""
+      @modal_blocks = [] of Block
+    end
+
+    private def modal_open? : Bool
+      !@modal_title.empty? || !@modal_blocks.empty?
+    end
+
+    private def modal_header_line : StyledLine
       header = StyledLine.new
       header << Span.new("┃ ", Style.new(fg: Palette::WARN, bold: true))
-      header << Span.new(title, Style.new(bold: true))
-      [NoticeBlock.new([header] + body)] of Block
+      header << Span.new(@modal_title, Style.new(bold: true))
+      header
     end
 
     private def key_to_answer(key : Key, chars : Array(Char)) : Char?
@@ -238,6 +253,16 @@ module Smith::UI
           # A closed terminal ends the session whatever it was doing — there is
           # nobody left to watch it anyway.
           break if key.kind.eof?
+
+          # ^L redraws whatever the app is doing. Handled above the state
+          # machine because a garbled screen is likeliest mid-turn or under a
+          # modal — the two states that would otherwise swallow the key.
+          if key.kind.ctrl? && key.char == 'l'
+            redraw_all!
+            flush_blocks!
+            draw!
+            next
+          end
 
           case @state
           when State::Idle
@@ -301,19 +326,14 @@ module Smith::UI
           @editor.reset
         when 'd'
           return true if @editor.empty?
-        when 'l'
-          redraw_all!
         end
       in Key::Kind::Enter
-        text = @editor.text
-        if text.strip.empty?
-          # Nothing to send — but the Enter was an intent, so a stray run of
-          # spaces should not linger in the editor either.
-          @editor.reset
-          return false
-        end
+        # Through the editor, not beside it: submitting is what files the
+        # prompt into the history that Up and Down walk. The editor resets
+        # itself either way, so a stray run of spaces does not linger.
+        text = @editor.handle(key) || ""
+        return false if text.strip.empty?
 
-        @editor.reset
         add_block(UserBlock.new(text), finalize: true)
         @state = State::Turn
         @interrupts = 0
@@ -398,58 +418,112 @@ module Smith::UI
       @terminal.newline
     end
 
+    # One horizontal slice of the live region. A droppable slice gives up its
+    # oldest lines when the region outgrows the screen; a pinned one — the
+    # modal's question, its choices, the status bar, the prompt — never does.
+    private record Segment, lines : Array(StyledLine), pinned : Bool
+
     private def live_lines(width : Int32, height : Int32 = Terminal::DEFAULT_HEIGHT) : Array(StyledLine)
-      lines = Array(StyledLine).new
+      segments = Array(Segment).new
 
       # Blocks still in flight.
       if @flushed < @blocks.size
+        lines = Array(StyledLine).new
         (@flushed...@blocks.size).each_with_index do |i, n|
           lines << LineUtil::EMPTY if n > 0
           lines.concat(@blocks[i].lines(width))
         end
+        lines << LineUtil::EMPTY if modal_open?
+        segments << Segment.new(lines, false)
       end
 
-      # The modal region, when one is up.
-      unless @modal_blocks.empty?
-        lines << LineUtil::EMPTY unless lines.empty?
+      # The modal region, when one is up: the question stays, the body it
+      # describes is what gives way.
+      if modal_open?
+        segments << Segment.new([modal_header_line], true)
+
+        body = Array(StyledLine).new
         @modal_blocks.each_with_index do |block, i|
-          lines << LineUtil::EMPTY if i > 0
-          lines.concat(block.lines(width))
+          body << LineUtil::EMPTY if i > 0
+          body.concat(block.lines(width))
         end
-        lines << LineUtil::EMPTY
-        lines << @modal_prompt + modal_editor_line(width) unless @modal_prompt.empty?
+        segments << Segment.new(body, false) unless body.empty?
+
+        unless @modal_prompt.empty?
+          # The blank above is a separator, not content: on a screen too small
+          # for everything it goes before the line it separates.
+          segments << Segment.new([LineUtil::EMPTY], false)
+          segments << Segment.new([@modal_prompt + modal_editor_line(width)], true)
+        end
       end
 
-      lines << LineUtil::EMPTY unless lines.empty?
-      lines << status_line(width)
+      segments << Segment.new([LineUtil::EMPTY], false) unless segments.empty?
 
-      case @state
-      when State::Idle
-        lines << input_line(width)
-      when State::ModalText
-        # The prompt line above already carries the editor.
-      else
-        # A turn in flight shows nothing under the status bar.
-      end
+      tail = Array(StyledLine).new
+      tail << status_line(width)
+      # A turn in flight shows nothing under the status bar, and in ModalText
+      # the prompt line above already carries the editor.
+      tail << input_line(width) if @state.idle?
+      segments << Segment.new(tail, true)
 
-      clamp_height(lines, height)
+      clamp_height(segments, height)
     end
 
     # The live region is redrawn in place, and that only works while it fits
     # on the screen: cursor_up stops at the top row, so a taller region can
     # never be walked back over — every redraw would push another copy of it
     # into the scrollback (an approval modal on top of a running tool is the
-    # usual way to get there). Older live lines are dropped instead; what the
-    # human is looking at — modal, status bar, prompt — sits at the bottom.
-    private def clamp_height(lines : Array(StyledLine), height : Int32) : Array(StyledLine)
+    # usual way to get there). Droppable lines give way instead, oldest first,
+    # behind a marker saying how many went.
+    private def clamp_height(segments : Array(Segment), height : Int32) : Array(StyledLine)
       budget = height - 1
       budget = 1 if budget < 1
-      return lines if lines.size <= budget
 
-      hidden = lines.size - budget + 1
-      kept = lines[(lines.size - budget + 1)..]
-      marker = [Span.new("⋮ #{hidden} more line#{hidden == 1 ? "" : "s"} above", Style.new(fg: Palette::BORDER, dim: true))]
-      [marker] + kept
+      total = segments.sum { |segment| segment.lines.size }
+      return segments.flat_map(&.lines) if total <= budget
+
+      # The marker costs a line of its own, so it comes out of the room the
+      # pinned lines leave behind.
+      pinned = segments.sum { |segment| segment.pinned ? segment.lines.size : 0 }
+      room = budget - pinned - 1
+      room = 0 if room < 0
+
+      hidden = (total - pinned) - room
+      remaining = hidden
+      marked = false
+      region = Array(StyledLine).new
+
+      segments.each do |segment|
+        if segment.pinned || remaining <= 0
+          region.concat(segment.lines)
+          next
+        end
+
+        dropped = {remaining, segment.lines.size}.min
+        remaining -= dropped
+        # One marker, standing where the first dropped line was.
+        unless marked
+          region << hidden_marker(hidden)
+          marked = true
+        end
+        region.concat(segment.lines[dropped..])
+      end
+
+      return region if region.size <= budget
+
+      # A screen too small to hold even the pinned lines. The bottom is what
+      # survives — the keys, the status bar — but the question keeps its row
+      # ahead of them: keys answering an unnamed request are worth less than
+      # the request. The marker goes with everything else that is cut, so no
+      # count is left behind claiming to be exact.
+      head = modal_open? ? [modal_header_line] : Array(StyledLine).new
+      head = Array(StyledLine).new if head.size >= budget
+      keep = budget - head.size
+      head + region[(region.size - keep)..]
+    end
+
+    private def hidden_marker(hidden : Int32) : StyledLine
+      [Span.new("⋮ #{hidden} more line#{hidden == 1 ? "" : "s"} above", Style.new(fg: Palette::BORDER, dim: true))]
     end
 
     private def modal_editor_line(width : Int32) : StyledLine

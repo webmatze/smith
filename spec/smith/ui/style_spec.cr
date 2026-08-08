@@ -143,19 +143,6 @@ describe Smith::UI::LineUtil do
     end
   end
 
-  describe ".pad" do
-    it "pads with trailing spaces" do
-      result = LineUtil.pad([Span.new("ab")], 5)
-      _text = plain_text(result)
-      _text.should eq("ab   ")
-    end
-
-    it "leaves an overflowing line alone" do
-      line = [Span.new("abcd")] of Smith::UI::Span
-      LineUtil.pad(line, 2).should eq(line)
-    end
-  end
-
   describe ".to_ansi / .render" do
     it "emits plain text when colour is off" do
       result = LineUtil.to_ansi([Span.new("x", Style.new(bold: true))], color: false)

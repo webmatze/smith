@@ -223,12 +223,6 @@ module Smith::UI
       out + ell
     end
 
-    def self.pad(line : StyledLine, width : Int32) : StyledLine
-      missing = width - width(line)
-      return line if missing <= 0
-      line + [Span.new(" " * missing)]
-    end
-
     def self.to_ansi(line : StyledLine, color : Bool = true) : String
       String.build { |io| render(line, io, color) }
     end
@@ -253,8 +247,6 @@ module Smith::UI
   # smith realistically meets understands.
   module Palette
     USER      =  39 # blue
-    ASSISTANT = 252
-    TOOL      = 179 # tan/yellow
     SUCCESS   =  71 # green
     ERROR     = 167 # red
     WARN      = 179

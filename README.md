@@ -758,7 +758,7 @@ On a real terminal smith runs a **fullscreen interface**: the transcript stays i
 - Approval requests and plan review appear as panels with single-key answers (`y`/`n`/`a`, Escape = refuse).
 - **Ctrl+L** redraws the screen from scratch; **Ctrl+C** on an empty prompt quits.
 
-Use `--no-tui` to fall back to the plain line renderer, or `--tui` to demand the fullscreen one (smith warns if there is no terminal to draw on). Headless runs (`smith run`) are always plain, so their output stays scriptable.
+Use `--no-tui` to fall back to the plain line renderer, or `--tui` to ask for the fullscreen one explicitly. Fullscreen needs a real terminal on both stdin and stdout; where there is none, `--tui` says so and falls back rather than downgrading in silence. Headless runs (`smith run`) are always plain, so their output stays scriptable.
 
 Pressing **Ctrl+C** in headless mode — including mid-response — saves the session and exits with code 130, printing the `smith resume` command to pick it back up. Nothing in flight is lost.
 

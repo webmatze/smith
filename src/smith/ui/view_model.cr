@@ -12,6 +12,28 @@ module Smith::UI
   # side yields mid-operation.
   abstract class Block
     abstract def lines(width : Int32) : Array(StyledLine)
+
+    # Whether the block has stopped changing, and can therefore be printed
+    # into the scrollback once and never redrawn. Most blocks arrive finished;
+    # the streaming ones say when they are done.
+    def finalized? : Bool
+      true
+    end
+  end
+
+  # How long a block has been running, in the shortest form that stays
+  # readable. Shared by everything that shows an elapsed time.
+  def self.format_duration(span : Time::Span) : String
+    total = span.total_seconds
+    if total < 10
+      "#{total.round(1)}s"
+    elsif total < 60
+      "#{total.round(0).to_i}s"
+    elsif total < 3600
+      "#{(total / 60).floor.to_i}m#{(total % 60).floor.to_i}s"
+    else
+      "#{(total / 3600).floor.to_i}h#{((total % 3600) / 60).floor.to_i}m"
+    end
   end
 
   class UserBlock < Block
@@ -34,6 +56,10 @@ module Smith::UI
     property? live : Bool
 
     def initialize(@buffer : String = "", @live : Bool = true)
+    end
+
+    def finalized? : Bool
+      !live?
     end
 
     def lines(width : Int32) : Array(StyledLine)
@@ -61,9 +87,13 @@ module Smith::UI
       Time.instant - @started_at
     end
 
+    def finalized? : Bool
+      !live?
+    end
+
     def lines(width : Int32) : Array(StyledLine)
       unless live?
-        return [[Span.new("✻ Thinking (#{format_duration(elapsed)})", Style.new(fg: Palette::THINKING, dim: true))]]
+        return [[Span.new("✻ Thinking (#{UI.format_duration(elapsed)})", Style.new(fg: Palette::THINKING, dim: true))]]
       end
 
       style = Style.new(fg: Palette::THINKING, dim: true, italic: true)
@@ -72,11 +102,6 @@ module Smith::UI
         prefix = i.zero? ? [Span.new("✻ ", Style.new(fg: Palette::THINKING))] : [Span.new("  ")]
         prefix + line
       end.to_a
-    end
-
-    private def format_duration(span : Time::Span) : String
-      total = span.total_seconds
-      total < 10 ? "#{total.round(1)}s" : "#{total.round(0).to_i}s"
     end
   end
 
@@ -93,15 +118,18 @@ module Smith::UI
     property status : Status
     property result : String
     getter started_at : Time::Instant
-    property? was_backgrounded : Bool
 
     def initialize(@id : String, @name : String, @summary : String,
                    @status : Status = Status::Running, @result : String = "",
-                   @started_at : Time::Instant = Time.instant, @was_backgrounded : Bool = false)
+                   @started_at : Time::Instant = Time.instant)
     end
 
     def elapsed : Time::Span
       Time.instant - @started_at
+    end
+
+    def finalized? : Bool
+      !@status.running?
     end
 
     def lines(width : Int32) : Array(StyledLine)
@@ -121,7 +149,7 @@ module Smith::UI
         head << Span.new(" · ", Style.new(fg: Palette::BORDER))
         head << Span.new(@summary, Style.new(dim: true))
       end
-      suffix = @status.running? ? " #{format_duration(elapsed)}" : " (#{format_duration(elapsed)})"
+      suffix = @status.running? ? " #{UI.format_duration(elapsed)}" : " (#{UI.format_duration(elapsed)})"
       head << Span.new(suffix, Style.new(fg: Palette::INFO))
 
       out = LineUtil.wrap(head, width)
@@ -137,17 +165,6 @@ module Smith::UI
       end
 
       out
-    end
-
-    private def format_duration(span : Time::Span) : String
-      total = span.total_seconds
-      if total < 10
-        "#{total.round(1)}s"
-      elsif total < 3600
-        "#{(total / 60).floor.to_i}m#{(total % 60).floor.to_i}s"
-      else
-        "#{(total / 3600).floor.to_i}h#{((total % 3600) / 60).floor.to_i}m"
-      end
     end
 
     # The one argument a human recognizes the call by.
