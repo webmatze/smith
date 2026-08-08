@@ -9,6 +9,7 @@ require "./mentions"
 require "./agents"
 require "./config"
 require "./output"
+require "./presentation"
 require "./todos"
 require "./plan"
 require "./chat_commands"
@@ -17,6 +18,7 @@ require "file_utils"
 require "./hooks"
 require "./trust"
 require "./mcp"
+require "./ui"
 
 module Smith
   class CLI
@@ -30,7 +32,7 @@ module Smith
     @auto_approve : Bool = false
     @json_output : Bool = false
     @stream : Bool? = nil
-    @renderer : Output::Renderer? = nil
+    @presentation : Presentation? = nil
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
     @agents_catalog : Agents::Catalog
@@ -54,6 +56,12 @@ module Smith
     @mode : Mode? = nil
     @plan : PlanSession? = nil
     @real_approver : Tools::Approver? = nil
+    @tui : Bool? = nil
+    # True only once an interactive session actually starts — headless runs
+    # keep the plain renderer even on a TTY.
+    @interactive_tui : Bool = false
+    @tui_app : UI::App? = nil
+    @tui_warned : Bool = false
 
     def initialize(@args : Array(String))
       @config = Config.load
@@ -182,6 +190,14 @@ module Smith
           @stream = false
         end
 
+        opts.on("--tui", "Force the fullscreen terminal UI (interactive sessions)") do
+          @tui = true
+        end
+
+        opts.on("--no-tui", "Use the plain line renderer instead of the fullscreen UI") do
+          @tui = false
+        end
+
         opts.on("-v", "--version", "Print version information") do
           puts "smith version #{Smith::VERSION}"
           exit
@@ -273,12 +289,57 @@ module Smith
       !KNOWN_COMMANDS.includes?(command) && !@args.join(" ").strip.empty?
     end
 
+    # Everything that differs between the fullscreen UI and plain lines lives
+    # behind this one object; see Smith::Presentation. Plain until an
+    # interactive session says otherwise, which it does before anything here
+    # is asked for.
+    private def presentation : Presentation
+      @presentation ||= PlainPresentation.new(
+        @json_output ? Output::JsonRenderer.new : Output::HumanRenderer.new
+      )
+    end
+
+    # Called by the two commands that open an interactive session, before a
+    # renderer or a gate has been built. Fullscreen mode is the default on a
+    # real terminal; the flags pin it either way, and headless runs never get
+    # here at all, so `smith run` output stays scriptable.
+    private def choose_presentation! : Nil
+      # The plain one is built on first use, so anything that asked for a
+      # renderer or a gate before this point would have pinned the run to it.
+      # Nothing does today; this is here so nothing quietly starts to.
+      raise "presentation was built before the session chose one" if @presentation
+
+      @interactive_tui = tui_enabled?
+      @presentation = UI::TuiPresentation.new(tui_app) if @interactive_tui
+    end
+
     private def renderer : Output::Renderer
-      @renderer ||= if @json_output
-                      Output::JsonRenderer.new
-                    else
-                      Output::HumanRenderer.new
-                    end
+      presentation.renderer
+    end
+
+    # Fullscreen mode is the interactive default on a real terminal; the flags
+    # pin it either way. Headless runs never get it, so `smith run` output
+    # stays scriptable.
+    private def tui_enabled? : Bool
+      return false if @json_output
+      return false if @tui == false
+      return true if STDIN.tty? && STDOUT.tty?
+
+      # --tui asks for fullscreen explicitly. It cannot conjure a terminal to
+      # draw on — raw mode needs stdin and stdout to be one — so all it can do
+      # here is say why it is downgrading rather than doing so silently.
+      if @tui == true && !@tui_warned
+        @tui_warned = true
+        STDERR.puts "⚠️  --tui needs an interactive terminal; falling back to the line renderer."
+      end
+      false
+    end
+
+    private def tui_app : UI::App
+      @tui_app ||= UI::App.new(UI::Terminal.new(
+        STDOUT, STDIN,
+        color: STDOUT.tty? && ENV["NO_COLOR"]?.nil?
+      ))
     end
 
     private def build_provider(provider_name : String = effective_provider_name) : LLM::Provider
@@ -381,13 +442,7 @@ module Smith
               elsif !STDIN.tty?
                 Tools::DenyApprover.new
               else
-                # In JSON mode the prompt must not land on stdout, or it would
-                # corrupt the JSONL stream mid-line.
-                Tools::PromptApprover.new(
-                  allowlist: approval.allowlist,
-                  output: renderer.prompt_io,
-                  rules: rules
-                )
+                presentation.approver(approval.allowlist, rules)
               end
 
       # Wrapped even when there are no rules, so the composition is the same
@@ -410,7 +465,7 @@ module Smith
                         @config.hooks
                       end
 
-        runner = Hooks::Runner.new(definitions, session_id: @session_id)
+        runner = Hooks::Runner.new(definitions, session_id: @session_id, warn_io: notice_io)
         runner.on_fire = ->(event : Hooks::Event, command : String, blocked : Bool) do
           renderer.handle(Events::HookFired.new(event, command, blocked))
         end
@@ -422,12 +477,9 @@ module Smith
       project = Config.project_path
       return false if project.nil?
 
-      TrustPrompt.new(
-        TrustStore.new,
-        input: STDIN,
-        output: renderer.prompt_io,
-        preapproved: @trust_hooks
-      ).allow?(project, digest, @config.hooks.map(&.command))
+      presentation
+        .trust_prompt(TrustStore.new, preapproved: @trust_hooks)
+        .allow?(project, digest, @config.hooks.map(&.command))
     end
 
     # Job logs live beside the session they belong to. A headless run has no
@@ -451,9 +503,15 @@ module Smith
         specs = settings.enabled? ? MCP::ServerConfig.discover : Array(MCP::ServerSpec).new
 
         manager = MCP::Manager.build(specs, timeout: settings.timeout_span)
-        manager.start_all
+        manager.start_all(warn_io: notice_io)
         manager
       end
+    end
+
+    # Where diagnostics go: under the TUI they belong on screen, otherwise
+    # on stderr where they have always been.
+    private def notice_io : IO
+      presentation.notice_io
     end
 
     # Same contract as the background jobs below: nothing smith started may
@@ -471,7 +529,7 @@ module Smith
 
       running = jobs.running
       unless running.empty?
-        puts "\n🛑 Stopping #{running.size} background job#{running.size == 1 ? "" : "s"}: #{running.map(&.id).join(", ")}"
+        presentation.say("🛑 Stopping #{running.size} background job#{running.size == 1 ? "" : "s"}: #{running.map(&.id).join(", ")}")
       end
 
       jobs.shutdown_all
@@ -498,7 +556,7 @@ module Smith
       return AutoPlanGate.new if @auto_approve
       return HaltingPlanGate.new unless STDIN.tty?
 
-      PromptPlanGate.new(STDIN, renderer.prompt_io)
+      presentation.plan_gate
     end
 
     # The whole feature is this method plus a swapped approver: Registry#approver
@@ -702,6 +760,7 @@ module Smith
     end
 
     private def run_interactive
+      choose_presentation!
       provider = build_provider
       effective_model = @model || provider.default_model
 
@@ -730,6 +789,12 @@ module Smith
 
       @model = session_data.model
       @provider_name = session_data.provider
+      choose_presentation!
+
+      if @interactive_tui
+        start_session_loop(session_data)
+        return
+      end
 
       puts "🔄 Resuming Session [#{session_data.id}]"
       puts "   Provider: #{@provider_name} | Model: #{@model} | Messages: #{session_data.messages.size}"
@@ -778,6 +843,15 @@ module Smith
       store = Checkpoints::Store.new(@session_store.session_dir(session_data.id), enabled: settings.enabled?)
       store.prune(max: settings.max_per_session, retention: settings.retention)
       @checkpoints = store
+
+      if @interactive_tui
+        run_tui_loop(session_data)
+      else
+        run_plain_loop(session_data)
+      end
+    end
+
+    private def run_plain_loop(session_data : Session::Data)
       provider = build_provider(session_data.provider)
       agent = build_agent(provider, session_data.messages)
       effective_model = agent.model
@@ -837,6 +911,118 @@ module Smith
       puts "Goodbye! ⚒️"
     end
 
+    # The fullscreen session loop. The key loop runs on the main fiber; each
+    # submitted turn runs in its own fiber, so the UI keeps drawing (spinner,
+    # streaming text, modals) while the agent works.
+    private def run_tui_loop(session_data : Session::Data)
+      provider = build_provider(session_data.provider)
+      agent = build_agent(provider, session_data.messages)
+
+      app = tui_app
+      app.model_name = agent.model
+      app.mode = plan_session.mode
+
+      tui_banner(session_data, agent)
+
+      # A resumed session replays into the UI instead of being previewed in
+      # raw lines — the same transcript, rendered like everything else.
+      replay_tui_history(app, session_data)
+
+      @todos.replace(session_data.todos) unless session_data.todos.empty?
+
+      install_interrupt_handler(session_data, agent)
+
+      # The two interrupt stages, driven from the app's key loop.
+      app.on_interrupt { agent.stop! }
+      app.on_abort do
+        # Second press: leave right away; the interrupt handler saves.
+        session_data.messages = agent.messages
+        session_data.usage = agent.cumulative_usage
+        session_data.todos = @todos.items
+        @session_store.save(session_data)
+        shutdown_bash_jobs
+        shutdown_mcp
+        exit(130)
+      end
+
+      app.run do |text|
+        spawn do
+          begin
+            trimmed = text.strip
+
+            # Before expand_prompt on purpose: the skill catalog claims any
+            # /name that matches a skill, so a skill called "plan" would
+            # shadow /plan.
+            if invocation = ChatCommands.parse(trimmed)
+              run_chat_command(invocation, session_data, agent)
+              # Slash commands produce notice blocks, not a turn — but the
+              # prompt must come back all the same.
+              app.turn_finished
+            elsif trimmed == "exit" || trimmed == "quit"
+              app.quit
+            else
+              submit(agent, trimmed)
+              persist(session_data, agent)
+              if cost = cost_for(session_data.provider, agent.model, agent.cumulative_usage)
+                app.cost_text = "#{Smith::Pricing.format(cost)}"
+              end
+              app.turn_finished
+            end
+          rescue ex : Exception
+            renderer.handle(Events::TurnError.new(ex.message || ex.class.name))
+            app.turn_finished
+          end
+        end
+      end
+
+      shutdown_bash_jobs
+      shutdown_mcp
+      persist(session_data, agent)
+    end
+
+    private def tui_banner(session_data : Session::Data, agent : Agent) : Nil
+      app = tui_app
+      # The head — name, version, provider · model, skills — is the renderer's
+      # banner, the same one every other mode prints. Only what is specific to
+      # an interactive session is added here.
+      renderer.banner(session_data.provider, agent.model, @skills_catalog.skills.keys)
+
+      lines = Array(UI::StyledLine).new
+      lines << [UI::Span.new("session #{session_data.id[0, 18]}", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
+
+      unless @agents_catalog.agents.empty?
+        lines << [UI::Span.new("agents: #{@agents_catalog.agents.keys.join(", ")}", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
+      end
+      summary = mcp_manager.summary
+      unless summary.empty?
+        lines << [UI::Span.new("mcp: #{summary.join(", ")}", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
+      end
+      if definition = main_agent
+        lines << [UI::Span.new("running as agent: #{definition.name}", UI::Style.new(fg: UI::Palette::MODE_PLAN))]
+      end
+
+      lines << [UI::Span.new("type /help for commands, exit to quit", UI::Style.new(fg: UI::Palette::INFO, dim: true))]
+      app.notice(lines)
+    end
+
+    # How much of a resumed transcript is replayed into the UI: enough to see
+    # where the session left off, not enough to bury the prompt.
+    REPLAYED_MESSAGES = 6
+
+    private def replay_tui_history(app : UI::App, session_data : Session::Data) : Nil
+      session_data.messages.last(REPLAYED_MESSAGES).each do |msg|
+        text = msg.content.select { |b| b.type.text? }.map(&.text).compact.join("\n")
+        next if text.strip.empty?
+
+        if msg.role.user?
+          app.add_block(UI::UserBlock.new(text), finalize: true)
+        else
+          block = UI::AssistantBlock.new(text, live: false)
+          app.add_block(block, finalize: true)
+        end
+      end
+    end
+
     private def run_chat_command(invocation : ChatCommands::Invocation, session_data : Session::Data, agent : Agent) : Nil
       command = invocation.command
 
@@ -859,11 +1045,17 @@ module Smith
       target = command.plan? ? Mode::Plan : Mode::Normal
 
       if plan.mode == target
-        puts "   Already in #{target.to_s.downcase} mode."
+        chat_puts("Already in #{target.to_s.downcase} mode.")
         return
       end
 
       plan.mode = target
+    end
+
+    # Text printed by chat commands: lines in the plain loop, notice blocks in
+    # the fullscreen one.
+    private def chat_puts(text : String) : Nil
+      presentation.say(text)
     end
 
     # The chat equivalent of `smith rewind`: undo everything back to the
@@ -873,21 +1065,21 @@ module Smith
       entries = store.try(&.list) || [] of Checkpoints::Entry
 
       if store.nil? || entries.empty?
-        puts "   Nothing to rewind."
+        chat_puts("Nothing to rewind.")
         return
       end
 
       result = store.rewind_to(entries.last, force: false)
-      result.restored.each { |path| puts "   restored #{path}" }
-      result.deleted.each { |path| puts "   deleted  #{path}" }
+      result.restored.each { |path| chat_puts("restored #{path}") }
+      result.deleted.each { |path| chat_puts("deleted  #{path}") }
 
       unless result.conflicts.empty?
-        puts "   ⚠️  changed outside smith, left alone: #{result.conflicts.join(", ")}"
-        puts "      use `smith rewind #{session_data.id} --force` to overwrite them"
+        chat_puts("⚠️  changed outside smith, left alone: #{result.conflicts.join(", ")}")
+        chat_puts("use `smith rewind #{session_data.id} --force` to overwrite them")
       end
 
       unless result.applied?
-        puts "   🚫 Nothing was changed."
+        chat_puts("🚫 Nothing was changed.")
         return
       end
 
@@ -896,7 +1088,7 @@ module Smith
         @session_store.save(session_data)
       end
 
-      puts "   ⏪ Rewound. Changes made by bash are not covered."
+      chat_puts("⏪ Rewound. Changes made by bash are not covered.")
     end
 
     # Without this, Ctrl+C kills the process outright and the turn in flight is
@@ -1144,9 +1336,9 @@ module Smith
     private def rename_from_chat(session_data : Session::Data, name : String) : Nil
       session = @session_store.rename(session_data.id, name)
       session_data.name = session.name
-      puts "   ✏️  Session renamed to '#{session.name}'."
+      chat_puts("✏️  Session renamed to '#{session.name}'.")
     rescue ex : ArgumentError
-      puts "   ❌ #{ex.message}"
+      chat_puts("❌ #{ex.message}")
     end
 
     private def fork_session(reference : String?) : Nil
@@ -1196,21 +1388,24 @@ module Smith
       breakdown.add("Tool definitions", Tools::Registry.default.specs.to_json)
       breakdown.add("Messages", messages)
 
-      puts "Context for session #{session.reference} (#{format_tokens(budget)} token budget)"
-      puts ""
+      lines = Array(String).new
+      lines << "Context for session #{session.reference} (#{format_tokens(budget)} token budget)"
+      lines << ""
       breakdown.entries.each do |entry|
-        printf("  %-20s %9s %4d%%\n", entry.label, format_tokens(entry.tokens), breakdown.percent(entry.tokens))
+        lines << "  %-20s %9s %4d%%" % [entry.label, format_tokens(entry.tokens), breakdown.percent(entry.tokens)]
       end
-      puts "  " + "─" * 35
-      printf("  %-20s %9s %4d%%\n", "Total", format_tokens(breakdown.total), breakdown.percent(breakdown.total))
+      lines << "  " + "─" * 35
+      lines << "  %-20s %9s %4d%%" % ["Total", format_tokens(breakdown.total), breakdown.percent(breakdown.total)]
 
       # The live session knows what compaction did to it; a session read back
       # from disk does not, and claiming otherwise would be a guess.
       if agent && agent.compactions > 0
         strategy = agent.last_compaction.try { |s| " (#{s.to_s.downcase})" }
-        puts ""
-        puts "  Compactions this session: #{agent.compactions}#{strategy}"
+        lines << ""
+        lines << "  Compactions this session: #{agent.compactions}#{strategy}"
       end
+
+      presentation.say_block(lines)
     end
 
     private def format_tokens(count : Int32) : String
