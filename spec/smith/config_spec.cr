@@ -503,6 +503,34 @@ describe "web settings" do
   end
 end
 
+describe "mention settings" do
+  it "defaults to project-local mentions with Claude Code's line limit" do
+    with_sandbox do |temp_dir, _home|
+      mentions = Smith::Config.load(make_project(temp_dir)).mentions
+
+      mentions.max_lines.should eq(2000)
+      mentions.max_total_bytes.should eq(262144)
+      mentions.allow_outside?.should be_false
+    end
+  end
+
+  it "reads the section" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [mentions]
+        max_lines = 50
+        max_total_bytes = 1024
+        allow_outside = true
+        TOML
+
+      mentions = Smith::Config.load(project).mentions
+      mentions.max_lines.should eq(50)
+      mentions.max_total_bytes.should eq(1024)
+      mentions.allow_outside?.should be_true
+    end
+  end
+end
+
 describe "thinking settings" do
   it "is off by default, and leaves the legacy budget unset" do
     with_sandbox do |temp_dir, _home|

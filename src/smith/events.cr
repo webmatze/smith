@@ -2,6 +2,7 @@ require "./llm/types"
 require "./todos"
 require "./mode"
 require "./hooks"
+require "./mentions"
 
 module Smith::Events
   abstract class Event
@@ -162,6 +163,17 @@ module Smith::Events
     getter? redacted : Bool
 
     def initialize(@text : String, @redacted : Bool = false)
+    end
+  end
+
+  # What an @-mention actually pulled into the prompt. Emitted even when
+  # everything was skipped: a mention that quietly did nothing is worse than
+  # one that says why.
+  class FilesMentioned < Event
+    getter files : Array(Mentions::Embedded)
+    getter skipped : Array(Mentions::Skip)
+
+    def initialize(@files : Array(Mentions::Embedded), @skipped : Array(Mentions::Skip))
     end
   end
 

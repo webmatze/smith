@@ -4,6 +4,7 @@ require "./paths"
 require "./mode"
 require "./hooks"
 require "./subagents"
+require "./mentions"
 
 module Smith
   # Resolved configuration, merged from (lowest to highest priority):
@@ -306,6 +307,16 @@ module Smith
 
     private def string_list(*keys : String) : Array(String)
       lookup(*keys).try(&.as_a?).try(&.compact_map(&.as_s?)) || Array(String).new
+    end
+
+    # Budgets for @-mentions. allow_outside is off by default: a prompt coming
+    # from a skill file could otherwise pull in ~/.ssh/id_rsa.
+    def mentions : Mentions::Settings
+      Mentions::Settings.new(
+        max_lines: lookup("mentions", "max_lines").try(&.as_i?) || Mentions::DEFAULT_MAX_LINES,
+        max_total_bytes: lookup("mentions", "max_total_bytes").try(&.as_i?) || Mentions::DEFAULT_MAX_TOTAL_BYTES,
+        allow_outside: lookup("mentions", "allow_outside").try(&.as_bool?) || false
+      )
     end
 
     # Consumed by issue #3 (history compaction).

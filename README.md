@@ -189,6 +189,39 @@ Two details worth knowing:
 - **Ollama streams OpenAI-shaped SSE, not NDJSON**, because smith talks to its `/v1/chat/completions` endpoint. OpenRouter, OpenAI and Ollama therefore share one reader; Anthropic has its own for its named-event format.
 - **A stream that dies after text has already appeared is not retried.** Replaying the request would print the same text a second time. Failures before the first token — connection, HTTP status — still go through the normal retry handler.
 
+### @-Mentions
+
+Naming a file in the prompt costs a full provider roundtrip: the model reads the name, calls `read_file`, waits. `@path` skips that — the file is in the first request:
+
+```
+> explain the loop in @src/smith/agent.cr
+📎 src/smith/agent.cr (174 lines)
+```
+
+The `@path` stays in the sentence so it still reads; the content is appended below it, in the same shape as a skill attachment.
+
+| Form | Effect |
+|---|---|
+| `@src/agent.cr` | file content is appended |
+| `@src/tools/` | **listing only** — a directory is never walked |
+| `@"my notes.md"` | quotes carry a path with spaces |
+| `foo@bar.com` | nothing — `@` only counts at the start of a word |
+
+Paths resolve against the working directory, `~` expands, and trailing sentence punctuation is not part of the path (`@src/agent.cr.` finds the file). A path that does not exist stays in the text untouched with a warning — you may have meant a literal `@`.
+
+```toml
+[mentions]
+max_lines       = 2000     # per file, then it is truncated and marked
+max_total_bytes = 262144   # across all mentions of one prompt
+allow_outside   = false
+```
+
+Three things worth knowing:
+
+- **A mention that leaves the project is refused** unless `allow_outside` is set. A prompt does not always come from you — a skill body could otherwise pull in `@~/.ssh/id_rsa`.
+- **Binary files are not embedded.** Detection is a null byte in the first kilobyte, the same test `grep` uses.
+- **Skills expand first, mentions second**, so a skill body that references `@files` resolves too. Exactly one level: what a mention pulls in is never scanned again, so a file cannot drag itself back in through a skill.
+
 ### Thinking
 
 Anthropic models can reason before they answer. smith keeps those blocks in the transcript — the API rejects the next request otherwise, because a thinking block carries a signature that has to come back untouched — and renders them as they stream, so a long research phase is no longer silent.
@@ -887,6 +920,7 @@ src/
     ├── output.cr            # Human & JSON Lines renderers for the event stream
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
+    ├── mentions.cr          # @path expansion: file embedding, budgets & path guard
     ├── agents.cr            # Custom agent definitions in .smith/agents/<name>.md
     ├── frontmatter.cr       # Shared --- header parser for skills and agents
     ├── todos.cr             # Todo list state, validation & change callback

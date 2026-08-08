@@ -404,6 +404,36 @@ describe "thinking output" do
     stdout_io.to_s.should_not contain("encrypted-payload")
   end
 
+  it "shows what a mention pulled in, and what it did not" do
+    stdout_io = IO::Memory.new
+    Smith::Output::HumanRenderer.new(stdout_io).handle(
+      Smith::Events::FilesMentioned.new(
+        [Smith::Mentions::Embedded.new("src/agent.cr", 174)],
+        [Smith::Mentions::Skip.new("secrets.env", "outside the project")]
+      )
+    )
+
+    output = stdout_io.to_s
+    output.should contain("src/agent.cr (174 lines)")
+    output.should contain("secrets.env — outside the project")
+  end
+
+  it "reports mentions structurally (json)" do
+    stdout_io = IO::Memory.new
+    Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new).handle(
+      Smith::Events::FilesMentioned.new(
+        [Smith::Mentions::Embedded.new("big.txt", 2000, truncated: true)],
+        [] of Smith::Mentions::Skip
+      )
+    )
+
+    line = parsed_lines(stdout_io).first
+    line["type"].as_s.should eq("files_mentioned")
+    line["files"][0]["path"].as_s.should eq("big.txt")
+    line["files"][0]["truncated"].as_bool.should be_true
+    line["skipped"].as_a.should be_empty
+  end
+
   it "uses its own event types, leaving assistant_text consumers alone (json)" do
     stdout_io = IO::Memory.new
     renderer = Smith::Output::JsonRenderer.new(stdout_io, IO::Memory.new)
