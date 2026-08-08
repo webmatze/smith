@@ -27,7 +27,12 @@ module Smith::Tools
     def self.parse(str : String) : Rule?
       text = str.strip
       open = text.index('(')
-      return nil unless open && text.ends_with?(')')
+
+      # A bare tool name is a rule about the whole tool — `mcp__filesystem__*`
+      # is the form every MCP client writes, and there is nothing sensible to
+      # put in parentheses for a tool whose arguments smith cannot interpret.
+      return bare(text) if open.nil?
+      return nil unless text.ends_with?(')')
 
       tool = text[0...open].strip
       # Take everything up to the *last* ')', so a pattern may contain its own
@@ -38,12 +43,44 @@ module Smith::Tools
       new(tool, pattern)
     end
 
+    # `read_file` on its own would silently widen to `read_file(*)`, which is
+    # not what anyone writing a path rule means. Two forms are unambiguous
+    # enough to accept bare: anything carrying a wildcard, and any MCP tool —
+    # smith cannot interpret a server's arguments, so its name is the only
+    # thing a rule could ever match on.
+    MCP_PREFIX = "mcp__"
+
+    private def self.bare(text : String) : Rule?
+      return nil if text.empty? || text.includes?(' ')
+      return nil unless text.includes?('*') || text.starts_with?(MCP_PREFIX)
+
+      new(text, "*")
+    end
+
     def to_s(io : IO) : Nil
-      io << @tool << '(' << @pattern << ')'
+      if @pattern == "*" && (wildcard? || @tool.starts_with?(MCP_PREFIX))
+        io << @tool
+      else
+        io << @tool << '(' << @pattern << ')'
+      end
     end
 
     def path_tool? : Bool
       PATH_TOOLS.includes?(@tool)
+    end
+
+    # Whether the rule names a family of tools rather than one.
+    def wildcard? : Bool
+      @tool.includes?('*')
+    end
+
+    # `mcp__filesystem__*` covers every tool of that server. Anchored at both
+    # ends, so `mcp__fs__read` cannot be matched by a rule meant for another
+    # server whose name merely starts the same way.
+    def covers?(tool_name : String) : Bool
+      return @tool == tool_name unless wildcard?
+
+      Regex.new("\\A#{Regex.escape(@tool).gsub("\\*", ".*")}\\z").matches?(tool_name)
     end
 
     # `all` distinguishes the two halves of shell-command matching, and the
@@ -54,7 +91,7 @@ module Smith::Tools
     #   deny   — *any* segment matching is enough, so a denied command cannot
     #            hide behind a harmless one
     def matches?(tool_name : String, args : JSON::Any, project_dir : String, all : Bool) : Bool
-      return false unless @tool == tool_name
+      return false unless covers?(tool_name)
       return true if @pattern == "*" || @pattern == "**"
 
       if path_tool?
@@ -189,7 +226,10 @@ module Smith::Tools
       # Only deny and ask can stop a call, so only they decide whether a
       # non-mutating tool has to reach the gate at all.
       @governed = Set(String).new
-      (@deny + @ask).each { |rule| @governed << rule.tool }
+      @governed_patterns = Array(Rule).new
+      (@deny + @ask).each do |rule|
+        rule.wildcard? ? @governed_patterns << rule : @governed << rule.tool
+      end
     end
 
     def empty? : Bool
@@ -199,7 +239,10 @@ module Smith::Tools
     # Whether a call to this tool could be stopped by a rule. Kept to a set
     # lookup so the common case — no rules for read tools — costs nothing.
     def governs?(tool_name : String) : Bool
-      @governed.includes?(tool_name)
+      return true if @governed.includes?(tool_name)
+      # Only consulted when the set missed, and only wildcard rules are in
+      # here — so the common case is still a single hash lookup.
+      @governed_patterns.any?(&.covers?(tool_name))
     end
 
     def decide(tool_name : String, args : JSON::Any) : Decision
@@ -222,6 +265,11 @@ module Smith::Tools
     # The narrowest rule worth offering behind [a]lways — narrower than "this
     # tool, everywhere", which is what the old prompt remembered.
     def suggest(tool_name : String, args : JSON::Any) : String
+      # Before the path branch: an MCP tool may well take a `path` argument,
+      # but no rule matches on it — offering `mcp__fs__read(src/**)` would
+      # remember a rule that then covers every path.
+      return tool_name if tool_name.starts_with?(Rule::MCP_PREFIX)
+
       if tool_name == "bash" && (command = args["command"]?.try(&.as_s?))
         words = command.strip.split(/\s+/)
         return "bash(#{words.size > 1 ? "#{words[0..-2].join(" ")} *" : words[0]})"

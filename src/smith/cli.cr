@@ -16,6 +16,7 @@ require "./checkpoints"
 require "file_utils"
 require "./hooks"
 require "./trust"
+require "./mcp"
 
 module Smith
   class CLI
@@ -45,6 +46,7 @@ module Smith
     @hook_context : String? = nil
     @checkpoints : Checkpoints::Store? = nil
     @bash_jobs : Tools::BashJobs? = nil
+    @mcp : MCP::Manager? = nil
     @rewind_to : String? = nil
     @files_only : Bool = false
     @dry_run : Bool = false
@@ -102,7 +104,8 @@ module Smith
           str.puts "  fork <session>             Copy a session so it can be taken two ways"
           str.puts "  context [<session>]        Show where the context window is going"
           str.puts "  checkpoints [<session_id>] List the file snapshots taken during a session"
-          str.puts "  rewind [<session_id>]      Undo a session's file changes\n"
+          str.puts "  rewind [<session_id>]      Undo a session's file changes"
+          str.puts "  mcp list | tools <server>  Show the configured MCP servers and their tools\n"
           str.puts "Options:"
         end
 
@@ -249,6 +252,8 @@ module Smith
         list_checkpoints(@args[1]?)
       when "rewind"
         run_rewind(@args[1]?)
+      when "mcp"
+        run_mcp(@args[1]?, @args[2]?)
       else
         prompt = @args.join(" ")
         if prompt.empty?
@@ -259,7 +264,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp]
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -434,6 +439,30 @@ module Smith
       File.join(Dir.tempdir, "smith-bash-#{Process.pid}")
     end
 
+    # Started eagerly at session start, not lazily on first use: `tools/list`
+    # has to have answered before the *first* request goes out, or the model
+    # never learns the tools exist.
+    #
+    # A server that will not start is a warning and nothing more — the session
+    # continues without its tools.
+    private def mcp_manager : MCP::Manager
+      @mcp ||= begin
+        settings = @config.mcp
+        specs = settings.enabled? ? MCP::ServerConfig.discover : Array(MCP::ServerSpec).new
+
+        manager = MCP::Manager.build(specs, timeout: settings.timeout_span)
+        manager.start_all
+        manager
+      end
+    end
+
+    # Same contract as the background jobs below: nothing smith started may
+    # outlive it. Servers are spawned processes, and a forgotten one keeps
+    # whatever it opened — a database connection, a headless browser.
+    private def shutdown_mcp : Nil
+      @mcp.try &.shutdown
+    end
+
     # Nothing a session started may outlive it: an orphaned dev server holding
     # its port is a bug, not a feature.
     private def shutdown_bash_jobs : Nil
@@ -519,6 +548,12 @@ module Smith
       )
       registry.hooks = hooks
       registry.checkpoints = @checkpoints
+
+      # Before the --agent narrowing below, so a definition can list MCP tools
+      # among the ones it wants — and after the built-ins, so a server can
+      # never shadow one: the mcp__ prefix keeps them apart, and a collision
+      # inside the prefix is resolved by McpTool.register_all.
+      Tools::McpTool.register_all(registry, mcp_manager, @config.bash.max_output_bytes)
 
       # Fired before the system prompt is built, so a hook can inject context
       # into it — the branch, the open tickets, whatever the project needs.
@@ -644,12 +679,14 @@ module Smith
       agent = build_agent(provider)
 
       renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
+      renderer.mcp_banner(mcp_manager.summary)
       # on_mode_change only fires on a *switch*, so the starting mode is
       # announced here — otherwise a --plan run would look like a normal one.
       renderer.handle(Events::ModeChanged.new(Mode::Plan)) if plan_session.plan_mode?
 
       submit(agent, prompt)
       shutdown_bash_jobs
+      shutdown_mcp
       persist(session_data, agent)
       renderer.finish(agent.cumulative_usage, cost_for(provider.name, agent.model, agent.cumulative_usage))
 
@@ -722,10 +759,12 @@ module Smith
       agent = build_agent(provider, session_data.messages)
 
       renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
+      renderer.mcp_banner(mcp_manager.summary)
       renderer.handle(Events::ModeChanged.new(Mode::Plan)) if plan_session.plan_mode?
 
       submit(agent, prompt)
       shutdown_bash_jobs
+      shutdown_mcp
       persist(session_data, agent)
       renderer.finish(agent.cumulative_usage, cost_for(session_data.provider, agent.model, agent.cumulative_usage))
       exit(renderer.exit_code)
@@ -751,6 +790,10 @@ module Smith
       if @agents_catalog.agents.size > 0
         puts "   Loaded Agents: #{@agents_catalog.agents.keys.join(", ")}"
       end
+      # build_agent has already started them, so this reports what is actually
+      # connected rather than what was configured.
+      summary = mcp_manager.summary
+      puts "   MCP Servers: #{summary.join(", ")}" unless summary.empty?
       if definition = main_agent
         puts "   Running as agent: #{definition.name}"
       end
@@ -789,6 +832,7 @@ module Smith
       end
 
       shutdown_bash_jobs
+      shutdown_mcp
       puts "Session saved to #{@session_store.session_dir(session_data.id)}/session.json"
       puts "Goodbye! ⚒️"
     end
@@ -867,6 +911,9 @@ module Smith
         session_data.todos = @todos.items
         @session_store.save(session_data)
         shutdown_bash_jobs
+        # Ctrl+C is exactly where orphans come from: without this the server
+        # processes outlive the shell that started smith.
+        shutdown_mcp
 
         puts "\n\n⚠️  Interrupted — session saved."
         puts "   Resume with: smith resume #{session_data.id}"
@@ -984,6 +1031,79 @@ module Smith
         session.messages = Session::Transcript.truncate(session.messages, index)
         @session_store.save(session)
         puts "Transcript cut back to #{session.messages.size} messages."
+      end
+    end
+
+    # `smith mcp list` / `smith mcp tools <server>`. Both really connect: what
+    # a server exports is only knowable by asking it, and a listing assembled
+    # from the config file alone would answer a different question.
+    private def run_mcp(subcommand : String?, argument : String?) : Nil
+      case subcommand
+      when nil, "list"
+        list_mcp_servers
+      when "tools"
+        list_mcp_tools(argument)
+      else
+        STDERR.puts "❌ Error: unknown 'smith mcp' subcommand #{subcommand.inspect}."
+        STDERR.puts "   Usage: smith mcp list | smith mcp tools <server>"
+        exit(1)
+      end
+    ensure
+      shutdown_mcp
+    end
+
+    private def list_mcp_servers : Nil
+      manager = mcp_manager
+
+      if manager.empty?
+        puts "No MCP servers configured."
+        puts "   Add them to #{MCP::ServerConfig.global_path} or .smith/#{MCP::ServerConfig::FILE_NAME}:"
+        puts %(   {"mcpServers": {"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]}}})
+        return
+      end
+
+      puts "🔌 MCP servers:"
+      puts "--------------------------------------------------------------------------------"
+      printf "%-20s %-10s %-7s %s\n", "SERVER", "STATUS", "TOOLS", "COMMAND"
+      puts "--------------------------------------------------------------------------------"
+
+      manager.handles.each do |handle|
+        printf "%-20s %-10s %-7s %s\n",
+          handle.name,
+          handle.running? ? "ready" : "failed",
+          handle.tools.size.to_s,
+          handle.spec.command_line
+      end
+
+      puts "--------------------------------------------------------------------------------"
+      manager.handles.reject(&.running?).each { |handle| puts "   #{handle.name}: #{handle.error}" }
+      puts "Inspect one with: smith mcp tools <server>"
+    end
+
+    private def list_mcp_tools(server : String?) : Nil
+      if server.nil?
+        STDERR.puts "❌ Error: 'smith mcp tools' needs a server name."
+        STDERR.puts "   Known servers: #{mcp_manager.handles.map(&.name).join(", ")}"
+        exit(1)
+      end
+
+      handle = mcp_manager[server]
+      if handle.nil?
+        STDERR.puts "❌ Error: no MCP server '#{server}' is configured."
+        STDERR.puts "   Known servers: #{mcp_manager.handles.map(&.name).join(", ")}"
+        exit(1)
+      end
+
+      unless handle.running?
+        puts "🚫 #{handle.name} is not running: #{handle.error}"
+        return
+      end
+
+      puts "🔌 #{handle.name} — #{handle.tools.size} tool#{handle.tools.size == 1 ? "" : "s"}"
+      handle.tools.each do |definition|
+        puts ""
+        puts "   #{MCP::Manager.tool_name(handle.name, definition.name)}"
+        puts "      #{definition.description.lines.first? || ""}"
       end
     end
 

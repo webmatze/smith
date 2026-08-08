@@ -23,6 +23,15 @@ module Smith::Output
     # stdout, or the prompt would land in the middle of the JSONL stream.
     abstract def prompt_io : IO
 
+    # Which MCP servers a run came up with. Concrete rather than abstract, and
+    # written to prompt_io: it is a diagnostic, and in JSON mode it must stay
+    # out of the JSONL stream the same way an approval prompt does.
+    def mcp_banner(servers : Array(String)) : Nil
+      return if servers.empty?
+
+      prompt_io.puts "   MCP servers: #{servers.join(", ")}"
+    end
+
     # A failed provider call must not report success. Tool errors deliberately
     # do not count — a failing grep is ordinary agent flow that the model
     # handles itself.

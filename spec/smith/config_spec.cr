@@ -473,6 +473,47 @@ describe "bash settings" do
   end
 end
 
+describe "mcp settings" do
+  it "is on by default, with a sixty second call timeout" do
+    with_sandbox do |temp_dir, _home|
+      settings = Smith::Config.load(make_project(temp_dir)).mcp
+
+      settings.enabled?.should be_true
+      settings.timeout.should eq(60)
+      settings.timeout_span.should eq(60.seconds)
+    end
+  end
+
+  it "reads both from the config" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [mcp]
+        enabled = false
+        timeout = 15
+        TOML
+
+      settings = Smith::Config.load(project).mcp
+      settings.enabled?.should be_false
+      settings.timeout.should eq(15)
+    end
+  end
+
+  it "lets MCP_TOOL_TIMEOUT win over the config" do
+    with_sandbox({"MCP_TOOL_TIMEOUT" => "5"}) do |temp_dir, _home|
+      project = make_project(temp_dir, "[mcp]\ntimeout = 15\n")
+      Smith::Config.load(project).mcp.timeout.should eq(5)
+    end
+  end
+
+  # A timeout of zero would mean "give up before asking", which is never what
+  # anyone means by it.
+  it "falls back to the default for a nonsensical timeout" do
+    with_sandbox({"MCP_TOOL_TIMEOUT" => "0"}) do |temp_dir, _home|
+      Smith::Config.load(make_project(temp_dir)).mcp.timeout.should eq(60)
+    end
+  end
+end
+
 describe "web settings" do
   it "blocks private addresses and disables search by default" do
     with_sandbox do |temp_dir, _home|

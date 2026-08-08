@@ -13,6 +13,14 @@ private def path_call(tool : String, path : String)
   Smith::Tools::CallRequest.new("1", tool, JSON.parse({"path" => path}.to_json))
 end
 
+# An MCP tool takes whatever arguments its server defines, so there is nothing
+# smith could sensibly match in parentheses — the tool name carries the whole
+# rule, which is the form every other MCP client writes too. The path argument
+# is there to prove it is *not* consulted.
+private def mcp_call(tool : String)
+  Smith::Tools::CallRequest.new("1", tool, JSON.parse(%({"path": "/etc/passwd"})))
+end
+
 private def with_project(&)
   root = File.realpath(Dir.tempdir)
   project = File.join(root, "smith_perm_#{Random::Secure.hex(4)}")
@@ -171,6 +179,59 @@ describe "path patterns" do
   it "ignores rules for a different tool" do
     rules(deny: ["write_file(**)"]).decide("read_file", path_call("read_file", "/x").args)
       .should eq(Smith::Tools::Decision::Unset)
+  end
+end
+
+describe "MCP tool rules" do
+  it "parses a bare wildcard tool name" do
+    rule = Smith::Tools::Rule.parse("mcp__filesystem__*").not_nil!
+    rule.tool.should eq("mcp__filesystem__*")
+    rule.wildcard?.should be_true
+    rule.to_s.should eq("mcp__filesystem__*")
+  end
+
+  it "covers every tool of one server" do
+    set = rules(allow: ["mcp__filesystem__*"])
+
+    set.decide("mcp__filesystem__read_file", mcp_call("mcp__filesystem__read_file").args).should eq(Smith::Tools::Decision::Allow)
+    set.decide("mcp__filesystem__write_file", mcp_call("mcp__filesystem__write_file").args).should eq(Smith::Tools::Decision::Allow)
+  end
+
+  # Anchored at both ends: a rule for one server must not reach a differently
+  # named one that merely starts the same way.
+  it "does not leak into another server" do
+    set = rules(allow: ["mcp__fs__*"])
+    set.decide("mcp__fs_admin__delete", mcp_call("mcp__fs_admin__delete").args).should eq(Smith::Tools::Decision::Unset)
+  end
+
+  it "lets deny beat a wildcard allow" do
+    set = rules(allow: ["mcp__db__*"], deny: ["mcp__db__drop_table"])
+
+    set.decide("mcp__db__query", mcp_call("mcp__db__query").args).should eq(Smith::Tools::Decision::Allow)
+    set.decide("mcp__db__drop_table", mcp_call("mcp__db__drop_table").args).should eq(Smith::Tools::Decision::Deny)
+  end
+
+  it "names a single MCP tool without a wildcard" do
+    rules(allow: ["mcp__db__query"])
+      .decide("mcp__db__query", mcp_call("mcp__db__query").args).should eq(Smith::Tools::Decision::Allow)
+  end
+
+  # The tool's own `path` argument is not a rule pattern, so remembering one
+  # would quietly widen the answer to every path under it.
+  it "suggests the bare tool name for [a]lways" do
+    rules.suggest("mcp__fs__read", mcp_call("mcp__fs__read").args).should eq("mcp__fs__read")
+  end
+
+  it "reports a wildcard rule as governing the tools it covers" do
+    set = rules(deny: ["mcp__db__*"])
+    set.governs?("mcp__db__query").should be_true
+    set.governs?("mcp__other__query").should be_false
+  end
+
+  # A bare name without a wildcard would silently widen a path rule to
+  # everything, which is not what anyone writing `read_file` means.
+  it "still rejects a bare name that is not a wildcard" do
+    Smith::Tools::Rule.parse("read_file").should be_nil
   end
 end
 
