@@ -164,6 +164,58 @@ describe "waiting on a job" do
   end
 end
 
+describe "being told a job ended" do
+  # The renderer's "job exited" line hangs off this. It used to wait with
+  # Time::Span::MAX, which the event loop turns into `now + span` — an
+  # overflow that took down the fiber, and with it the notification.
+  it "fires on_exit without arming an unrepresentable timer" do
+    with_jobs do |jobs, _dir|
+      exited = Channel(String).new(1)
+      jobs.on_exit = ->(job : Smith::Tools::BashJob) { exited.send(job.status); nil }
+
+      jobs.start("true").not_nil!
+
+      select
+      when status = exited.receive
+        status.should eq("exited(0)")
+      when timeout(5.seconds)
+        fail "on_exit never fired"
+      end
+    end
+  end
+
+  # A single value on the channel releases a single waiter. The tool call
+  # waiting out its timeout and the on_exit fiber are both waiting, so one of
+  # them used to be left hanging.
+  it "releases every waiter, not just the first" do
+    with_jobs do |jobs, _dir|
+      exited = Channel(Nil).new(1)
+      jobs.on_exit = ->(_job : Smith::Tools::BashJob) { exited.send(nil); nil }
+
+      job = jobs.start("sleep 0.1").not_nil!
+      job.wait(5.seconds).should be_true
+
+      select
+      when exited.receive
+        # Both the caller above and the notifier got through.
+      when timeout(5.seconds)
+        fail "on_exit never fired after another fiber had waited"
+      end
+    end
+  end
+
+  it "waits without a deadline for a job that is already over" do
+    with_jobs do |jobs, _dir|
+      job = jobs.start("true").not_nil!
+      job.wait(5.seconds).should be_true
+
+      # Must return rather than block on a channel nobody will send to again.
+      job.wait
+      job.running?.should be_false
+    end
+  end
+end
+
 describe "how long a job ran" do
   it "stops counting once the job ended" do
     with_jobs do |jobs, _dir|

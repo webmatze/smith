@@ -31,14 +31,17 @@ module Smith::Tools
 
     def initialize(@id : String, @command : String, @log_path : String, @process : Process)
       @started_at = Time.local
-      @done = Channel(Nil).new(1)
+      @done = Channel(Nil).new
 
       spawn do
         status = @process.wait
         @exit_code = status.exit_code unless @killed
         @state = @killed ? State::Killed : State::Exited
         @ended_at = Time.local
-        @done.send(nil)
+        # Closed rather than sent to: a single value releases a single waiter,
+        # and there are regularly two — the tool call waiting out its timeout
+        # and the fiber that fires on_exit. Closing wakes both.
+        @done.close
       end
     end
 
@@ -78,12 +81,24 @@ module Smith::Tools
       chunk.lines.select { |line| filter.matches?(line) }.join("\n")
     end
 
+    # Blocks until the job ends, however long that takes.
+    #
+    # Deliberately not `wait(Time::Span::MAX)`, which reads like the same
+    # thing: the event loop arms a timer at `now + span`, and that overflows.
+    # A deadline that cannot be represented is not a deadline — so this arms
+    # no timer at all.
+    def wait : Nil
+      return unless running?
+
+      @done.receive?
+    end
+
     # True when the job finished within the span.
     def wait(span : Time::Span) : Bool
       return true unless running?
 
       select
-      when @done.receive
+      when @done.receive?
         true
       when timeout(span)
         false
@@ -156,7 +171,7 @@ module Smith::Tools
       @on_start.try &.call(job)
       if notify = @on_exit
         spawn do
-          job.wait(Time::Span::MAX)
+          job.wait
           notify.call(job)
         end
       end
