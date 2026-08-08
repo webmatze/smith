@@ -37,6 +37,8 @@ module Smith
     @config : Config
     @todos = TodoList.new
     @thinking : Bool? = nil
+    @continue : Bool = false
+    @max_budget_usd : Float64? = nil
     @trust_hooks : Bool = false
     @hooks : Hooks::Runner? = nil
     @session_id : String = "headless"
@@ -93,8 +95,12 @@ module Smith
           str.puts "Commands:"
           str.puts "  chat                       Start an interactive chat session (default)"
           str.puts "  run <prompt>               Run a single prompt in headless mode and exit"
-          str.puts "  resume [<session_id>]      Resume an existing session (or latest session)"
+          str.puts "  resume [<session>]         Resume a session by name or id (default: the latest)"
+          str.puts "  continue [<prompt>]        Continue the latest session; same as -c"
           str.puts "  sessions, list             List all saved local chat sessions"
+          str.puts "  rename <session> <name>    Give a session a name you can resume by"
+          str.puts "  fork <session>             Copy a session so it can be taken two ways"
+          str.puts "  context [<session>]        Show where the context window is going"
           str.puts "  checkpoints [<session_id>] List the file snapshots taken during a session"
           str.puts "  rewind [<session_id>]      Undo a session's file changes\n"
           str.puts "Options:"
@@ -144,6 +150,19 @@ module Smith
           @thinking = false
         end
 
+        opts.on("-c", "--continue", "Continue the most recent session; a prompt after it runs headless") do
+          @continue = true
+        end
+
+        opts.on("--max-budget-usd USD", "Stop the run once the estimated cost reaches this (exit code 2)") do |value|
+          budget = value.to_f?
+          if budget.nil? || budget <= 0
+            STDERR.puts "❌ Error: --max-budget-usd expects a positive number, got #{value.inspect}."
+            exit(1)
+          end
+          @max_budget_usd = budget
+        end
+
         opts.on("--trust-hooks", "Trust this project's hooks without asking (they run arbitrary commands)") do
           @trust_hooks = true
         end
@@ -177,6 +196,7 @@ module Smith
           puts "  • Persistence: Sessions are saved under ~/.smith/sessions/ and can be resumed with 'smith resume'."
           puts "  • Plan Mode: --plan (or [defaults] mode = \"plan\") researches first and asks before changing anything."
           puts "    In chat, /plan and /normal switch at runtime; these built-ins win over a skill of the same name."
+          puts "  • Sessions: /rename <name> and /context work in chat; costs are shown when the model's price is known."
           exit
         end
       end
@@ -192,6 +212,14 @@ module Smith
         exit(1)
       end
 
+      # -c takes over the dispatch: anything that is not a subcommand becomes
+      # the prompt for one more turn on the last session.
+      if @continue
+        prompt = KNOWN_COMMANDS.includes?(command) ? nil : @args.join(" ")
+        run_resume(nil, prompt)
+        return
+      end
+
       case command
       when "run"
         prompt = @args[1..-1]?.try(&.join(" ")) || ""
@@ -204,10 +232,19 @@ module Smith
       when "chat", "interactive"
         run_interactive
       when "resume"
-        session_id = @args[1]?
-        run_resume(session_id)
+        run_resume(@args[1]?)
+      when "continue"
+        # Everything after the verb is a prompt, so `smith continue "and now
+        # the tests"` works the same way `smith -c` does.
+        run_resume(nil, @args[1..-1]?.try(&.join(" ")))
       when "sessions", "list"
         list_sessions
+      when "rename"
+        rename_session(@args[1]?, @args[2..-1]?.try(&.join(" ")))
+      when "fork"
+        fork_session(@args[1]?)
+      when "context"
+        show_context(@args[1]?)
       when "checkpoints"
         list_checkpoints(@args[1]?)
       when "rewind"
@@ -222,7 +259,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume sessions list checkpoints rewind]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context]
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -276,12 +313,21 @@ module Smith
     end
 
     private def build_system_prompt : String
+      system_prompt_parts.map { |part| part[1] }.reject(&.empty?).join("\n\n")
+    end
+
+    # The system prompt, still in labelled pieces. `smith context` reports
+    # those labels, so it describes the prompt that is actually sent rather
+    # than a second assembly that could drift from it.
+    private def system_prompt_parts : Array({String, String})
+      parts = Array({String, String}).new
+
       # A definition replaces the built-in preamble outright — the point of
       # --agent is a single-purpose runner, not smith wearing a hat.
       if definition = main_agent
-        blocks = [definition.system_prompt]
-        blocks << @hook_context.not_nil! if @hook_context
-        return blocks.join("\n\n")
+        parts << {"Agent definition", definition.system_prompt}
+        parts << {"Hook context", @hook_context.not_nil!} if @hook_context
+        return parts
       end
 
       base_prompt = String.build do |str|
@@ -292,10 +338,10 @@ module Smith
         str.puts "When creating a new skill, if the user has not specified the location, ask the user first where they want to store the new skill."
       end
 
-      blocks = [base_prompt]
+      parts << {"System prompt", base_prompt}
 
       if plan_session.plan_mode?
-        blocks << <<-PLAN
+        parts << {"Plan mode", <<-PLAN}
         Plan Mode — you are researching, not building:
           • Every mutating tool (bash, write_file, edit_file) is unavailable, and subagents are forced into read-only inspect mode. Do not try to work around that.
           • Understand the code first with read_file, grep and glob.
@@ -304,19 +350,14 @@ module Smith
         PLAN
       end
 
-      if skill_summary = @skills_catalog.summary_prompt
-        blocks << skill_summary
-      end
+      parts << {"Skills", @skills_catalog.summary_prompt || ""}
+      parts << {"Project (SMITH.md)", ProjectContext.discover || ""}
+      parts << {"Hook context", @hook_context || ""}
 
-      if project_instructions = ProjectContext.discover
-        blocks << project_instructions
-      end
-
-      if hook_context = @hook_context
-        blocks << hook_context
-      end
-
-      blocks.join("\n\n")
+      # Empty parts stay in the list: `smith context` reports them as zero,
+      # which answers "are skills eating my context?" — the join below drops
+      # them so the prompt itself is unaffected.
+      parts
     end
 
     # CLI-Flag > [approval] mode. Without a TTY there is nobody to ask, so
@@ -531,7 +572,9 @@ module Smith
         stream: @stream.nil? ? @config.stream? : @stream.not_nil!,
         hooks: hooks,
         thinking_effort: thinking_enabled? ? @config.thinking_effort : nil,
-        thinking_budget: thinking_enabled? ? @config.thinking_budget : nil
+        thinking_budget: thinking_enabled? ? @config.thinking_budget : nil,
+        cost_limit_usd: @max_budget_usd,
+        rates: budget_rates(provider.name, effective_model)
       )
 
       agent.on_event do |event|
@@ -591,6 +634,13 @@ module Smith
 
     private def run_headless(prompt : String)
       provider = build_provider
+      effective_model = @model || provider.default_model
+
+      # Headless runs are saved too, so `smith -c "and now the tests"` picks up
+      # what just happened rather than an unrelated older chat.
+      session_data = @session_store.create(model: effective_model, provider: effective_provider_name)
+      @session_id = session_data.id
+
       agent = build_agent(provider)
 
       renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
@@ -600,10 +650,18 @@ module Smith
 
       submit(agent, prompt)
       shutdown_bash_jobs
-      renderer.finish(agent.cumulative_usage)
+      persist(session_data, agent)
+      renderer.finish(agent.cumulative_usage, cost_for(provider.name, agent.model, agent.cumulative_usage))
 
       # A failed provider call must not report success to a calling script.
       exit(renderer.exit_code)
+    end
+
+    private def persist(session_data : Session::Data, agent : Agent) : Nil
+      session_data.messages = agent.messages
+      session_data.usage = agent.cumulative_usage
+      session_data.todos = @todos.items
+      @session_store.save(session_data)
     end
 
     private def run_interactive
@@ -614,16 +672,23 @@ module Smith
       start_session_loop(session_data)
     end
 
-    private def run_resume(session_id : String?)
-      session_data = if session_id
-                       @session_store.load(session_id)
-                     else
-                       @session_store.latest
-                     end
+    # `reference` is whatever the user typed — a session name or an id.
+    # `prompt` turns the resume into a one-shot: `smith -c "and now the tests"`.
+    private def run_resume(reference : String?, prompt : String? = nil)
+      session_data = begin
+        reference ? @session_store.resolve(reference) : @session_store.latest
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
 
       if session_data.nil?
         puts "❌ No sessions found to resume."
         exit(1)
+      end
+
+      if prompt && !prompt.strip.empty?
+        return resume_headless(session_data, prompt)
       end
 
       @model = session_data.model
@@ -643,6 +708,27 @@ module Smith
       puts "--------------------------------------------------"
 
       start_session_loop(session_data)
+    end
+
+    # `smith -c "<prompt>"` — one more turn on the last session, then out.
+    # Same shape as run_headless, but the transcript comes from disk and goes
+    # back to it.
+    private def resume_headless(session_data : Session::Data, prompt : String)
+      @model = session_data.model
+      @provider_name = session_data.provider
+      @session_id = session_data.id
+
+      provider = build_provider(session_data.provider)
+      agent = build_agent(provider, session_data.messages)
+
+      renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
+      renderer.handle(Events::ModeChanged.new(Mode::Plan)) if plan_session.plan_mode?
+
+      submit(agent, prompt)
+      shutdown_bash_jobs
+      persist(session_data, agent)
+      renderer.finish(agent.cumulative_usage, cost_for(session_data.provider, agent.model, agent.cumulative_usage))
+      exit(renderer.exit_code)
     end
 
     private def start_session_loop(session_data : Session::Data)
@@ -690,8 +776,8 @@ module Smith
 
         # Before expand_prompt on purpose: the skill catalog claims any /name
         # that matches a skill, so a skill called "plan" would shadow /plan.
-        if command = ChatCommands.parse(trimmed)
-          run_chat_command(command, session_data)
+        if invocation = ChatCommands.parse(trimmed)
+          run_chat_command(invocation, session_data, agent)
           next
         end
 
@@ -699,10 +785,7 @@ module Smith
         submit(agent, trimmed)
         puts ""
 
-        session_data.messages = agent.messages
-        session_data.usage = agent.cumulative_usage
-        session_data.todos = @todos.items
-        @session_store.save(session_data)
+        persist(session_data, agent)
       end
 
       shutdown_bash_jobs
@@ -710,9 +793,21 @@ module Smith
       puts "Goodbye! ⚒️"
     end
 
-    private def run_chat_command(command : ChatCommand, session_data : Session::Data) : Nil
+    private def run_chat_command(invocation : ChatCommands::Invocation, session_data : Session::Data, agent : Agent) : Nil
+      command = invocation.command
+
       if command.rewind?
         rewind_from_chat(session_data)
+        return
+      end
+
+      if command.context?
+        print_context(session_data, agent.messages, agent)
+        return
+      end
+
+      if command.rename?
+        rename_from_chat(session_data, invocation.argument.not_nil!)
         return
       end
 
@@ -892,6 +987,116 @@ module Smith
       end
     end
 
+    private def cost_for(provider_name : String, model : String, usage : LLM::Usage) : Float64?
+      Pricing.estimate(usage, provider_name, model, @config.pricing)
+    end
+
+    # A budget without a price for the model in use is not a budget. Saying so
+    # once, loudly, beats letting an automated run believe it is capped.
+    private def budget_rates(provider_name : String, model : String) : Pricing::Rates?
+      return nil if @max_budget_usd.nil?
+
+      rates = Pricing.rates_for(provider_name, model, @config.pricing)
+      if rates.nil?
+        STDERR.puts "⚠️  --max-budget-usd cannot apply: no price known for #{provider_name}/#{model}."
+        STDERR.puts "   Add one under [pricing.\"#{provider_name}/#{model}\"] to enforce it."
+      end
+
+      rates
+    end
+
+    private def rename_session(reference : String?, name : String?) : Nil
+      if reference.nil? || name.nil? || name.strip.empty?
+        STDERR.puts "Error: 'smith rename' needs a session and a name."
+        STDERR.puts "Example: smith rename session-1234-abc my-refactor"
+        exit(1)
+      end
+
+      begin
+        session = @session_store.rename(reference, name)
+        puts "✏️  Renamed to '#{session.name}' (#{session.id})"
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
+    end
+
+    private def rename_from_chat(session_data : Session::Data, name : String) : Nil
+      session = @session_store.rename(session_data.id, name)
+      session_data.name = session.name
+      puts "   ✏️  Session renamed to '#{session.name}'."
+    rescue ex : ArgumentError
+      puts "   ❌ #{ex.message}"
+    end
+
+    private def fork_session(reference : String?) : Nil
+      if reference.nil?
+        STDERR.puts "Error: 'smith fork' needs a session to copy."
+        STDERR.puts "Example: smith fork my-refactor"
+        exit(1)
+      end
+
+      begin
+        copy = @session_store.fork(reference)
+        puts "🍴 Forked #{copy.parent_id} → #{copy.id}#{copy.name.try { |n| " (#{n})" }}"
+        puts "   Resume it with: smith resume #{copy.name || copy.id}"
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
+    end
+
+    # `smith context [<session>]` — where the context window actually goes.
+    private def show_context(reference : String?) : Nil
+      session = begin
+        reference ? @session_store.resolve(reference) : @session_store.latest
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
+
+      if session.nil?
+        puts "No sessions found under #{@session_store.sessions_dir}"
+        return
+      end
+
+      print_context(session, session.messages, nil)
+    end
+
+    # Built from the same parts that go into the request, and counted with the
+    # same estimator compaction uses — a breakdown that disagreed with the
+    # thing it describes would be worse than none.
+    private def print_context(session : Session::Data, messages : Array(LLM::Message), agent : Agent?) : Nil
+      budget = @config.context.max_tokens
+      breakdown = Context::Breakdown.new(budget)
+
+      system_prompt_parts.each { |part| breakdown.add(part[0], part[1]) }
+      # The tool set does not vary with who approves it, so the default
+      # registry gives the same definitions the run would send.
+      breakdown.add("Tool definitions", Tools::Registry.default.specs.to_json)
+      breakdown.add("Messages", messages)
+
+      puts "Context for session #{session.reference} (#{format_tokens(budget)} token budget)"
+      puts ""
+      breakdown.entries.each do |entry|
+        printf("  %-20s %9s %4d%%\n", entry.label, format_tokens(entry.tokens), breakdown.percent(entry.tokens))
+      end
+      puts "  " + "─" * 35
+      printf("  %-20s %9s %4d%%\n", "Total", format_tokens(breakdown.total), breakdown.percent(breakdown.total))
+
+      # The live session knows what compaction did to it; a session read back
+      # from disk does not, and claiming otherwise would be a guess.
+      if agent && agent.compactions > 0
+        strategy = agent.last_compaction.try { |s| " (#{s.to_s.downcase})" }
+        puts ""
+        puts "  Compactions this session: #{agent.compactions}#{strategy}"
+      end
+    end
+
+    private def format_tokens(count : Int32) : String
+      count.to_s.reverse.gsub(/(\d{3})(?=\d)/, "\\1.").reverse
+    end
+
     private def list_sessions
       entries = @session_store.list
       if entries.empty?
@@ -901,16 +1106,16 @@ module Smith
 
       puts "📜 Saved Smith Sessions (#{@session_store.sessions_dir}):"
       puts "--------------------------------------------------------------------------------"
-      printf "%-28s %-20s %-8s %s\n", "SESSION ID", "UPDATED", "MSGS", "FIRST PROMPT"
+      printf "%-28s %-24s %-18s %-6s %s\n", "SESSION ID", "NAME", "UPDATED", "MSGS", "FIRST PROMPT"
       puts "--------------------------------------------------------------------------------"
 
       entries.each do |e|
         time_str = e.updated_at.to_s("%Y-%m-%d %H:%M")
-        printf "%-28s %-20s %-8d %s\n", e.id, time_str, e.message_count, e.first_prompt
+        printf "%-28s %-24s %-18s %-6d %s\n", e.id, e.name || "-", time_str, e.message_count, e.first_prompt
       end
 
       puts "--------------------------------------------------------------------------------"
-      puts "To resume a session, run: smith resume <session_id>"
+      puts "To resume a session, run: smith resume <name or id>"
     end
   end
 end

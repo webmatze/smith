@@ -177,5 +177,16 @@ module Smith::Events
     end
   end
 
+  # The run stopped because it reached its cost ceiling, not because it
+  # finished or failed. Kept apart from TurnError so an automated caller can
+  # tell "too expensive" from "broken".
+  class BudgetExceeded < Event
+    getter spent_usd : Float64
+    getter limit_usd : Float64
+
+    def initialize(@spent_usd : Float64, @limit_usd : Float64)
+    end
+  end
+
   alias Listener = Proc(Event, Nil)
 end

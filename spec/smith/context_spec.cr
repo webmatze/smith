@@ -204,3 +204,32 @@ describe Smith::Context do
     end
   end
 end
+
+describe Smith::Context::Breakdown do
+  it "counts text the same way compaction counts messages" do
+    # If these two diverged, `smith context` would report a number the
+    # compaction decision does not act on.
+    text = "a" * 400
+    message = Smith::LLM::Message.user(text)
+
+    Smith::Context.estimate_text_tokens(text).should eq(Smith::Context.estimate_tokens([message]))
+  end
+
+  it "sums its parts and reports each as a share of the budget" do
+    breakdown = Smith::Context::Breakdown.new(1000)
+    breakdown.add("System prompt", "x" * 400) # 100 tokens
+    breakdown.add("Messages", [Smith::LLM::Message.user("y" * 800)])
+
+    breakdown.total.should eq(300)
+    breakdown.percent(breakdown.total).should eq(30)
+    breakdown.entries.map(&.label).should eq(["System prompt", "Messages"])
+  end
+
+  it "keeps an empty part visible rather than hiding it" do
+    # "Skills 0" answers "are skills eating my context?"; a missing line does not.
+    breakdown = Smith::Context::Breakdown.new(1000)
+    breakdown.add("Skills", "")
+
+    breakdown.entries.map(&.tokens).should eq([0])
+  end
+end

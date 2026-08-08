@@ -1,5 +1,6 @@
 require "json"
 require "./events"
+require "./pricing"
 require "./llm/types"
 
 module Smith::Output
@@ -11,7 +12,12 @@ module Smith::Output
   abstract class Renderer
     abstract def handle(event : Events::Event) : Nil
     abstract def banner(provider : String, model : String, skills : Array(String)) : Nil
-    abstract def finish(usage : LLM::Usage) : Nil
+    abstract def finish(usage : LLM::Usage, cost : Float64?) : Nil
+
+    # Callers that have no price basis still want the usage line.
+    def finish(usage : LLM::Usage) : Nil
+      finish(usage, nil)
+    end
 
     # Where an approval prompt should write. In JSON mode this must not be
     # stdout, or the prompt would land in the middle of the JSONL stream.
@@ -22,7 +28,12 @@ module Smith::Output
     # handles itself.
     getter? failed : Bool = false
 
+    # A run stopped by its own cost ceiling did what it was told; a caller
+    # automating smith needs to tell that apart from a broken turn.
+    getter? budget_exceeded : Bool = false
+
     def exit_code : Int32
+      return 2 if budget_exceeded?
       failed? ? 1 : 0
     end
 
@@ -116,19 +127,23 @@ module Smith::Output
         event.skipped.each { |skip| @io.puts "⚠️  #{skip.path} — #{skip.reason}" }
       when Events::HistoryCompacted
         @io.puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens"
+      when Events::BudgetExceeded
+        @budget_exceeded = true
+        @io.puts "\n💸 Budget spent: #{Pricing.format(event.spent_usd)} of #{Pricing.format(event.limit_usd)} — stopping here."
       when Events::TurnError
         @failed = true
         @io.puts "\n❌ Error: #{event.error}"
       end
     end
 
-    def finish(usage : LLM::Usage) : Nil
+    def finish(usage : LLM::Usage, cost : Float64? = nil) : Nil
       # Only mentioned when there is something to mention — three of the four
       # providers never cache anything.
       cached = usage.cached_tokens.zero? ? "" : " (#{usage.cached_tokens} cached)"
 
       @io.puts "\n--------------------------------------------------"
       @io.puts "📊 Usage: #{usage.prompt_tokens} prompt#{cached} + #{usage.completion_tokens} completion = #{usage.total_tokens} total tokens"
+      @io.puts "💰 Cost:  #{Pricing.format(cost)}"
     end
   end
 
@@ -271,6 +286,13 @@ module Smith::Output
           json.field "before_tokens", event.before_tokens
           json.field "after_tokens", event.after_tokens
         end
+      when Events::BudgetExceeded
+        @budget_exceeded = true
+        emit do |json|
+          json.field "type", "budget_exceeded"
+          json.field "spent_usd", event.spent_usd
+          json.field "limit_usd", event.limit_usd
+        end
       when Events::TurnError
         @failed = true
         emit do |json|
@@ -282,10 +304,17 @@ module Smith::Output
 
     # Always the last line, carrying the answer reassembled from every text
     # block, so a consumer can just take the final object.
-    def finish(usage : LLM::Usage) : Nil
+    def finish(usage : LLM::Usage, cost : Float64? = nil) : Nil
       emit do |json|
         json.field "type", "result"
         json.field "text", answer
+        # null rather than 0 when there is no price basis: a caller must not
+        # read "unknown" as "free".
+        if cost
+          json.field "cost_usd", cost
+        else
+          json.field "cost_usd", nil
+        end
         json.field "usage" do
           json.object do
             json.field "prompt_tokens", usage.prompt_tokens

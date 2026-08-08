@@ -26,6 +26,44 @@ module Smith
       bytes // 4
     end
 
+    # The same heuristic applied to a plain string, so a breakdown of the
+    # context and the compaction decision cannot drift apart.
+    def self.estimate_text_tokens(text : String) : Int32
+      text.bytesize // 4
+    end
+
+    # Where the context window actually goes. Built by the caller, which is
+    # the only thing that knows what went into the system prompt.
+    class Breakdown
+      record Entry, label : String, tokens : Int32
+
+      getter entries : Array(Entry)
+      getter max_tokens : Int32
+
+      def initialize(@max_tokens : Int32)
+        @entries = Array(Entry).new
+      end
+
+      # Empty parts are kept: "Skills 0" answers "are skills eating my
+      # context?", a missing line leaves the question open.
+      def add(label : String, text : String) : Nil
+        @entries << Entry.new(label, Context.estimate_text_tokens(text))
+      end
+
+      def add(label : String, messages : Array(LLM::Message)) : Nil
+        @entries << Entry.new(label, Context.estimate_tokens(messages))
+      end
+
+      def total : Int32
+        @entries.sum(&.tokens)
+      end
+
+      def percent(tokens : Int32) : Int32
+        return 0 if @max_tokens <= 0
+        (tokens * 100.0 / @max_tokens).round.to_i
+      end
+    end
+
     enum Strategy
       None
       Truncated

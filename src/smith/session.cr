@@ -15,7 +15,47 @@ module Smith::Session
     getter first_prompt : String
     getter message_count : Int32
 
-    def initialize(@id : String, @created_at : Time, @updated_at : Time, @first_prompt : String, @message_count : Int32)
+    # Index files written before names existed simply have no field.
+    getter name : String? = nil
+    getter parent_id : String? = nil
+
+    def initialize(
+      @id : String,
+      @created_at : Time,
+      @updated_at : Time,
+      @first_prompt : String,
+      @message_count : Int32,
+      @name : String? = nil,
+      @parent_id : String? = nil,
+    )
+    end
+
+    # What to type to get this session back.
+    def reference : String
+      @name || @id
+    end
+  end
+
+  # Turns a first prompt into something a human would type at a shell.
+  #
+  # Deliberately not an LLM call: naming a session is not worth a provider
+  # roundtrip, and a mechanical name is predictable in a way a generated one
+  # is not.
+  module Naming
+    WORDS = 5
+
+    def self.derive(prompt : String) : String?
+      words = prompt
+        .downcase
+        .gsub(/[^a-z0-9\s-]/, " ")
+        .split(/\s+/)
+        .reject(&.empty?)
+        .first(WORDS)
+
+      return nil if words.empty?
+
+      name = words.join("-").strip('-')
+      name.empty? ? nil : name
     end
   end
 
@@ -31,8 +71,11 @@ module Smith::Session
     property messages : Array(Smith::LLM::Message)
     property usage : Smith::LLM::Usage
 
-    # Sessions written before the todo tool existed simply have no field.
+    # Sessions written before the todo tool existed simply have no field. The
+    # same goes for name and parent_id: both default so older files load.
     property todos : Array(Smith::TodoList::Item) = Array(Smith::TodoList::Item).new
+    property name : String? = nil
+    property parent_id : String? = nil
 
     def initialize(
       @id : String,
@@ -44,6 +87,8 @@ module Smith::Session
       @todos : Array(Smith::TodoList::Item) = Array(Smith::TodoList::Item).new,
       @created_at : Time = Time.local,
       @updated_at : Time = Time.local,
+      @name : String? = nil,
+      @parent_id : String? = nil,
     )
     end
 
@@ -64,8 +109,21 @@ module Smith::Session
         created_at: @created_at,
         updated_at: @updated_at,
         first_prompt: first_prompt,
-        message_count: @messages.size
+        message_count: @messages.size,
+        name: @name,
+        parent_id: @parent_id
       )
+    end
+
+    # What to type to get this session back.
+    def reference : String
+      @name || @id
+    end
+
+    # True when first_prompt is one of its own placeholders rather than
+    # something the user actually typed.
+    def prompted? : Bool
+      @messages.any? { |m| m.role.user? && m.content.any? { |b| b.type.text? && !b.text.try(&.strip).nil? } }
     end
   end
 
@@ -98,13 +156,13 @@ module Smith::Session
       FileUtils.mkdir_p(@sessions_dir, mode: 0o700)
     end
 
-    def create(model : String, provider : String, cwd : String = Dir.current) : Data
-      timestamp = Time.local.to_unix
-      random_suffix = Random::Secure.hex(3)
-      session_id = "session-#{timestamp}-#{random_suffix}"
+    def new_id : String
+      "session-#{Time.local.to_unix}-#{Random::Secure.hex(3)}"
+    end
 
+    def create(model : String, provider : String, cwd : String = Dir.current) : Data
       data = Data.new(
-        id: session_id,
+        id: new_id,
         cwd: cwd,
         model: model,
         provider: provider
@@ -120,8 +178,18 @@ module Smith::Session
       File.join(@sessions_dir, id)
     end
 
-    def save(session : Data) : Nil
+    # `derive_name` and `check_name` exist so a rename can write a name the
+    # normal path would have refused or replaced; everyday saves want both.
+    def save(session : Data, derive_name : Bool = true, check_name : Bool = true) : Nil
       session.updated_at = Time.local
+
+      if derive_name && session.name.nil? && session.prompted?
+        session.name = unique_name(Naming.derive(session.first_prompt), session.id)
+      end
+
+      if check_name && (name = session.name)
+        assert_available(name, session.id)
+      end
 
       AtomicFile.write(File.join(session_dir(session.id), "session.json"), session.to_json)
 
@@ -163,6 +231,91 @@ module Smith::Session
       entries = list
       return nil if entries.empty?
       load(entries.first.id)
+    end
+
+    # A reference is whatever the user typed: an id or a name. An id wins,
+    # since it is unambiguous by construction.
+    def resolve(reference : String) : Data
+      wanted = reference.strip
+      entries = list
+
+      if entries.any? { |e| e.id == wanted } || session_file?(wanted)
+        return load(wanted)
+      end
+
+      matches = entries.select { |e| e.name == wanted }
+
+      case matches.size
+      when 0
+        raise ArgumentError.new("Session '#{wanted}' not found. Run 'smith sessions' to see what there is.")
+      when 1
+        load(matches.first.id)
+      else
+        # Only reachable if session files were edited by hand, but picking one
+        # silently would resume the wrong conversation.
+        listing = matches.map { |e| "  #{e.id}  (updated #{e.updated_at})" }.join("\n")
+        raise ArgumentError.new("Session name '#{wanted}' is ambiguous:\n#{listing}\nUse the id instead.")
+      end
+    end
+
+    def rename(reference : String, name : String) : Data
+      session = resolve(reference)
+      wanted = name.strip
+
+      raise ArgumentError.new("A session name cannot be empty.") if wanted.empty?
+      assert_available(wanted, session.id)
+
+      session.name = wanted
+      save(session, derive_name: false)
+      session
+    end
+
+    # A copy under a new id, so one conversation can be taken two ways. The
+    # original is untouched — including its checkpoints, which stay with it.
+    def fork(reference : String) : Data
+      source = resolve(reference)
+
+      copy = Data.new(
+        id: new_id,
+        cwd: source.cwd,
+        model: source.model,
+        provider: source.provider,
+        messages: source.messages.dup,
+        usage: source.usage,
+        todos: source.todos.dup,
+        name: unique_name(source.name.try { |n| "#{n}-fork" }, nil),
+        parent_id: source.id
+      )
+
+      save(copy, derive_name: false, check_name: false)
+      copy
+    end
+
+    private def session_file?(id : String) : Bool
+      File.exists?(File.join(session_dir(id), "session.json")) || File.exists?(legacy_path(id))
+    end
+
+    private def assert_available(name : String, owner_id : String) : Nil
+      taken = list.find { |e| e.name == name && e.id != owner_id }
+      return if taken.nil?
+
+      raise ArgumentError.new("The name '#{name}' is already used by session #{taken.id}.")
+    end
+
+    # Derived names collide easily — two "fix the tests" sessions in a week is
+    # normal — and a collision would make resuming by name ambiguous, so the
+    # duplicate gets a counter rather than the ambiguity.
+    private def unique_name(candidate : String?, owner_id : String?) : String?
+      return nil if candidate.nil?
+
+      taken = list.reject { |e| e.id == owner_id }.compact_map(&.name).to_set
+      return candidate unless taken.includes?(candidate)
+
+      counter = 2
+      while taken.includes?("#{candidate}-#{counter}")
+        counter += 1
+      end
+      "#{candidate}-#{counter}"
     end
 
     private def update_index(new_entry : IndexEntry)

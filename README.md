@@ -135,6 +135,15 @@ deny  = ["bash(rm -rf *)", "read_file(**/.ssh/**)"]
 [context]
 max_tokens = 120000
 
+[mentions]
+max_lines       = 2000           # per file, then truncated and marked
+max_total_bytes = 262144         # across all mentions of one prompt
+allow_outside   = false          # refuse @paths that leave the project
+
+[pricing."anthropic/claude-sonnet-5"]
+input  = 3.0                     # $ per 1M tokens; overrides the built-in table
+output = 15.0
+
 [subagents]
 max_depth    = 3                 # levels of nesting; 0 disables delegation
 max_children = 20                # total spawns per run, shared across levels
@@ -188,6 +197,83 @@ Two details worth knowing:
 
 - **Ollama streams OpenAI-shaped SSE, not NDJSON**, because smith talks to its `/v1/chat/completions` endpoint. OpenRouter, OpenAI and Ollama therefore share one reader; Anthropic has its own for its named-event format.
 - **A stream that dies after text has already appeared is not retried.** Replaying the request would print the same text a second time. Failures before the first token — connection, HTTP status — still go through the normal retry handler.
+
+### Sessions
+
+Every run is saved — headless ones too, so the obvious follow-up works:
+
+```bash
+smith "why does this test fail on Linux?"
+smith -c "and now fix it"          # same session, one more turn
+smith -c                           # same session, interactive
+```
+
+Sessions get a name from their first prompt (`fix-the-linux-test`), and the name is what you resume by:
+
+```bash
+smith sessions                     # ID, name, first prompt
+smith rename <session> my-refactor # or /rename my-refactor in chat
+smith resume my-refactor           # name or id, whichever you remember
+smith fork my-refactor             # a copy, to take the same start two ways
+```
+
+A derived name that would collide gets a counter (`fix-the-tests-2`); renaming onto a name another session already holds is refused rather than silently allowed. Sessions saved before names existed keep loading — they simply have none, and `smith resume <id>` still works.
+
+`smith fork` copies the transcript under a new id and records where it came from. Useful when a conversation reaches a fork in the road: keep the original, try the other way in the copy. Checkpoints stay with the session that made them.
+
+### Context
+
+Compaction decides silently; `smith context` shows what it is deciding about:
+
+```
+Context for session my-refactor (120.000 token budget)
+
+  System prompt               97    0%
+  Skills                     420    0%
+  Project (SMITH.md)         310    0%
+  Tool definitions         1.153    1%
+  Messages                34.100   28%
+  ───────────────────────────────────
+  Total                   36.080   30%
+
+  Compactions this session: 1 (truncated)
+```
+
+Also `/context` in chat, where the compaction line is filled in — a session read back from disk has no such history, and guessing at it would be worse than leaving it out.
+
+The parts are the same ones the system prompt is assembled from, counted with the same estimator compaction uses. A breakdown that disagreed with the thing it describes would be worse than none.
+
+### Cost and Budget
+
+Token counts end every run; the money line sits under them:
+
+```
+📊 Usage: 2.430 prompt (2.330 cached) + 51 completion = 2.481 total tokens
+💰 Cost:  $0.0017
+```
+
+An unknown model prices as `n/a`, never as a guess — a wrong cost figure is worse than no cost figure. Ollama is always `$0.00`. Rates go stale as vendors change them, so any of them can be overridden:
+
+```toml
+[pricing."anthropic/claude-sonnet-5"]
+input  = 3.0      # $ per 1M tokens
+output = 15.0
+# cache_write and cache_read default to 1.25x and 0.1x of input
+```
+
+For unattended runs, `--max-budget-usd` stops the loop once the estimate reaches the ceiling:
+
+```bash
+smith run --max-budget-usd 2.50 "migrate the test suite"
+```
+
+It exits with code **2**, distinct from `1` for a failed turn, so a script can tell "too expensive" from "broken". The check runs after each turn rather than before it, so the answer you just paid for is still delivered.
+
+Without a price for the model in use there is nothing to enforce, and smith says so on stderr rather than letting a run believe it is capped:
+
+```
+⚠️  --max-budget-usd cannot apply: no price known for openrouter/qwen/qwen3.8-max.
+```
 
 ### @-Mentions
 
@@ -876,8 +962,12 @@ Usage: smith [command] [options] [prompt]
 Commands:
   chat                       Start an interactive chat session (default)
   run <prompt>               Run a single prompt in headless mode and exit
-  resume [<session_id>]      Resume an existing session (or latest session)
+  resume [<session>]         Resume a session by name or id (default: the latest)
+  continue [<prompt>]        Continue the latest session; same as -c
   sessions, list             List all saved local chat sessions
+  rename <session> <name>    Give a session a name you can resume by
+  fork <session>             Copy a session so it can be taken two ways
+  context [<session>]        Show where the context window is going
   checkpoints [<session_id>] List the file snapshots taken during a session
   rewind [<session_id>]      Undo a session's file changes
 
@@ -895,6 +985,8 @@ Options:
       --plan                 Start in plan mode: research only, until you approve a plan
       --json                 Emit JSON Lines on stdout (headless 'run' only)
       --think                Enable thinking (Anthropic); --no-think turns it off
+  -c, --continue             Continue the most recent session; a prompt after it runs headless
+      --max-budget-usd USD   Stop the run once the estimated cost reaches this (exit code 2)
       --no-stream            Wait for the complete response instead of streaming it
   -v, --version              Print version information
   -h, --help                 Show help banner
@@ -921,6 +1013,7 @@ src/
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── mentions.cr          # @path expansion: file embedding, budgets & path guard
+    ├── pricing.cr           # Token counts to dollars, per provider/model
     ├── agents.cr            # Custom agent definitions in .smith/agents/<name>.md
     ├── frontmatter.cr       # Shared --- header parser for skills and agents
     ├── todos.cr             # Todo list state, validation & change callback
