@@ -7,7 +7,7 @@ describe Smith::PlainPresentation do
   it "builds the prompting gates and keeps their prompts off stdout" do
     stream = IO::Memory.new
     diagnostics = IO::Memory.new
-    presentation = Smith::PlainPresentation.new(Smith::Output::JsonRenderer.new(stream, diagnostics), stream)
+    presentation = Smith::PlainPresentation.new(Smith::Output::JsonRenderer.new(stream, diagnostics))
 
     presentation.approver([] of String, Smith::Tools::RuleSet.new)
       .should be_a(Smith::Tools::PromptApprover)
@@ -20,12 +20,25 @@ describe Smith::PlainPresentation do
 
   it "indents an incidental line and leaves a laid-out block alone" do
     io = IO::Memory.new
-    presentation = Smith::PlainPresentation.new(Smith::Output::HumanRenderer.new(io), io)
+    presentation = Smith::PlainPresentation.new(Smith::Output::HumanRenderer.new(io))
 
     presentation.say("stopping 1 job")
     presentation.say_block(["  Total", "  ─────"])
 
     io.to_s.should eq("   stopping 1 job\n  Total\n  ─────\n")
+  end
+
+  it "keeps incidental text out of the JSONL stream" do
+    stream = IO::Memory.new
+    diagnostics = IO::Memory.new
+    presentation = Smith::PlainPresentation.new(Smith::Output::JsonRenderer.new(stream, diagnostics))
+
+    presentation.say("stopping 1 job")
+    presentation.say_block(["  Total"])
+
+    # A line on stdout would land inside whatever record it interrupted.
+    stream.to_s.should be_empty
+    diagnostics.to_s.should eq("   stopping 1 job\n  Total\n")
   end
 
   it "sends diagnostics to stderr, where they have always gone" do

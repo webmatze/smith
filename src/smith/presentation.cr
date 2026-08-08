@@ -43,7 +43,7 @@ module Smith
   class PlainPresentation < Presentation
     getter renderer : Output::Renderer
 
-    def initialize(@renderer : Output::Renderer, @io : IO = STDOUT)
+    def initialize(@renderer : Output::Renderer)
     end
 
     def notice_io : IO
@@ -71,14 +71,19 @@ module Smith
       PromptPlanGate.new(STDIN, @renderer.prompt_io)
     end
 
-    # Indented, because plain output has no block structure to set a stray
-    # line apart from the transcript around it.
+    # Both go to `prompt_io` for the reason a question does: in JSON mode a
+    # line on stdout lands in the middle of the JSONL stream and breaks the
+    # record it interrupts. In human mode `prompt_io` *is* stdout, so this is
+    # the ordinary place either way.
+    #
+    # `say` indents, because plain output has no block structure to set a
+    # stray line apart from the transcript around it.
     def say(text : String) : Nil
-      @io.puts "   #{text}"
+      @renderer.prompt_io.puts "   #{text}"
     end
 
     def say_block(lines : Array(String)) : Nil
-      lines.each { |line| @io.puts line }
+      lines.each { |line| @renderer.prompt_io.puts line }
     end
   end
 end
