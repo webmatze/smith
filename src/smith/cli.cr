@@ -5,6 +5,7 @@ require "./agent"
 require "./session"
 require "./project_ctx"
 require "./skills"
+require "./mentions"
 require "./agents"
 require "./config"
 require "./output"
@@ -568,7 +569,18 @@ module Smith
         return false
       end
 
+      # Skills first, mentions second: a skill body may itself reference
+      # @files, and this way those resolve too. Only one level deep — what a
+      # mention pulls in is never scanned again, so a file cannot drag itself
+      # back in through a skill.
       expanded = @skills_catalog.expand_prompt(text)
+
+      mentions = Mentions.expand(expanded, Dir.current, @config.mentions)
+      if mentions.any?
+        renderer.handle(Events::FilesMentioned.new(mentions.files, mentions.skipped))
+      end
+      expanded = mentions.text
+
       if context = outcome.additional_context
         expanded = "#{expanded}\n\n#{context}"
       end

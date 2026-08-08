@@ -107,6 +107,13 @@ module Smith::Output
         @io.puts event.plan
       when Events::ModeChanged
         @io.puts "\n🧭 Switched to #{event.mode.to_s.downcase} mode."
+      when Events::FilesMentioned
+        event.files.each do |file|
+          size = file.lines.zero? ? "directory" : "#{file.lines} lines"
+          size += ", truncated" if file.truncated?
+          @io.puts "📎 #{file.path} (#{size})"
+        end
+        event.skipped.each { |skip| @io.puts "⚠️  #{skip.path} — #{skip.reason}" }
       when Events::HistoryCompacted
         @io.puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens"
       when Events::TurnError
@@ -231,6 +238,31 @@ module Smith::Output
         emit do |json|
           json.field "type", "mode_changed"
           json.field "mode", event.mode.to_s.downcase
+        end
+      when Events::FilesMentioned
+        emit do |json|
+          json.field "type", "files_mentioned"
+          json.field "files" do
+            json.array do
+              event.files.each do |file|
+                json.object do
+                  json.field "path", file.path
+                  json.field "lines", file.lines
+                  json.field "truncated", file.truncated?
+                end
+              end
+            end
+          end
+          json.field "skipped" do
+            json.array do
+              event.skipped.each do |skip|
+                json.object do
+                  json.field "path", skip.path
+                  json.field "reason", skip.reason
+                end
+              end
+            end
+          end
         end
       when Events::HistoryCompacted
         emit do |json|
