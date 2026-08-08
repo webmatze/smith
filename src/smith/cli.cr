@@ -9,6 +9,7 @@ require "./mentions"
 require "./agents"
 require "./config"
 require "./output"
+require "./presentation"
 require "./todos"
 require "./plan"
 require "./chat_commands"
@@ -31,7 +32,7 @@ module Smith
     @auto_approve : Bool = false
     @json_output : Bool = false
     @stream : Bool? = nil
-    @renderer : Output::Renderer? = nil
+    @presentation : Presentation? = nil
     @session_store : Session::Store
     @skills_catalog : Skills::Catalog
     @agents_catalog : Agents::Catalog
@@ -60,7 +61,6 @@ module Smith
     # keep the plain renderer even on a TTY.
     @interactive_tui : Bool = false
     @tui_app : UI::App? = nil
-    @tui_notice_io : IO? = nil
     @tui_warned : Bool = false
 
     def initialize(@args : Array(String))
@@ -289,14 +289,32 @@ module Smith
       !KNOWN_COMMANDS.includes?(command) && !@args.join(" ").strip.empty?
     end
 
+    # Everything that differs between the fullscreen UI and plain lines lives
+    # behind this one object; see Smith::Presentation. Plain until an
+    # interactive session says otherwise, which it does before anything here
+    # is asked for.
+    private def presentation : Presentation
+      @presentation ||= PlainPresentation.new(
+        @json_output ? Output::JsonRenderer.new : Output::HumanRenderer.new
+      )
+    end
+
+    # Called by the two commands that open an interactive session, before a
+    # renderer or a gate has been built. Fullscreen mode is the default on a
+    # real terminal; the flags pin it either way, and headless runs never get
+    # here at all, so `smith run` output stays scriptable.
+    private def choose_presentation! : Nil
+      # The plain one is built on first use, so anything that asked for a
+      # renderer or a gate before this point would have pinned the run to it.
+      # Nothing does today; this is here so nothing quietly starts to.
+      raise "presentation was built before the session chose one" if @presentation
+
+      @interactive_tui = tui_enabled?
+      @presentation = UI::TuiPresentation.new(tui_app) if @interactive_tui
+    end
+
     private def renderer : Output::Renderer
-      @renderer ||= if @json_output
-                      Output::JsonRenderer.new
-                    elsif @interactive_tui
-                      UI::TuiRenderer.new(tui_app)
-                    else
-                      Output::HumanRenderer.new
-                    end
+      presentation.renderer
     end
 
     # Fullscreen mode is the interactive default on a real terminal; the flags
@@ -423,20 +441,8 @@ module Smith
                 Tools::AutoApprover.new
               elsif !STDIN.tty?
                 Tools::DenyApprover.new
-              elsif @interactive_tui
-                UI::TuiApprover.new(
-                  tui_app,
-                  allowlist: approval.allowlist,
-                  rules: rules
-                )
               else
-                # In JSON mode the prompt must not land on stdout, or it would
-                # corrupt the JSONL stream mid-line.
-                Tools::PromptApprover.new(
-                  allowlist: approval.allowlist,
-                  output: renderer.prompt_io,
-                  rules: rules
-                )
+                presentation.approver(approval.allowlist, rules)
               end
 
       # Wrapped even when there are no rules, so the composition is the same
@@ -471,20 +477,9 @@ module Smith
       project = Config.project_path
       return false if project.nil?
 
-      if @interactive_tui
-        UI::TuiTrustPrompt.new(
-          tui_app,
-          TrustStore.new,
-          preapproved: @trust_hooks
-        ).allow?(project, digest, @config.hooks.map(&.command))
-      else
-        TrustPrompt.new(
-          TrustStore.new,
-          input: STDIN,
-          output: renderer.prompt_io,
-          preapproved: @trust_hooks
-        ).allow?(project, digest, @config.hooks.map(&.command))
-      end
+      presentation
+        .trust_prompt(TrustStore.new, preapproved: @trust_hooks)
+        .allow?(project, digest, @config.hooks.map(&.command))
     end
 
     # Job logs live beside the session they belong to. A headless run has no
@@ -516,8 +511,7 @@ module Smith
     # Where diagnostics go: under the TUI they belong on screen, otherwise
     # on stderr where they have always been.
     private def notice_io : IO
-      return STDERR unless @interactive_tui
-      @tui_notice_io ||= UI::NoticeIO.new(tui_app)
+      presentation.notice_io
     end
 
     # Same contract as the background jobs below: nothing smith started may
@@ -535,11 +529,7 @@ module Smith
 
       running = jobs.running
       unless running.empty?
-        if @interactive_tui
-          tui_app.notice("🛑 Stopping #{running.size} background job#{running.size == 1 ? "" : "s"}: #{running.map(&.id).join(", ")}")
-        else
-          puts "\n🛑 Stopping #{running.size} background job#{running.size == 1 ? "" : "s"}: #{running.map(&.id).join(", ")}"
-        end
+        presentation.say("🛑 Stopping #{running.size} background job#{running.size == 1 ? "" : "s"}: #{running.map(&.id).join(", ")}")
       end
 
       jobs.shutdown_all
@@ -565,9 +555,8 @@ module Smith
     private def build_plan_gate : PlanGate
       return AutoPlanGate.new if @auto_approve
       return HaltingPlanGate.new unless STDIN.tty?
-      return UI::TuiPlanGate.new(tui_app) if @interactive_tui
 
-      PromptPlanGate.new(STDIN, renderer.prompt_io)
+      presentation.plan_gate
     end
 
     # The whole feature is this method plus a swapped approver: Registry#approver
@@ -771,7 +760,7 @@ module Smith
     end
 
     private def run_interactive
-      @interactive_tui = tui_enabled?
+      choose_presentation!
       provider = build_provider
       effective_model = @model || provider.default_model
 
@@ -800,7 +789,7 @@ module Smith
 
       @model = session_data.model
       @provider_name = session_data.provider
-      @interactive_tui = tui_enabled?
+      choose_presentation!
 
       if @interactive_tui
         start_session_loop(session_data)
@@ -1066,11 +1055,7 @@ module Smith
     # Text printed by chat commands: lines in the plain loop, notice blocks in
     # the fullscreen one.
     private def chat_puts(text : String) : Nil
-      if @interactive_tui
-        tui_app.notice(text)
-      else
-        puts "   #{text}"
-      end
+      presentation.say(text)
     end
 
     # The chat equivalent of `smith rewind`: undo everything back to the
@@ -1420,11 +1405,7 @@ module Smith
         lines << "  Compactions this session: #{agent.compactions}#{strategy}"
       end
 
-      if @interactive_tui
-        tui_app.notice(lines.map { |text| [UI::Span.new(text, UI::Style.new(fg: UI::Palette::INFO))] of UI::Span })
-      else
-        lines.each { |line| puts line }
-      end
+      presentation.say_block(lines)
     end
 
     private def format_tokens(count : Int32) : String

@@ -1107,6 +1107,7 @@ src/
     ├── config.cr            # config.toml discovery, merging & precedence chain
     ├── context.cr           # Transcript size estimation & two-stage compaction
     ├── output.cr            # Human & JSON Lines renderers for the event stream
+    ├── presentation.cr      # Renderer, gates & stray-line output as one swappable seam
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── mentions.cr          # @path expansion: file embedding, budgets & path guard
@@ -1172,7 +1173,8 @@ src/
         ├── input_editor.cr  # Single-line editor with history & kill-ring keys
         ├── app.cr           # Fullscreen controller: key loop, draw loop & modals
         ├── renderer.cr      # TuiRenderer — the third Output::Renderer, event → blocks
-        └── gates.cr         # TuiApprover & TuiPlanGate — modals replacing plain prompts
+        ├── gates.cr         # TuiApprover & TuiPlanGate — modals replacing plain prompts
+        └── presentation.cr  # The fullscreen half of the Presentation seam
 ```
 
 ---
