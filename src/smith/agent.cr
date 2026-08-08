@@ -35,6 +35,11 @@ module Smith
     getter? stream : Bool
     getter hooks : Hooks::Runner
 
+    # What compaction has done to this session so far. `smith context` reports
+    # it; a session read back from disk has no such history to report.
+    getter compactions : Int32 = 0
+    getter last_compaction : Context::Strategy? = nil
+
     def initialize(
       @provider : LLM::Provider,
       @registry : Tools::Registry = Tools::Registry.default,
@@ -46,6 +51,8 @@ module Smith
       @hooks : Hooks::Runner = Hooks::Runner.new,
       @thinking_effort : String? = nil,
       @thinking_budget : Int32? = nil,
+      @cost_limit_usd : Float64? = nil,
+      @rates : Pricing::Rates? = nil,
     )
       @messages = messages || Array(LLM::Message).new
       @cumulative_usage = LLM::Usage.new(0, 0, 0)
@@ -72,6 +79,18 @@ module Smith
     def send(user_text : String) : Nil
       @messages << LLM::Message.user(user_text)
       run_loop
+    end
+
+    # The amount spent when it has reached the limit, nil otherwise. Without
+    # rates there is nothing to enforce — the CLI warns about that rather than
+    # letting a run believe it is capped.
+    private def over_budget? : Float64?
+      limit = @cost_limit_usd
+      rates = @rates
+      return nil if limit.nil? || rates.nil?
+
+      spent = Pricing.cost(@cumulative_usage, rates)
+      spent >= limit ? spent : nil
     end
 
     private def run_loop
@@ -108,6 +127,14 @@ module Smith
         if usage = response.usage
           update_usage(usage)
           emit(Events::UsageUpdated.new(@cumulative_usage))
+        end
+
+        # Checked after the response rather than before the request: the cost
+        # of a turn is only known once it is billed, and stopping here means
+        # the answer just paid for is still delivered.
+        if spent = over_budget?
+          emit(Events::BudgetExceeded.new(spent_usd: spent, limit_usd: @cost_limit_usd.not_nil!))
+          return
         end
 
         # Emit text blocks to listeners
@@ -247,6 +274,8 @@ module Smith
       return unless result.compacted?
 
       @messages = result.messages
+      @compactions += 1
+      @last_compaction = result.strategy
       emit(Events::HistoryCompacted.new(
         result.before_tokens,
         result.after_tokens,

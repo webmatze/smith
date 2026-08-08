@@ -503,6 +503,49 @@ describe "web settings" do
   end
 end
 
+describe "pricing overrides" do
+  it "has none by default, so the built-in table decides" do
+    with_sandbox do |temp_dir, _home|
+      Smith::Config.load(make_project(temp_dir)).pricing.should be_empty
+    end
+  end
+
+  it "reads a rate per provider/model and accepts whole numbers" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [pricing."anthropic/claude-sonnet-5"]
+        input = 2.0
+        output = 10
+
+        [pricing."openai/gpt-5.6-luna"]
+        input = 1.25
+        output = 5.0
+        cache_read = 0.1
+        TOML
+
+      pricing = Smith::Config.load(project).pricing
+      pricing["anthropic/claude-sonnet-5"].input.should eq(2.0)
+      pricing["anthropic/claude-sonnet-5"].output.should eq(10.0)
+      pricing["openai/gpt-5.6-luna"].cache_read.should eq(0.1)
+      # Unstated cache rates follow Anthropic's published multipliers.
+      pricing["openai/gpt-5.6-luna"].cache_write.should be_close(1.25 * 1.25, 0.0001)
+    end
+  end
+
+  it "ignores an entry that does not state both base rates" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [pricing."anthropic/claude-sonnet-5"]
+        input = 2.0
+        TOML
+
+      # Half a rate would price completions at zero, which reads as cheap
+      # rather than as unknown.
+      Smith::Config.load(project).pricing.should be_empty
+    end
+  end
+end
+
 describe "mention settings" do
   it "defaults to project-local mentions with Claude Code's line limit" do
     with_sandbox do |temp_dir, _home|

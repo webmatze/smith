@@ -160,3 +160,148 @@ describe Smith::Session::Transcript do
     Smith::Session::Transcript.truncate(messages, 99).size.should eq(1)
   end
 end
+
+private def with_store(&)
+  temp_dir = File.join(Dir.tempdir, "smith_session_names_#{Random::Secure.hex(4)}")
+  begin
+    yield Smith::Session::Store.new(base_dir: temp_dir)
+  ensure
+    FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+  end
+end
+
+private def session_with(store, prompt : String)
+  session = store.create(model: "m", provider: "anthropic")
+  session.messages << Smith::LLM::Message.user(prompt)
+  store.save(session)
+  session
+end
+
+describe "session names" do
+  it "derives a readable name from the first prompt" do
+    with_store do |store|
+      # Five words, punctuation dropped, kebab-case — short enough to type.
+      session = session_with(store, "Refactor the agent loop, then add tests for it")
+
+      store.load(session.id).name.should eq("refactor-the-agent-loop-then")
+    end
+  end
+
+  it "leaves a session with no prompt unnamed rather than inventing one" do
+    with_store do |store|
+      session = store.create(model: "m", provider: "anthropic")
+      store.save(session)
+
+      store.load(session.id).name.should be_nil
+    end
+  end
+
+  it "does not rewrite a name once it exists" do
+    with_store do |store|
+      session = session_with(store, "first prompt here")
+      store.rename(session.id, "my-refactor")
+
+      reloaded = store.load(session.id)
+      reloaded.messages << Smith::LLM::Message.user("a later prompt")
+      store.save(reloaded)
+
+      store.load(session.id).name.should eq("my-refactor")
+    end
+  end
+
+  it "keeps derived names distinct so resuming by name stays unambiguous" do
+    with_store do |store|
+      first = session_with(store, "fix the tests")
+      second = session_with(store, "fix the tests")
+
+      store.load(first.id).name.should eq("fix-the-tests")
+      store.load(second.id).name.should eq("fix-the-tests-2")
+    end
+  end
+
+  it "resolves a session by name or by id" do
+    with_store do |store|
+      session = session_with(store, "some work")
+      store.rename(session.id, "my-refactor")
+
+      store.resolve("my-refactor").id.should eq(session.id)
+      store.resolve(session.id).id.should eq(session.id)
+    end
+  end
+
+  it "refuses to rename onto a name another session already uses" do
+    with_store do |store|
+      first = session_with(store, "one")
+      second = session_with(store, "two")
+      store.rename(first.id, "shared")
+
+      expect_raises(ArgumentError, /already/) { store.rename(second.id, "shared") }
+    end
+  end
+
+  it "lists the candidates instead of picking one when a name is ambiguous" do
+    with_store do |store|
+      # Only reachable if the files were edited by hand, but silently picking
+      # one of them would be worse than saying so.
+      first = session_with(store, "one")
+      second = session_with(store, "two")
+      store.rename(first.id, "shared")
+      forced = store.load(second.id)
+      forced.name = "shared"
+      store.save(forced, derive_name: false, check_name: false)
+
+      message = expect_raises(ArgumentError, /ambiguous/) { store.resolve("shared") }.message.not_nil!
+      message.should contain(first.id)
+      message.should contain(second.id)
+    end
+  end
+
+  it "reports an unknown reference as not found" do
+    with_store do |store|
+      expect_raises(ArgumentError, /not found/) { store.resolve("no-such-session") }
+    end
+  end
+
+  it "keeps loading a session file written before names existed" do
+    with_store do |store|
+      session = store.create(model: "m", provider: "anthropic")
+      legacy = %({"id":"#{session.id}","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",) +
+               %("cwd":"/tmp","model":"m","provider":"anthropic","messages":[],) +
+               %("usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}})
+      File.write(File.join(store.session_dir(session.id), "session.json"), legacy)
+
+      loaded = store.load(session.id)
+      loaded.name.should be_nil
+      loaded.parent_id.should be_nil
+    end
+  end
+end
+
+describe "forking a session" do
+  it "copies the transcript into an independent session" do
+    with_store do |store|
+      original = session_with(store, "explore option A")
+
+      forked = store.fork(original.id)
+
+      forked.id.should_not eq(original.id)
+      forked.parent_id.should eq(original.id)
+      forked.messages.size.should eq(1)
+
+      forked.messages << Smith::LLM::Message.user("option B instead")
+      store.save(forked)
+
+      store.load(original.id).messages.size.should eq(1)
+      store.list.map(&.id).should contain(forked.id)
+    end
+  end
+
+  it "names the fork after the session it came from" do
+    with_store do |store|
+      original = session_with(store, "explore option A")
+      store.rename(original.id, "option-a")
+
+      store.fork(original.id).name.should eq("option-a-fork")
+    end
+  end
+end

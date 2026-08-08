@@ -5,6 +5,7 @@ require "./mode"
 require "./hooks"
 require "./subagents"
 require "./mentions"
+require "./pricing"
 
 module Smith
   # Resolved configuration, merged from (lowest to highest priority):
@@ -307,6 +308,39 @@ module Smith
 
     private def string_list(*keys : String) : Array(String)
       lookup(*keys).try(&.as_a?).try(&.compact_map(&.as_s?)) || Array(String).new
+    end
+
+    # Rates keyed by "provider/model", overriding the built-in table. Vendors
+    # change prices; a table baked into a release cannot keep up.
+    def pricing : Pricing::Overrides
+      overrides = Pricing::Overrides.new
+      table = lookup("pricing").try(&.as_h?) || return overrides
+
+      table.each do |key, value|
+        fields = value.as_h?
+        next if fields.nil?
+
+        input = number(fields["input"]?)
+        output = number(fields["output"]?)
+        # Half a rate would price the other half at zero, which reads as cheap
+        # rather than as unknown. Unknown is the honest answer.
+        next if input.nil? || output.nil?
+
+        overrides[key.strip.downcase] = Pricing::Rates.new(
+          input: input,
+          output: output,
+          cache_write: number(fields["cache_write"]?),
+          cache_read: number(fields["cache_read"]?)
+        )
+      end
+
+      overrides
+    end
+
+    # TOML tells 3 and 3.0 apart; a rate written either way means the same.
+    private def number(value : TOML::Any?) : Float64?
+      return nil if value.nil?
+      value.as_f? || value.as_i?.try(&.to_f)
     end
 
     # Budgets for @-mentions. allow_outside is off by default: a prompt coming
