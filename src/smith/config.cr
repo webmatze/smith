@@ -54,6 +54,9 @@ module Smith
     DEFAULT_MAX_BACKGROUND_JOBS =  10
     DEFAULT_MAX_OUTPUT_BYTES    = 256 * 1024
 
+    DEFAULT_MCP_ENABLED = true
+    DEFAULT_MCP_TIMEOUT = 60
+
     DEFAULT_CHECKPOINTS_ENABLED = true
     DEFAULT_MAX_CHECKPOINTS     = 100
     DEFAULT_RETENTION_DAYS      =  30
@@ -112,6 +115,20 @@ module Smith
 
       def retention : Time::Span
         @retention_days.days
+      end
+    end
+
+    # The servers themselves live in mcp.json, not here — only smith's side of
+    # the arrangement is configurable.
+    struct McpSettings
+      getter? enabled : Bool
+      getter timeout : Int32
+
+      def initialize(@enabled : Bool, @timeout : Int32)
+      end
+
+      def timeout_span : Time::Span
+        @timeout.seconds
       end
     end
 
@@ -481,6 +498,20 @@ module Smith
         enabled: enabled.nil? ? DEFAULT_CHECKPOINTS_ENABLED : enabled,
         max_per_session: lookup("checkpoints", "max_per_session").try(&.as_i?) || DEFAULT_MAX_CHECKPOINTS,
         retention_days: lookup("checkpoints", "retention_days").try(&.as_i?) || DEFAULT_RETENTION_DAYS
+      )
+    end
+
+    # Consumed by MCP::Manager via CLI#mcp_manager. The timeout is per call: a
+    # server that hangs must not hang the agent with it.
+    def mcp : McpSettings
+      enabled = lookup("mcp", "enabled").try(&.as_bool?)
+      timeout = env("MCP_TOOL_TIMEOUT").try(&.to_i?) ||
+                lookup("mcp", "timeout").try(&.as_i?) ||
+                DEFAULT_MCP_TIMEOUT
+
+      McpSettings.new(
+        enabled: enabled.nil? ? DEFAULT_MCP_ENABLED : enabled,
+        timeout: timeout > 0 ? timeout : DEFAULT_MCP_TIMEOUT
       )
     end
 
