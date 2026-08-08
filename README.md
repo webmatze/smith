@@ -751,7 +751,16 @@ Start an interactive session:
 ./bin/smith chat
 ```
 
-Pressing **Ctrl+C** at any point — including mid-response — saves the session and exits with code 130, printing the `smith resume` command to pick it back up. Nothing in flight is lost.
+On a real terminal smith runs a **fullscreen interface**: the transcript stays in your terminal's scrollback (copyable, searchable), while the bottom of the screen carries a live region — streaming assistant text, running tools with spinners and elapsed time, a status bar with model, mode, token usage and cost, and the input line. Everything is drawn with plain ANSI escapes, no alternate screen, so nothing is lost when smith exits.
+
+- **Enter** submits; **Esc** clears the current input; **Up/Down** walks your prompt history.
+- While the agent works, **Esc** asks it to stop; a second press within two seconds exits for good.
+- Approval requests and plan review appear as panels with single-key answers (`y`/`n`/`a`, Escape = refuse).
+- **Ctrl+L** redraws the screen from scratch; **Ctrl+C** on an empty prompt quits.
+
+Use `--no-tui` to fall back to the plain line renderer, or `--tui` to demand the fullscreen one (smith warns if there is no terminal to draw on). Headless runs (`smith run`) are always plain, so their output stays scriptable.
+
+Pressing **Ctrl+C** in headless mode — including mid-response — saves the session and exits with code 130, printing the `smith resume` command to pick it back up. Nothing in flight is lost.
 
 ### Headless Mode
 
@@ -1136,25 +1145,34 @@ src/
     │   ├── guard.cr         # SSRF guard: scheme, DNS resolution & address ranges
     │   ├── html_to_markdown.cr # Minimal HTML to markdown conversion
     │   └── search_provider.cr  # Brave / Tavily / SearxNG adapters
-    └── tools/
-        ├── tool.cr          # Abstract Tool base class & ParallelTool/MutatingTool markers
-        ├── registry.cr      # Tool registry, approval gate & Fiber parallel execution scheduler
-        ├── approval.cr      # Approver strategies (prompt/auto/deny/plan/rule) & bash allowlist matching
-        ├── permissions.cr   # allow/ask/deny rules, path normalisation & pattern matching
-        ├── bash.cr          # Shell command execution tool, with auto-backgrounding
-        ├── bash_jobs.cr     # Background job registry, logs and lifecycle
-        ├── bash_output.cr   # bash_output & bash_kill tools
-        ├── web_fetch.cr     # URL fetching, redirect and content-type handling
-        ├── web_search.cr    # Search tool over a provider adapter
-        ├── read_file.cr     # File reading tool
-        ├── write_file.cr    # File writing tool
-        ├── edit_file.cr     # Precise string replacement tool
-        ├── grep.cr          # Regex search tool
-        ├── glob.cr          # File pattern search tool
-        ├── todo_write.cr    # Structured plan for multi-step runs
-        ├── exit_plan_mode.cr # Presents a plan for approval & leaves plan mode
-        ├── agent_tool.cr    # Delegated subagent execution tool
-        └── mcp_tool.cr      # Adapter registering MCP tools as smith tools
+    ├── tools/
+    │   ├── tool.cr          # Abstract Tool base class & ParallelTool/MutatingTool markers
+    │   ├── registry.cr      # Tool registry, approval gate & Fiber parallel execution scheduler
+    │   ├── approval.cr      # Approver strategies (prompt/auto/deny/plan/rule) & bash allowlist matching
+    │   ├── permissions.cr   # allow/ask/deny rules, path normalisation & pattern matching
+    │   ├── bash.cr          # Shell command execution tool, with auto-backgrounding
+    │   ├── bash_jobs.cr     # Background job registry, logs and lifecycle
+    │   ├── bash_output.cr   # bash_output & bash_kill tools
+    │   ├── web_fetch.cr     # URL fetching, redirect and content-type handling
+    │   ├── web_search.cr    # Search tool over a provider adapter
+    │   ├── read_file.cr     # File reading tool
+    │   ├── write_file.cr    # File writing tool
+    │   ├── edit_file.cr     # Precise string replacement tool
+    │   ├── grep.cr          # Regex search tool
+    │   ├── glob.cr          # File pattern search tool
+    │   ├── todo_write.cr    # Structured plan for multi-step runs
+    │   ├── exit_plan_mode.cr # Presents a plan for approval & leaves plan mode
+    │   ├── agent_tool.cr    # Delegated subagent execution tool
+    │   └── mcp_tool.cr      # Adapter registering MCP tools as smith tools
+    └── ui/
+        ├── terminal.cr      # Raw-mode termios, winsize, key parser & bracketed paste
+        ├── style.cr         # Span/StyledLine types, ANSI codes, width & word-wrap
+        ├── markdown.cr      # Lightweight markdown → styled lines (no dependency)
+        ├── view_model.cr    # Blocks (user, assistant, tool, todo, notice) & spinner
+        ├── input_editor.cr  # Single-line editor with history & kill-ring keys
+        ├── app.cr           # Fullscreen controller: key loop, draw loop & modals
+        ├── renderer.cr      # TuiRenderer — the third Output::Renderer, event → blocks
+        └── gates.cr         # TuiApprover & TuiPlanGate — modals replacing plain prompts
 ```
 
 ---

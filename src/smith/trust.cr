@@ -51,6 +51,10 @@ module Smith
   # waiving it for code a repository brought with it. Only the explicit
   # `--trust-hooks` does that.
   class TrustPrompt
+    # Exposed for UI subclasses that ask in their own way.
+    protected getter store : TrustStore
+    protected getter? preapproved : Bool
+
     def initialize(
       @store : TrustStore,
       @input : IO = STDIN,
