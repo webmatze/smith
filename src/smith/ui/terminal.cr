@@ -282,7 +282,13 @@ module Smith::UI
     end
 
     def install_winch_handler : Nil
-      Signal::WINCH.trap { @winch = true }
+      Signal::WINCH.trap { mark_resized! }
+    end
+
+    # The window changed size. Set from the SIGWINCH handler above; specs
+    # drive it directly, having no window to drag.
+    def mark_resized! : Nil
+      @winch = true
     end
 
     # --- raw mode ----------------------------------------------------------

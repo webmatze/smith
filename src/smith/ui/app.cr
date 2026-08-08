@@ -49,6 +49,13 @@ module Smith::UI
     @on_interrupt : Proc(Nil)? = nil
     @on_abort : Proc(Nil)? = nil
 
+    # Dragging a window edge delivers a SIGWINCH per step. Redrawing on each
+    # is wasted work that reads as flicker, so the redraw waits for this many
+    # quiet poll windows (~50ms apiece) in a row.
+    RESIZE_SETTLE_TICKS = 3
+
+    @resize_quiet = 0
+
     # Status bar contents, updated by whoever drives the run.
     property model_name : String = ""
     property mode : Smith::Mode = Smith::Mode::Normal
@@ -163,9 +170,12 @@ module Smith::UI
       loop do
         key = @terminal.read_key
 
-        # Its own loop, so it needs its own ^L — the main loop's never sees a
-        # key while this one is up.
-        if key.kind.ctrl? && key.char == 'l'
+        # Its own loop, so it needs its own ^L and its own resize — the main
+        # loop's never sees a key while this one is up, and an unanswered
+        # resize would spin here rather than wait. One question is short
+        # enough not to bother waiting out a drag.
+        if (key.kind.ctrl? && key.char == 'l') || key.kind.resized?
+          @terminal.clear_resize!
           redraw_all!
           draw!
           next
@@ -264,6 +274,22 @@ module Smith::UI
             next
           end
 
+          if key.kind.resized?
+            # Cleared at once: read_key reports Resized for as long as the
+            # flag is up, so leaving it set would spin here instead of
+            # waiting for the next key.
+            @terminal.clear_resize!
+            @resize_quiet = RESIZE_SETTLE_TICKS
+            next
+          end
+
+          # Only a tick means a poll window went by with nothing happening,
+          # which is what "the drag is over" is made of.
+          if @resize_quiet > 0 && key.kind.tick?
+            @resize_quiet -= 1
+            redraw_after_resize! if @resize_quiet.zero?
+          end
+
           case @state
           when State::Idle
             break if handle_idle_key(key, on_submit)
@@ -344,7 +370,8 @@ module Smith::UI
         @editor.handle(key)
         @dirty = true
       in Key::Kind::Tick, Key::Kind::Resized, Key::Kind::Unknown
-        # Nothing to do — resize is picked up by needs_draw? on its own.
+        # Nothing to do. Resized never reaches here — the run loop answers it
+        # above the state machine — but the case has to name it.
       end
       false
     end
@@ -371,7 +398,6 @@ module Smith::UI
 
     private def needs_draw? : Bool
       return true if @dirty
-      return true if @terminal.resized?
 
       # Spinners and elapsed times animate while anything is in flight.
       @state.turn? || @state.modal_char? || @state.modal_text?
@@ -381,7 +407,6 @@ module Smith::UI
 
     private def draw! : Nil
       width, height = @terminal.size
-      @terminal.clear_resize! if @terminal.resized?
 
       # Take down the live region, print newly finished blocks into the
       # scrollback, then rebuild the live region below them.
@@ -661,6 +686,17 @@ module Smith::UI
       end
       @terminal.cursor_up(height - 1) if height > 1
       @drawn_height = 0
+    end
+
+    # A resize cannot be answered in place. The terminal has re-wrapped the
+    # screen under the live region, so the rows clear_drawn! would walk back
+    # over are not the rows it drew — it would clear the wrong ones and leave
+    # the old frame behind. Starting over is the only sound answer, at the
+    # cost of one more copy of the transcript in the scrollback.
+    private def redraw_after_resize! : Nil
+      redraw_all!
+      flush_blocks!
+      draw!
     end
 
     # ^L: wipe the screen and re-emit the scrollback from scratch.

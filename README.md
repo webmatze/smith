@@ -757,6 +757,7 @@ On a real terminal smith runs a **fullscreen interface**: the transcript stays i
 - While the agent works, **Esc** asks it to stop; a second press within two seconds exits for good.
 - Approval requests and plan review appear as panels with single-key answers (`y`/`n`/`a`, Escape = refuse).
 - **Ctrl+L** redraws the screen from scratch; **Ctrl+C** on an empty prompt quits.
+- Resizing the window redraws it too, once the drag has come to rest.
 
 Use `--no-tui` to fall back to the plain line renderer, or `--tui` to ask for the fullscreen one explicitly. Fullscreen needs a real terminal on both stdin and stdout; where there is none, `--tui` says so and falls back rather than downgrading in silence. Headless runs (`smith run`) are always plain, so their output stays scriptable.
 

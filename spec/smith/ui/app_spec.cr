@@ -110,6 +110,29 @@ describe Smith::UI::App do
       app.editor.text.should eq("")
     end
 
+    it "redraws from scratch once a resize has settled" do
+      # The screen reflows under the live region: the rows the in-place
+      # redraw would walk back over are no longer the rows it drew, so only
+      # a redraw from scratch is sound afterwards.
+      app = app_with([:tick, :tick, :tick, "\x03"])
+      app.terminal.mark_resized!
+
+      app.run { |_| }
+
+      app.terminal.io.as(IO::Memory).to_s.should contain("\e[2J")
+    end
+
+    it "waits out a drag instead of redrawing on every step of it" do
+      # Dragging a window delivers a stream of SIGWINCHs. Only the quiet
+      # after them is worth a redraw.
+      app = app_with([:tick, "\x03"])
+      app.terminal.mark_resized!
+
+      app.run { |_| }
+
+      app.terminal.io.as(IO::Memory).to_s.should_not contain("\e[2J")
+    end
+
     it "draws the status bar into the terminal output" do
       app = app_with(["\x03"])
       app.model_name = "claude-test"
