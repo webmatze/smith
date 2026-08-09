@@ -127,6 +127,15 @@ module Smith::LLM
     getter cache_creation_tokens : Int32 = 0
     getter cache_read_tokens : Int32 = 0
 
+    # How big the prompt actually was. Anthropic reports the cached part
+    # separately, so `prompt_tokens` alone is the *uncached remainder* — a few
+    # hundred tokens on a cache hit, which is not the size of anything. Callers
+    # measuring context usage want this; callers pricing a request do not,
+    # because the parts are billed at different rates.
+    def billed_prompt_tokens : Int32
+      @prompt_tokens + @cache_read_tokens + @cache_creation_tokens
+    end
+
     def initialize(
       @prompt_tokens : Int32 = 0,
       @completion_tokens : Int32 = 0,

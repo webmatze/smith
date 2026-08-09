@@ -67,12 +67,51 @@ module Smith::Events
 
   # Emitted when the transcript was shrunk to stay inside the context window,
   # so a user never silently wonders where their context went.
+  #
+  # Carries raw numbers only; the renderers do the arithmetic and the wording.
+  # Which stages ran is reported here rather than as new Strategy members, so
+  # persisted sessions and anything reading the strategy string are unaffected.
   class HistoryCompacted < Event
     getter before_tokens : Int32
     getter after_tokens : Int32
     getter strategy : String
+    getter target_tokens : Int32
+    getter budget_tokens : Int32
+    getter stages : Array(String)
 
-    def initialize(@before_tokens : Int32, @after_tokens : Int32, @strategy : String)
+    def initialize(
+      @before_tokens : Int32,
+      @after_tokens : Int32,
+      @strategy : String,
+      @target_tokens : Int32 = 0,
+      @budget_tokens : Int32 = 0,
+      @stages : Array(String) = [] of String,
+    )
+    end
+
+    def reached_target? : Bool
+      @target_tokens <= 0 || @after_tokens <= @target_tokens
+    end
+
+    # How much of the window came back. The number that says at a glance
+    # whether a compaction did useful work — two bare token counts do not.
+    def reclaimed_percent : Int32
+      return 0 if @budget_tokens <= 0
+      ((@before_tokens - @after_tokens) * 100.0 / @budget_tokens).round.to_i
+    end
+  end
+
+  # The request cannot be brought under the budget and nothing more can be
+  # reclaimed. Kept apart from TurnError for the same reason BudgetExceeded is:
+  # a script driving smith has to tell "start a fresh session" apart from
+  # "the provider is broken", and matching on an error string is not an
+  # interface.
+  class ContextExhausted < Event
+    getter estimated_tokens : Int32
+    getter budget_tokens : Int32
+    getter reclaimed_tokens : Int32
+
+    def initialize(@estimated_tokens : Int32, @budget_tokens : Int32, @reclaimed_tokens : Int32)
     end
   end
 

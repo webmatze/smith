@@ -129,8 +129,21 @@ module Smith::UI
           app.notice("⚠ #{skip.path} — #{skip.reason}", Style.new(fg: Palette::WARN))
         end
       when Smith::Events::HistoryCompacted
-        app.notice("🗜 context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens",
+        stages = event.stages.empty? ? "" : " · #{event.stages.join(", ")}"
+        app.notice("🗜 context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} " \
+                   "tokens, #{event.reclaimed_percent}% of the budget reclaimed#{stages}",
           Style.new(fg: Palette::INFO, dim: true))
+        unless event.reached_target?
+          app.notice("⚠ could not reach the ~#{event.target_tokens} token target — consider a fresh session",
+            Style.new(fg: Palette::WARN))
+        end
+      when Smith::Events::ContextExhausted
+        # Not budget_exceeded?: that means "you spent your money", and its exit
+        # code says so. Running out of window is a different failure.
+        @failed = true
+        app.notice("🧱 context exhausted: ~#{event.estimated_tokens} tokens against a #{event.budget_tokens} " \
+                   "budget — start a fresh session",
+          Style.new(fg: Palette::ERROR))
       when Smith::Events::BudgetExceeded
         @budget_exceeded = true
         app.notice("💸 budget spent: #{Smith::Pricing.format(event.spent_usd)} of #{Smith::Pricing.format(event.limit_usd)} — stopping",

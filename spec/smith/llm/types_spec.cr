@@ -31,3 +31,22 @@ describe Smith::LLM::Message do
     msg.content.first.text.should eq("Test prompt")
   end
 end
+
+describe "how big the prompt actually was" do
+  it "adds the cached parts back, which Anthropic reports separately" do
+    # input_tokens on a cache hit is a few hundred tokens — the uncached
+    # remainder, not the size of the request. Measuring context usage from it
+    # would say a 100k-token history was 300 tokens.
+    usage = Smith::LLM::Usage.new(
+      300, 50, 350,
+      cache_creation_tokens: 1_000,
+      cache_read_tokens: 98_700
+    )
+
+    usage.billed_prompt_tokens.should eq(100_000)
+  end
+
+  it "is just the prompt tokens where nothing is cached" do
+    Smith::LLM::Usage.new(1_200, 50, 1_250).billed_prompt_tokens.should eq(1_200)
+  end
+end

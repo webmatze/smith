@@ -1,6 +1,7 @@
 require "toml"
 require "digest/sha256"
 require "./paths"
+require "./context"
 require "./mode"
 require "./hooks"
 require "./subagents"
@@ -142,8 +143,30 @@ module Smith
 
     struct ContextSettings
       getter max_tokens : Int32
+      # Fractions of max_tokens: compaction acts at compact_at and compacts
+      # down to compact_to. Fractions rather than token counts so raising
+      # max_tokens for a wider-window model scales both.
+      getter compact_at : Float64
+      getter compact_to : Float64
 
-      def initialize(@max_tokens : Int32)
+      def initialize(
+        @max_tokens : Int32 = DEFAULT_MAX_CONTEXT_TOKENS,
+        @compact_at : Float64 = Context::DEFAULT_COMPACT_AT,
+        @compact_to : Float64 = Context::DEFAULT_COMPACT_TO,
+      )
+      end
+
+      # A target above the trigger, or either above the budget, is not a
+      # preference — it is a typo that would make compaction nonsense.
+      def valid_thresholds? : Bool
+        # max_tokens included deliberately: a budget of 0 makes every threshold
+        # 0 too, which reads as "nothing can ever fit" and stops the run before
+        # a single request. One typo must not brick the tool.
+        @max_tokens > 0 && @compact_to > 0 && @compact_to < @compact_at && @compact_at < 1
+      end
+
+      def budget(overhead_tokens : Int32 = 0, ratio : Float64 = 1.0) : Context::Budget
+        Context::Budget.new(@max_tokens, @compact_at, @compact_to, overhead_tokens, ratio)
       end
     end
 
@@ -161,6 +184,7 @@ module Smith
     @global_hooks : TOML::Any?
     @project_hooks : TOML::Any?
     @allowlist_deprecated : Bool? = nil
+    @context_thresholds_invalid : Bool? = nil
 
     def initialize(
       @table : Hash(String, TOML::Any) = Hash(String, TOML::Any).new,
@@ -372,9 +396,28 @@ module Smith
 
     # Consumed by issue #3 (history compaction).
     def context : ContextSettings
-      ContextSettings.new(
-        max_tokens: lookup("context", "max_tokens").try(&.as_i?) || DEFAULT_MAX_CONTEXT_TOKENS
+      settings = ContextSettings.new(
+        max_tokens: lookup("context", "max_tokens").try(&.as_i?) || DEFAULT_MAX_CONTEXT_TOKENS,
+        compact_at: number(lookup("context", "compact_at")) || Context::DEFAULT_COMPACT_AT,
+        compact_to: number(lookup("context", "compact_to")) || Context::DEFAULT_COMPACT_TO
       )
+
+      return settings if settings.valid_thresholds?
+
+      # Falling back silently is what one puzzles over three weeks later.
+      @context_thresholds_invalid ||= begin
+        reason = if settings.max_tokens <= 0
+                   "max_tokens (#{settings.max_tokens}) must be positive"
+                 else
+                   "compact_to (#{settings.compact_to}) must be below compact_at " \
+                   "(#{settings.compact_at}) and both below 1"
+                 end
+        STDERR.puts "⚠️  [context] #{reason}; using defaults."
+        true
+      end
+
+      max_tokens = settings.max_tokens > 0 ? settings.max_tokens : DEFAULT_MAX_CONTEXT_TOKENS
+      ContextSettings.new(max_tokens: max_tokens)
     end
 
     # Hooks run arbitrary commands with the user's rights, so a project config

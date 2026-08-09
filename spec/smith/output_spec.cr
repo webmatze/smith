@@ -448,3 +448,63 @@ describe "thinking output" do
     lines[1]["text"].as_s.should be_empty
   end
 end
+
+describe "how a compaction reads" do
+  it "states what it aimed for and how much of the budget came back" do
+    # Two bare token counts read as an accident. The point of a compaction
+    # line is to say whether it did useful work.
+    io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(io)
+
+    renderer.handle(Smith::Events::HistoryCompacted.new(
+      96_000, 51_000, "summarized",
+      target_tokens: 60_000, budget_tokens: 120_000, stages: ["truncate", "summarize"]
+    ))
+
+    text = io.to_s
+    text.should contain("Context compacted (summarized)")
+    text.should contain("38% of the budget reclaimed")
+    text.should contain("truncate, summarize")
+    text.should_not contain("Could not reach")
+  end
+
+  it "warns when it fell short of the target" do
+    io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(io)
+
+    renderer.handle(Smith::Events::HistoryCompacted.new(
+      118_000, 110_000, "truncated",
+      target_tokens: 60_000, budget_tokens: 120_000, stages: ["truncate"]
+    ))
+
+    io.to_s.should contain("Could not reach the ~60000 token target")
+  end
+
+  it "reports exhaustion as its own failure, not as a spent budget" do
+    # Exit code 2 means "you spent your money". Running out of window is a
+    # different thing and a script has to be able to tell them apart.
+    io = IO::Memory.new
+    renderer = Smith::Output::HumanRenderer.new(io)
+
+    renderer.handle(Smith::Events::ContextExhausted.new(140_000, 120_000, 2_000))
+
+    io.to_s.should contain("Context exhausted")
+    renderer.budget_exceeded?.should be_false
+  end
+
+  it "carries the new fields into the JSON stream" do
+    io = IO::Memory.new
+    renderer = Smith::Output::JsonRenderer.new(io)
+
+    renderer.handle(Smith::Events::HistoryCompacted.new(
+      96_000, 51_000, "summarized",
+      target_tokens: 60_000, budget_tokens: 120_000, stages: ["truncate"]
+    ))
+    renderer.handle(Smith::Events::ContextExhausted.new(140_000, 120_000, 2_000))
+
+    text = io.to_s
+    text.should contain(%("target_tokens":60000))
+    text.should contain(%("stages":["truncate"]))
+    text.should contain(%("type":"context_exhausted"))
+  end
+end

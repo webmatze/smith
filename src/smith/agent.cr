@@ -31,7 +31,10 @@ module Smith
     getter messages : Array(LLM::Message)
     getter cumulative_usage : LLM::Usage
     getter listeners : Array(Events::Listener)
-    getter max_context_tokens : Int32
+    getter context_settings : Config::ContextSettings
+    # Reported prompt tokens over estimated ones. Persisted with the session so
+    # the first turn after a resume is not blind about a 100k history.
+    property context_ratio : Float64
     getter? stream : Bool
     getter hooks : Hooks::Runner
 
@@ -46,7 +49,8 @@ module Smith
       @model : String = Config::DEFAULT_MODEL,
       @system_prompt : String = "You are Smith, an autonomous coding agent written in Crystal.",
       messages : Array(LLM::Message)? = nil,
-      @max_context_tokens : Int32 = Config::DEFAULT_MAX_CONTEXT_TOKENS,
+      @context_settings : Config::ContextSettings = Config::ContextSettings.new,
+      @context_ratio : Float64 = 1.0,
       @stream : Bool = true,
       @hooks : Hooks::Runner = Hooks::Runner.new,
       @thinking_effort : String? = nil,
@@ -102,7 +106,9 @@ module Smith
       while turns < MAX_TURNS
         turns += 1
 
-        compact_history
+        # A request that cannot be brought under the ceiling will be rejected by
+        # the provider anyway; stopping here says why, and costs nothing.
+        return if compact_history
 
         request = LLM::Request.new(
           model: @model,
@@ -126,6 +132,9 @@ module Smith
 
         if usage = response.usage
           update_usage(usage)
+          # Done here, before the response is appended, so @messages is still
+          # exactly what the reported prompt tokens were charged for.
+          recalibrate(usage)
           emit(Events::UsageUpdated.new(@cumulative_usage))
         end
 
@@ -263,24 +272,89 @@ module Smith
       end)
     end
 
+    # Where the context window goes, counted the way compaction counts it.
+    # `smith context` renders this; compaction reads `overhead_tokens` off it.
+    # One computation rather than two is what keeps the breakdown and the
+    # compaction decision from disagreeing.
+    def breakdown : Context::Breakdown
+      result = Context::Breakdown.new(context_budget)
+      result.add("System prompt", @system_prompt)
+      result.add("Tool definitions", @registry.specs.to_json)
+      result.add_history("Messages", @messages)
+      result
+    end
+
+    # Rebuilt per turn rather than cached: @system_prompt is rewritten by the
+    # mode switch, and @registry grows when an MCP server connects. A stale
+    # overhead is a silent overflow, and recomputing it is one `to_json`.
+    private def context_budget(overhead_tokens : Int32 = 0) : Context::Budget
+      @context_settings.budget(overhead_tokens, @context_ratio)
+    end
+
     # Runs before every request, so the history can never outgrow the window
-    # mid-conversation. Below the budget this is a no-op and leaves @messages
-    # byte-identical.
+    # mid-conversation. Below the trigger this is a no-op and leaves @messages
+    # byte-identical — rewriting the prefix would cost a full prompt-cache
+    # creation charge on every turn.
     private def compact_history
-      result = Context.compact(@messages, @max_context_tokens) do |prefix|
+      parts = breakdown
+      budget = context_budget(parts.overhead_tokens)
+
+      result = Context.compact(@messages, budget) do |prefix|
         summarize_prefix(prefix)
       end
 
-      return unless result.compacted?
+      if result.compacted?
+        @messages = result.messages
+        @compactions += 1
+        @last_compaction = result.strategy
+        shift_checkpoints(result.removed_prefix)
 
-      @messages = result.messages
-      @compactions += 1
-      @last_compaction = result.strategy
-      emit(Events::HistoryCompacted.new(
-        result.before_tokens,
+        emit(Events::HistoryCompacted.new(
+          result.before_tokens,
+          result.after_tokens,
+          result.strategy.to_s.downcase,
+          budget.target_tokens,
+          budget.max_tokens,
+          result.stages
+        ))
+      end
+
+      return false unless result.exhausted?
+
+      emit(Events::ContextExhausted.new(
         result.after_tokens,
-        result.strategy.to_s.downcase
+        budget.max_tokens,
+        result.before_tokens - result.after_tokens
       ))
+      true
+    end
+
+    # Checkpoints record absolute message indices and a restore truncates the
+    # transcript at one, so a compaction that shortened the prefix has to move
+    # them or the restore cuts into a different turn than the user picked.
+    # Anything that pointed *inside* the replaced prefix can only be clamped to
+    # just after the summary — the messages it named are gone.
+    private def shift_checkpoints(removed : Int32) : Nil
+      return if removed <= 0
+
+      checkpoints = @registry.checkpoints
+      return if checkpoints.nil?
+
+      checkpoints.shift_message_indices(removed)
+    end
+
+    # How far off the byte heuristic is, learned from what the provider says it
+    # actually charged. Smoothed so one outlier cannot put a session into
+    # permanent compaction, and clamped because anything outside the bounds is
+    # a measurement error rather than a context window.
+    private def recalibrate(usage : LLM::Usage) : Nil
+      estimated = breakdown.total
+      reported = usage.billed_prompt_tokens
+      return if estimated <= 0 || reported <= 0
+
+      observed = reported / estimated.to_f
+      blended = @context_ratio + (observed - @context_ratio) * Context::RATIO_SMOOTHING
+      @context_ratio = blended.clamp(Context::RATIO_MIN, Context::RATIO_MAX)
     end
 
     # A separate, tool-free call so summarizing cannot itself trigger tool use

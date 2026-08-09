@@ -574,7 +574,11 @@ module Smith
       end
     end
 
-    private def build_agent(provider : LLM::Provider, messages : Array(LLM::Message)? = nil) : Agent
+    private def build_agent(
+      provider : LLM::Provider,
+      messages : Array(LLM::Message)? = nil,
+      context_ratio : Float64 = 1.0,
+    ) : Agent
       effective_model = @model || main_agent.try(&.model) || provider.default_model
 
       # Built once and kept, so the [a]lways answers survive a plan-mode
@@ -661,7 +665,8 @@ module Smith
         model: effective_model,
         system_prompt: build_system_prompt,
         messages: messages,
-        max_context_tokens: @config.context.max_tokens,
+        context_settings: @config.context,
+        context_ratio: context_ratio,
         stream: @stream.nil? ? @config.stream? : @stream.not_nil!,
         hooks: hooks,
         thinking_effort: thinking_enabled? ? @config.thinking_effort : nil,
@@ -756,6 +761,7 @@ module Smith
       session_data.messages = agent.messages
       session_data.usage = agent.cumulative_usage
       session_data.todos = @todos.items
+      session_data.context_ratio = agent.context_ratio
       @session_store.save(session_data)
     end
 
@@ -821,7 +827,7 @@ module Smith
       @session_id = session_data.id
 
       provider = build_provider(session_data.provider)
-      agent = build_agent(provider, session_data.messages)
+      agent = build_agent(provider, session_data.messages, session_data.context_ratio)
 
       renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
       renderer.mcp_banner(mcp_manager.summary)
@@ -853,7 +859,7 @@ module Smith
 
     private def run_plain_loop(session_data : Session::Data)
       provider = build_provider(session_data.provider)
-      agent = build_agent(provider, session_data.messages)
+      agent = build_agent(provider, session_data.messages, session_data.context_ratio)
       effective_model = agent.model
 
       puts "⚒️  Smith LLM Agent Harness v#{Smith::VERSION} (Crystal)"
@@ -916,7 +922,7 @@ module Smith
     # streaming text, modals) while the agent works.
     private def run_tui_loop(session_data : Session::Data)
       provider = build_provider(session_data.provider)
-      agent = build_agent(provider, session_data.messages)
+      agent = build_agent(provider, session_data.messages, session_data.context_ratio)
 
       app = tui_app
       app.model_name = agent.model
@@ -936,10 +942,10 @@ module Smith
       app.on_interrupt { agent.stop! }
       app.on_abort do
         # Second press: leave right away; the interrupt handler saves.
-        session_data.messages = agent.messages
-        session_data.usage = agent.cumulative_usage
-        session_data.todos = @todos.items
-        @session_store.save(session_data)
+        # Through persist rather than by hand: three hand-written copies of
+        # this is how context_ratio came to be saved on one path and dropped
+        # on the other two.
+        persist(session_data, agent)
         shutdown_bash_jobs
         shutdown_mcp
         exit(130)
@@ -1098,10 +1104,10 @@ module Smith
     # leave a half-written session behind.
     private def install_interrupt_handler(session_data : Session::Data, agent : Agent)
       Signal::INT.trap do
-        session_data.messages = agent.messages
-        session_data.usage = agent.cumulative_usage
-        session_data.todos = @todos.items
-        @session_store.save(session_data)
+        # Through persist rather than by hand: three hand-written copies of
+        # this is how context_ratio came to be saved on one path and dropped
+        # on the other two.
+        persist(session_data, agent)
         shutdown_bash_jobs
         # Ctrl+C is exactly where orphans come from: without this the server
         # processes outlive the shell that started smith.
@@ -1223,6 +1229,10 @@ module Smith
         session.messages = Session::Transcript.truncate(session.messages, index)
         @session_store.save(session)
         puts "Transcript cut back to #{session.messages.size} messages."
+      else
+        # Say it rather than leave the files and the transcript quietly out of
+        # step: the position this checkpoint named was compacted away.
+        puts "Transcript left alone — compaction replaced the messages this checkpoint pointed at."
       end
     end
 
@@ -1379,23 +1389,37 @@ module Smith
     # same estimator compaction uses — a breakdown that disagreed with the
     # thing it describes would be worse than none.
     private def print_context(session : Session::Data, messages : Array(LLM::Message), agent : Agent?) : Nil
-      budget = @config.context.max_tokens
+      budget = @config.context.budget(ratio: session.context_ratio)
       breakdown = Context::Breakdown.new(budget)
 
       system_prompt_parts.each { |part| breakdown.add(part[0], part[1]) }
-      # The tool set does not vary with who approves it, so the default
-      # registry gives the same definitions the run would send.
-      breakdown.add("Tool definitions", Tools::Registry.default.specs.to_json)
-      breakdown.add("Messages", messages)
+
+      # A session read back from disk does not record which MCP servers were
+      # connected, so the current tool set is the closest honest answer — said
+      # out loud rather than passed off as what the session actually sent.
+      registry = agent.try(&.registry) || Tools::Registry.default
+      tools_label = agent ? "Tool definitions" : "Tool definitions*"
+      breakdown.add(tools_label, registry.specs.to_json)
+      breakdown.add_history("Messages", messages)
 
       lines = Array(String).new
-      lines << "Context for session #{session.reference} (#{format_tokens(budget)} token budget)"
+      lines << "Context for session #{session.reference} (#{format_tokens(budget.max_tokens)} token budget)"
       lines << ""
+      # Charged, like the total: rows that did not add up to the line beneath
+      # them would be exactly the disagreement this breakdown exists to avoid.
       breakdown.entries.each do |entry|
-        lines << "  %-20s %9s %4d%%" % [entry.label, format_tokens(entry.tokens), breakdown.percent(entry.tokens)]
+        tokens = breakdown.charged(entry.tokens)
+        lines << "  %-20s %9s %4d%%" % [entry.label, format_tokens(tokens), breakdown.percent(tokens)]
       end
       lines << "  " + "─" * 35
-      lines << "  %-20s %9s %4d%%" % ["Total", format_tokens(breakdown.total), breakdown.percent(breakdown.total)]
+      total = breakdown.charged_total
+      lines << "  %-20s %9s %4d%%" % ["Total", format_tokens(total), breakdown.percent(total)]
+      lines << ""
+      lines << "  Compacts at %s (%d%%), down to %s (%d%%)" % [
+        format_tokens(budget.trigger_tokens), breakdown.percent(budget.trigger_tokens),
+        format_tokens(budget.target_tokens), breakdown.percent(budget.target_tokens),
+      ]
+      lines << "  * current tool set, not the one this session ran with" if agent.nil?
 
       # The live session knows what compaction did to it; a session read back
       # from disk does not, and claiming otherwise would be a guess.
