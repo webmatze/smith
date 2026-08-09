@@ -238,7 +238,7 @@ module Smith
           # Where a rewind would cut the transcript: before the assistant turn
           # carrying these calls is recorded. Handed over rather than looked
           # up, so the registry stays free of transcript knowledge.
-          @registry.checkpoints.try(&.current_message_index = @messages.size)
+          @registry.checkpoints.try(&.current_message_id = @messages.last?.try(&.id))
 
           # Execute tools concurrently or serially via registry
           tool_result_blocks = @registry.execute_calls(call_requests)
@@ -334,7 +334,6 @@ module Smith
         @transcript_logged = @messages.size
         @compactions += 1
         @last_compaction = result.strategy
-        shift_checkpoints(result.removed_prefix)
 
         emit(Events::HistoryCompacted.new(
           result.before_tokens,
@@ -354,20 +353,6 @@ module Smith
         result.before_tokens - result.after_tokens
       ))
       true
-    end
-
-    # Checkpoints record absolute message indices and a restore truncates the
-    # transcript at one, so a compaction that shortened the prefix has to move
-    # them or the restore cuts into a different turn than the user picked.
-    # Anything that pointed *inside* the replaced prefix can only be clamped to
-    # just after the summary — the messages it named are gone.
-    private def shift_checkpoints(removed : Int32) : Nil
-      return if removed <= 0
-
-      checkpoints = @registry.checkpoints
-      return if checkpoints.nil?
-
-      checkpoints.shift_message_indices(removed)
     end
 
     # How far off the byte heuristic is, learned from what the provider says it

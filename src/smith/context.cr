@@ -217,10 +217,6 @@ module Smith
       # Which stages actually changed something. Reported so a compaction line
       # reads as an intention rather than an accident.
       getter stages : Array(String)
-      # How many messages the history lost from the front. Checkpoints record
-      # absolute message indices, so anything that shortens the prefix has to
-      # say by how much or a later restore cuts in the wrong place.
-      getter removed_prefix : Int32
 
       def initialize(
         @messages,
@@ -229,7 +225,6 @@ module Smith
         @after_tokens,
         @budget,
         @stages = [] of String,
-        @removed_prefix = 0,
       )
       end
 
@@ -347,15 +342,13 @@ module Smith
       stages << (strategy.dropped? ? "drop" : "summarize")
       compacted = [LLM::Message.user("Summary of the earlier conversation: #{replacement}")] + tail
 
-      # `cut` messages became one, so everything after shifted by cut - 1.
       Result.new(
         compacted,
         strategy,
         before,
         budget.charged(estimate_tokens(compacted)),
         budget,
-        stages,
-        cut - 1
+        stages
       )
     end
 
@@ -398,7 +391,9 @@ module Smith
         message = @messages[message_index]
         content = message.content.dup
         content[block_index] = block
-        replace(message_index, LLM::Message.new(message.role, content, message.synthetic?))
+        # The id carries over: a message whose block was rewritten is still
+        # the same message, and checkpoints point at it by identity.
+        replace(message_index, LLM::Message.new(message.role, content, message.synthetic?, message.id))
       end
     end
 
@@ -445,7 +440,7 @@ module Smith
         # `content: null`, which providers reject. Nothing here is worth that.
         next if kept.empty?
 
-        working.replace(index, LLM::Message.new(message.role, kept, message.synthetic?))
+        working.replace(index, LLM::Message.new(message.role, kept, message.synthetic?, message.id))
         changed = true
       end
 

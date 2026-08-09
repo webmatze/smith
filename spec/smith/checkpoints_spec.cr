@@ -1,5 +1,6 @@
 require "../spec_helper"
 require "../../src/smith/checkpoints"
+require "../../src/smith/session"
 
 private def with_store(enabled : Bool = true, &)
   root = File.join(Dir.tempdir, "smith_cp_#{Random::Secure.hex(4)}")
@@ -17,8 +18,8 @@ private def write_args(path : String, content : String = "new")
 end
 
 # Mimics a tool call: snapshot, change the file, then record what smith left.
-private def simulate(store, tool : String, path : String, new_content : String?, message_index : Int32 = 0)
-  store.current_message_index = message_index
+private def simulate(store, tool : String, path : String, new_content : String?, message_id : String? = nil)
+  store.current_message_id = message_id
   entry = store.snapshot(tool, write_args(path))
 
   if new_content.nil?
@@ -182,14 +183,14 @@ describe "an external change since the snapshot" do
 end
 
 describe "checkpoint bookkeeping" do
-  it "remembers the transcript position at the time of the call" do
+  it "remembers which message the transcript ended with at the time of the call" do
     with_store do |store, work|
       path = File.join(work, "a.txt")
       File.write(path, "x")
 
-      simulate(store, "write_file", path, "y", message_index: 7)
+      simulate(store, "write_file", path, "y", message_id: "m-7")
 
-      store.list.first.message_index.should eq(7)
+      store.list.first.message_id.should eq("m-7")
     end
   end
 
@@ -354,81 +355,69 @@ describe "how far a rewind goes" do
 end
 
 describe "checkpoints under a compacted transcript" do
-  it "moves every index back by what compaction removed" do
-    # A checkpoint names a position in the transcript and a rewind truncates
-    # there. Summarizing a prefix moves every later message, so without this
-    # a rewind quietly lands in a different turn than the one picked.
+  it "names the message it was taken at, not a position in the array" do
+    # A position shifts when compaction replaces a prefix with a summary; an
+    # identity does not, so nothing has to be told that compaction happened.
     with_store do |store, work|
       file = File.join(work, "a.txt")
-      simulate(store, "write_file", file, "one", message_index: 12)
-      simulate(store, "write_file", file, "two", message_index: 20)
+      simulate(store, "write_file", file, "one", message_id: "m-42")
 
-      store.shift_message_indices(7)
-
-      store.list.map(&.message_index).should eq([5, 13])
+      store.list.first.message_id.should eq("m-42")
+      store.rewind_to(store.list.first).message_id.should eq("m-42")
     end
   end
 
-  it "marks a checkpoint whose messages were replaced as no longer addressable" do
-    # Silently clamping several of these to 1 would make a rewind to any of
-    # them cut the whole transcript back to the summary and call that the
-    # point the user picked.
-    with_store do |store, work|
-      file = File.join(work, "a.txt")
-      simulate(store, "write_file", file, "one", message_index: 3)
-
-      store.shift_message_indices(10)
-
-      store.list.first.transcript_lost.should be_true
-    end
-  end
-
-  it "restores the files of such a checkpoint but names no position to cut to" do
+  it "still resolves after compaction moved the message it points at" do
     with_store do |store, work|
       file = File.join(work, "a.txt")
       File.write(file, "original")
-      simulate(store, "write_file", file, "changed", message_index: 3)
-      store.shift_message_indices(10)
+      simulate(store, "write_file", file, "changed", message_id: "m-42")
+
+      # What compaction does: a prefix of turns becomes one summary message,
+      # so everything after it sits at a different index than before.
+      after = [
+        Smith::LLM::Message.user("Summary of the earlier conversation: ..."),
+        Smith::LLM::Message.new(Smith::LLM::Role::User, [Smith::LLM::ContentBlock.text("kept")], id: "m-42"),
+        Smith::LLM::Message.user("and on we go"),
+      ]
 
       result = store.rewind_to(store.list.first)
-
-      result.applied?.should be_true
-      result.restored.should eq([file])
+      Smith::Session::Transcript.index_after(after, result.message_id.not_nil!).should eq(2)
       File.read(file).should eq("original")
-      result.message_index.should be_nil
     end
   end
 
-  it "keeps naming a position when the checkpoint survived the compaction" do
+  it "names no position at all once its message has been summarized away" do
+    # The honest answer: those messages are gone. A guess would cut the
+    # transcript somewhere the user never picked.
     with_store do |store, work|
       file = File.join(work, "a.txt")
-      simulate(store, "write_file", file, "changed", message_index: 20)
-      store.shift_message_indices(7)
+      simulate(store, "write_file", file, "one", message_id: "m-gone")
 
-      store.list.first.transcript_lost.should be_false
-      store.rewind_to(store.list.first).message_index.should eq(13)
+      after = [Smith::LLM::Message.user("Summary of the earlier conversation: ...")]
+
+      result = store.rewind_to(store.list.first)
+      Smith::Session::Transcript.index_after(after, result.message_id.not_nil!).should be_nil
     end
   end
 
-  it "leaves everything alone when compaction removed nothing" do
-    with_store do |store, work|
-      file = File.join(work, "a.txt")
-      simulate(store, "write_file", file, "one", message_index: 6)
+  it "keeps working for checkpoints written before ids existed" do
+    with_store do |store, _work|
+      legacy = Smith::Checkpoints::Entry.new(
+        sequence: 1,
+        tool: "write_file",
+        path: "/tmp/a.txt",
+        blob: nil,
+        message_id: nil,
+        message_index: 7
+      )
 
-      store.shift_message_indices(0)
+      FileUtils.mkdir_p(store.checkpoints_dir)
+      File.write(File.join(store.checkpoints_dir, "0001.json"), legacy.to_json)
 
-      store.list.first.message_index.should eq(6)
-    end
-  end
-
-  it "survives a round trip through disk" do
-    with_store do |store, work|
-      file = File.join(work, "a.txt")
-      simulate(store, "write_file", file, "one", message_index: 9)
-      store.shift_message_indices(4)
-
-      reopened = Smith::Checkpoints::Store.new(store.session_dir)
-      reopened.list.first.message_index.should eq(5)
+      entry = store.list.first
+      entry.message_id.should be_nil
+      entry.message_index.should eq(7)
     end
   end
 end

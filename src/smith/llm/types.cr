@@ -90,7 +90,27 @@ module Smith::LLM
     # real turn. Defaulted so sessions saved before the flag existed load.
     getter? synthetic : Bool = false
 
-    def initialize(@role : Role, @content : Array(ContentBlock), @synthetic : Bool = false)
+    # Identity, so anything that wants to point at a message can survive
+    # compaction moving it. A position cannot: replacing a prefix with a
+    # summary shifts every index behind it, and whoever stored one has to be
+    # told. Nothing outside smith ever sees this — every provider builds its
+    # request from the role and the blocks.
+    #
+    # Random per message rather than a counter: a fork copies a transcript, and
+    # two sessions handing out the same numbers would collide. Defaulted so
+    # messages saved before ids existed load and get one.
+    getter id : String = Message.new_id
+
+    def self.new_id : String
+      Random::Secure.hex(8)
+    end
+
+    def initialize(
+      @role : Role,
+      @content : Array(ContentBlock),
+      @synthetic : Bool = false,
+      @id : String = Message.new_id,
+    )
     end
 
     def self.user(text : String, synthetic : Bool = false) : Message
