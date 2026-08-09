@@ -211,10 +211,10 @@ describe Smith::Context do
       # Same history, same ceiling: what differs is what else is in the
       # request. A history that fits alone need not fit alongside the tool
       # definitions.
-      messages = conversation(4, result_bytes: 10_000)
+      messages = conversation(8, result_bytes: 10_000)
 
       compact_with_summary(messages, budget(30_000)).compacted?.should be_false
-      compact_with_summary(messages, budget(30_000, overhead: 15_000)).compacted?.should be_true
+      compact_with_summary(messages, budget(30_000, overhead: 8_000)).compacted?.should be_true
     end
 
     it "counts the calibration ratio against every threshold" do
@@ -465,5 +465,282 @@ describe "compacting a history that was already truncated once" do
 
     again.should eq(truncated)
     again.should_not contain("0 KiB")
+  end
+end
+
+# Six turns whose thinking is the bulk of the history.
+private def thinking_history
+  messages = [] of Smith::LLM::Message
+
+  6.times do |i|
+    messages << user_msg("request #{i}")
+    messages << thinking_turn("c#{i}", "y" * 20_000, "sig-#{i}")
+    messages << tool_result("c#{i}", "small")
+  end
+
+  messages
+end
+
+private def thinking_turn(id : String, thought : String, signature : String)
+  Smith::LLM::Message.assistant_with_blocks([
+    Smith::LLM::ContentBlock.thinking(thought, signature),
+    Smith::LLM::ContentBlock.tool_use(id, "bash", JSON.parse(%({"command": "ls"}))),
+  ])
+end
+
+private def named_call(id : String, name : String, args)
+  Smith::LLM::Message.assistant_with_blocks([
+    Smith::LLM::ContentBlock.tool_use(id, name, JSON.parse(args.to_json)),
+  ])
+end
+
+# `turns` turns that all make the same call, so every result but the last says
+# the same thing.
+private def repeated(turns : Int32, tool : String, result_bytes : Int32)
+  args = tool == "read_file" ? {"path" => "src/main.cr"} : {"command" => "make test"}
+  messages = [] of Smith::LLM::Message
+
+  turns.times do |i|
+    messages << user_msg("look again #{i}")
+    messages << named_call("c#{i}", tool, args)
+    messages << tool_result("c#{i}", "x" * result_bytes)
+  end
+
+  messages
+end
+
+# Three small turns on the end, so the recency window does not by itself
+# exceed the target — otherwise every example below would be about the
+# summarizer rather than about the stage it is naming.
+private def with_quiet_tail(messages)
+  tail = messages.dup
+
+  3.times do |i|
+    tail << user_msg("just checking #{i}")
+    tail << assistant_tool_call("tail-#{i}")
+    tail << tool_result("tail-#{i}", "ok")
+  end
+
+  tail
+end
+
+private def tool_results_of(messages)
+  messages.flat_map(&.content).select(&.type.tool_result?)
+end
+
+describe "stage 0 — thinking from turns that are over" do
+  it "reaches the target on thinking alone, without mangling a single result" do
+    # Bulky, worthless once its turn is over, and free in fidelity terms — so
+    # it goes before anything lossy is considered.
+    result = compact_with_summary(thinking_history, budget(20_000))
+
+    result.stages.should eq(["thinking"])
+    tool_results_of(result.messages).map(&.text).should eq(["small"] * 6)
+    assert_tool_pairing(result.messages)
+  end
+
+  it "leaves the current turn byte-for-byte, signature included" do
+    # Anthropic validates the signature on a thinking block; a current turn
+    # that lost one is rejected outright.
+    result = compact_with_summary(thinking_history, budget(20_000))
+
+    current = result.messages[-2]
+    thinking = current.content.find(&.thinking?).not_nil!
+    thinking.text.not_nil!.bytesize.should eq(20_000)
+    thinking.signature.should eq("sig-5")
+  end
+
+  it "keeps a message that is nothing but thinking" do
+    # An assistant message with no blocks serializes to `content: null`, which
+    # providers reject. No amount of reclaim is worth that.
+    messages = thinking_history
+    messages.insert(1, Smith::LLM::Message.assistant_with_blocks([
+      Smith::LLM::ContentBlock.thinking("z" * 20_000, "sig-lonely"),
+    ]))
+
+    result = compact_with_summary(messages, budget(20_000))
+
+    result.messages.each { |message| message.content.should_not be_empty }
+  end
+end
+
+describe "stage 1 — reads a later read superseded" do
+  it "reaches the target on duplicates alone, keeping the newest read in full" do
+    messages = with_quiet_tail(repeated(8, "read_file", 20_000))
+    result = compact_with_summary(messages, budget(45_000))
+
+    result.stages.should eq(["duplicates"])
+    assert_tool_pairing(result.messages)
+
+    reads = tool_results_of(result.messages).first(8)
+    # It stops as soon as the target is met, so not every earlier read has to
+    # go — but the oldest does, and the newest never does.
+    reads.first.text.not_nil!.should contain(Smith::Context::SUPERSEDED_MARKER)
+    reads.last.text.not_nil!.bytesize.should eq(20_000)
+  end
+
+  it "keeps the tool_call_id and is_error of a stub, so the pairing survives" do
+    messages = [] of Smith::LLM::Message
+    8.times do |i|
+      messages << user_msg("look again #{i}")
+      messages << named_call("c#{i}", "read_file", {"path" => "src/main.cr"})
+      messages << tool_result("c#{i}", "x" * 20_000, is_error: true)
+    end
+
+    result = compact_with_summary(with_quiet_tail(messages), budget(45_000))
+
+    stub = tool_results_of(result.messages).first
+    stub.tool_call_id.should eq("c0")
+    stub.is_error.should be_true
+  end
+
+  it "does not treat two identical bash calls as duplicates" do
+    # `make test` twice is not a duplicate, it is a before and an after —
+    # collapsing the first deletes the comparison being made.
+    messages = with_quiet_tail(repeated(8, "bash", 20_000))
+    result = compact_with_summary(messages, budget(45_000))
+
+    result.stages.should_not contain("duplicates")
+    tool_results_of(result.messages)
+      .any? { |b| b.text.not_nil!.includes?(Smith::Context::SUPERSEDED_MARKER) }
+      .should be_false
+  end
+
+  it "leaves duplicates inside the recency window alone" do
+    result = compact_with_summary(repeated(3, "read_file", 40_000), budget(35_000))
+
+    result.stages.should_not contain("duplicates")
+  end
+end
+
+describe "stage 2 — stale bulk" do
+  it "cuts far below the old 2 KB floor" do
+    # 300 stale results at the old floor is ~150k tokens, more than the whole
+    # budget — the floor itself was the problem.
+    messages = with_quiet_tail(conversation(10, result_bytes: 20_000))
+    result = compact_with_summary(messages, budget(60_000))
+
+    tool_results_of(result.messages).first.text.not_nil!.bytesize.should be < 2_000
+    assert_tool_pairing(result.messages)
+  end
+
+  it "collapses a result it has already cut, instead of keeping its head forever" do
+    # A 2 KB head kept forever is fine once; across hundreds of results it is
+    # an irreducible mass larger than the whole budget. A result carries its own
+    # marker, so the second pass can recognise it with no side table of state —
+    # which is also what makes this survive a session round-trip through disk.
+    already_cut = "x" * 2_000 + "\n\n[... 40 KiB #{Smith::Context::TRUNCATION_MARKER} ...]"
+
+    messages = [] of Smith::LLM::Message
+    20.times do |i|
+      messages << user_msg("request #{i}")
+      messages << assistant_tool_call("c#{i}")
+      messages << tool_result("c#{i}", already_cut)
+    end
+
+    result = compact_with_summary(with_quiet_tail(messages), budget(12_000))
+
+    stubs = tool_results_of(result.messages).select { |b| b.text.not_nil!.bytesize < 200 }
+    stubs.should_not be_empty
+    stubs.first.text.not_nil!.should contain(Smith::Context::TRUNCATION_MARKER)
+    assert_tool_pairing(result.messages)
+  end
+
+  it "takes the largest first, so fewer results are mangled" do
+    # One 200 KB result among a tail of small ones. Cutting it alone is enough;
+    # oldest-first would have chewed through the small ones to get there.
+    messages = [user_msg("start")]
+    10.times do |i|
+      messages << assistant_tool_call("small-#{i}")
+      messages << tool_result("small-#{i}", "s" * 4_000)
+    end
+    messages << assistant_tool_call("huge")
+    messages << tool_result("huge", "h" * 200_000)
+    3.times { |i| messages << user_msg("later #{i}") }
+
+    result = compact_with_summary(messages, budget(30_000))
+
+    mangled = tool_results_of(result.messages).count do |block|
+      block.text.not_nil!.includes?(Smith::Context::TRUNCATION_MARKER)
+    end
+    mangled.should eq(1)
+  end
+
+  it "leaves the results of the most recent turns untouched" do
+    messages = with_quiet_tail(conversation(10, result_bytes: 20_000))
+    result = compact_with_summary(messages, budget(60_000))
+
+    tool_results_of(result.messages).last(3).map(&.text).should eq(["ok"] * 3)
+  end
+
+  it "gives up the window rather than send a request that cannot be accepted" do
+    # One oversized `cat` inside the only turn there is. Protecting the work in
+    # hand is worth less than a request the provider will take at all.
+    messages = [
+      user_msg("show me the file"),
+      assistant_tool_call("c1"),
+      tool_result("c1", "z" * 400_000),
+    ]
+
+    result = compact_with_summary(messages, budget(1_000))
+
+    result.messages.last.content.first.text.not_nil!.should contain(Smith::Context::TRUNCATION_MARKER)
+    assert_tool_pairing(result.messages)
+  end
+end
+
+describe "turn boundaries the agent wrote itself" do
+  it "does not let continuations consume the recency window" do
+    # Three synthetic continuations inside one real turn would otherwise fill
+    # the window, leaving it protecting nothing.
+    messages = [] of Smith::LLM::Message
+    2.times do |i|
+      messages << user_msg("big request #{i}")
+      messages << assistant_tool_call("big-#{i}")
+      messages << tool_result("big-#{i}", "x" * 100_000)
+    end
+    3.times do |i|
+      messages << user_msg("small request #{i}")
+      messages << assistant_tool_call("recent-#{i}")
+      messages << tool_result("recent-#{i}", "x" * 20_000)
+    end
+    3.times do |i|
+      messages << Smith::LLM::Message.user("continue #{i}", synthetic: true)
+      messages << assistant_tool_call("cont-#{i}")
+      messages << tool_result("cont-#{i}", "x" * 5_000)
+    end
+
+    result = compact_with_summary(messages, budget(80_000))
+
+    # The three real turns before the continuations are still protected.
+    tool_results_of(result.messages)[2, 3].each do |block|
+      block.text.not_nil!.bytesize.should eq(20_000)
+    end
+  end
+
+  it "never summarizes up to a continuation, which would strand it" do
+    messages = [] of Smith::LLM::Message
+    10.times do |i|
+      messages << user_msg("request #{i}")
+      messages << Smith::LLM::Message.user("continue #{i}", synthetic: true)
+      messages << assistant_tool_call("c#{i}")
+      messages << tool_result("c#{i}", "x" * 60_000)
+    end
+
+    cut = Smith::Context.safe_cut_index(messages, 1_000)
+
+    cut.should be > 0
+    messages[cut].synthetic?.should be_false
+  end
+end
+
+describe "the cost of compacting a long history" do
+  it "does not re-walk the transcript once per candidate" do
+    # Behavioural rather than timed: 400 tool results used to be quadratic in
+    # the number of truncation candidates.
+    result = compact_with_summary(conversation(400, result_bytes: 2_000), budget(50_000))
+
+    result.compacted?.should be_true
+    assert_tool_pairing(result.messages)
   end
 end

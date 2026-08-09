@@ -9,12 +9,29 @@ module Smith
   # OpenAI reject a request outright if that pairing is broken, so compaction
   # may shorten content but must never orphan half a pair.
   module Context
-    # What a tool result gets shortened to in stage 1.
-    TRUNCATED_RESULT_BYTES = 2_000
+    # What a stale tool result gets shortened to: enough to keep a call's
+    # identity, not its content. The old floor was 2 KB, which sounds modest
+    # until a long session holds three hundred of them — 150k tokens, more than
+    # the whole budget. At 512 bytes the same tail is ~37k, and as stubs ~6k.
+    OLD_RESULT_BYTES = 512
 
     # Both the writer of a shortened result and whatever later has to recognise
-    # one need to agree on this, so it is named rather than inlined.
+    # one need to agree on these, so they are named rather than inlined.
     TRUNCATION_MARKER = "truncated by smith to stay within the context window"
+    SUPERSEDED_MARKER = "superseded by a later identical call"
+
+    # How many real turns are left alone. One turn is a user message and
+    # everything the agent did about it, so three of them cover "read the file,
+    # edit it, run the tests" whole. A constant rather than config: an extra
+    # knob here buys nothing.
+    RECENCY_WINDOW_TURNS = 3
+
+    # Tools whose repeated call with identical arguments makes the earlier
+    # result redundant. `bash` is deliberately absent: running `make test`
+    # twice is not a duplicate, it is a before and an after, and collapsing the
+    # earlier one deletes exactly the comparison the model is making. The same
+    # goes for anything that observes changing state.
+    SUPERSEDABLE_TOOLS = %w[read_file grep glob]
 
     # Fractions of the budget: compaction acts at the trigger and compacts down
     # to the target. Expressed as fractions rather than token counts so raising
@@ -101,16 +118,19 @@ module Smith
     # (see LLM::Anthropic), which makes it part of the request whether or not
     # anyone reads it.
     def self.estimate_tokens(messages : Array(LLM::Message)) : Int32
-      bytes = messages.sum do |message|
-        message.content.sum do |block|
-          (block.text.try(&.bytesize) || 0) +
-            (block.tool_args.try(&.to_json.bytesize) || 0) +
-            (block.tool_name.try(&.bytesize) || 0) +
-            (block.signature.try(&.bytesize) || 0)
-        end
-      end
+      messages.sum { |message| message_bytes(message) } // 4
+    end
 
-      bytes // 4
+    # Bytes rather than tokens, so a running total can be kept and adjusted per
+    # rewritten block without the per-message rounding drifting away from what
+    # `estimate_tokens` would have said over the whole array.
+    protected def self.message_bytes(message : LLM::Message) : Int32
+      message.content.sum do |block|
+        (block.text.try(&.bytesize) || 0) +
+          (block.tool_args.try(&.to_json.bytesize) || 0) +
+          (block.tool_name.try(&.bytesize) || 0) +
+          (block.signature.try(&.bytesize) || 0)
+      end
     end
 
     # The same heuristic applied to a plain string, so a breakdown of the
@@ -265,20 +285,48 @@ module Smith
         return Result.new(messages, Strategy::None, before, before, budget)
       end
 
-      # Stage 1 — shorten tool results, oldest first. Cheap and
-      # structure-preserving.
-      staged = truncate_old_tool_results(messages, target)
-      raw_after = estimate_tokens(staged)
-      stages << "truncate" if raw_after < raw
-      after = budget.charged(raw_after)
-      return Result.new(staged, Strategy::Truncated, before, after, budget, stages) if raw_after <= target
+      # Stages 0-2 work on one running byte total rather than re-walking the
+      # whole history per candidate, which was quadratic in the number of tool
+      # results.
+      working = Working.new(messages)
 
-      # Stage 2 — replace the oldest turns with a summary.
+      # Stage 0 — drop thinking from turns that are over. Bulky, worthless to
+      # anything now, and free in fidelity terms. The current turn is left
+      # byte-for-byte because Anthropic validates its signatures.
+      stages << "thinking" if drop_stale_thinking(working, target)
+
+      # Stage 1 — a read superseded by a later identical read is not
+      # information. Also free, and it runs before anything lossy.
+      stages << "duplicates" if supersede_duplicates(working, target)
+
+      # Stage 2 — shorten stale tool results. The first lossy stage, so it is
+      # the last of the three.
+      stages << "truncate" if truncate_old_tool_results(working, target)
+
+      staged = working.messages
+      raw_after = working.tokens
+      after = budget.charged(raw_after)
+
+      if raw_after <= target
+        strategy = stages.empty? ? Strategy::None : Strategy::Truncated
+        return Result.new(staged, strategy, before, after, budget, stages)
+      end
+
+      # Stage 3 — replace the oldest turns with a summary.
       cut = safe_cut_index(staged, target)
       if cut.zero?
-        # Nothing further can be removed without orphaning a tool pair. Report
-        # honestly rather than claiming a compaction that did not happen.
-        strategy = raw_after < raw ? Strategy::Truncated : Strategy::None
+        # No boundary to cut at, so the recency window is the last thing left to
+        # give. One oversized `cat` inside the current turn is the case this
+        # exists for: protecting the work in hand is worth less than a request
+        # the provider will accept at all.
+        if truncate_old_tool_results(working, target, window_turns: 0)
+          stages << "truncate" unless stages.includes?("truncate")
+          staged = working.messages
+          after = budget.charged(working.tokens)
+        end
+
+        # Report honestly rather than claiming a compaction that did not happen.
+        strategy = stages.empty? ? Strategy::None : Strategy::Truncated
         return Result.new(staged, strategy, before, after, budget, stages)
       end
 
@@ -311,42 +359,216 @@ module Smith
       )
     end
 
-    # Shortens tool results from oldest to newest, stopping as soon as the
-    # history fits `target` — a raw history allowance, not a charged cost.
-    # Stopping early is what preserves the recent results the model is actively
-    # working with — but nothing is exempt, so a single oversized `cat` output
-    # can still be cut down.
+    # The history under compaction, with a running byte total.
+    #
+    # The estimator used to be re-run over the whole array once per truncation
+    # candidate, which is quadratic in the number of tool results. Here each
+    # message is measured once and the total adjusted by the delta whenever a
+    # block is rewritten. Bytes rather than tokens, so the running total agrees
+    # exactly with what `estimate_tokens` would say over the finished array.
+    private class Working
+      getter messages : Array(LLM::Message)
+
+      @sizes : Array(Int32)
+      @bytes : Int32
+
+      def initialize(messages : Array(LLM::Message))
+        @messages = messages.dup
+        @sizes = @messages.map { |message| Context.message_bytes(message) }
+        @bytes = @sizes.sum
+      end
+
+      def tokens : Int32
+        @bytes // 4
+      end
+
+      def fits?(target : Int32) : Bool
+        tokens <= target
+      end
+
+      def replace(index : Int32, message : LLM::Message) : Nil
+        size = Context.message_bytes(message)
+        @bytes += size - @sizes[index]
+        @sizes[index] = size
+        @messages[index] = message
+      end
+
+      # Rebuilds one block of one message, keeping everything around it.
+      def replace_block(message_index : Int32, block_index : Int32, block : LLM::ContentBlock) : Nil
+        message = @messages[message_index]
+        content = message.content.dup
+        content[block_index] = block
+        replace(message_index, LLM::Message.new(message.role, content, message.synthetic?))
+      end
+    end
+
+    # Where the most recent `turns` real turns begin.
+    #
+    # Real turns: the agent injects user messages of its own — a stop-hook
+    # continuation, an output-limit continuation — and counting those would let
+    # three of them inside a single turn consume the whole window, so the window
+    # would protect nothing.
+    private def self.window_start(messages : Array(LLM::Message), turns : Int32) : Int32
+      # Nothing protected: every result is a candidate.
+      return messages.size if turns <= 0
+
+      starts = [] of Int32
+      messages.each_with_index do |message, index|
+        starts << index if message.role.user? && !message.synthetic?
+      end
+
+      return 0 if starts.size <= turns
+      starts[starts.size - turns]
+    end
+
+    # Stage 0 — thinking from turns that are over.
+    #
+    # It is bulky, it is worthless once the turn it belonged to is finished,
+    # and dropping it costs no fidelity at all. The current turn is untouched:
+    # Anthropic validates the signature on a thinking block, so a request whose
+    # current turn lost one is rejected outright. That protection is a protocol
+    # requirement, not a judgement about what is worth keeping — which is why it
+    # is one turn here and three turns in the stages below.
+    #
+    # Returns whether anything changed.
+    private def self.drop_stale_thinking(working : Working, target : Int32) : Bool
+      protected_from = window_start(working.messages, 1)
+      changed = false
+
+      working.messages.each_with_index do |message, index|
+        break if index >= protected_from
+        next unless message.content.any?(&.thinking?)
+        return changed if working.fits?(target)
+
+        kept = message.content.reject(&.thinking?)
+        # An assistant message with no blocks at all serializes to
+        # `content: null`, which providers reject. Nothing here is worth that.
+        next if kept.empty?
+
+        working.replace(index, LLM::Message.new(message.role, kept, message.synthetic?))
+        changed = true
+      end
+
+      changed
+    end
+
+    # Stage 1 — reads that a later identical read has superseded.
+    #
+    # Keeps the newest in full and replaces the earlier ones with a note saying
+    # why they are not there, rather than deleting them: the model should
+    # understand the gap. Only tools in SUPERSEDABLE_TOOLS take part, and only
+    # outside the recency window.
+    #
+    # Returns whether anything changed.
+    private def self.supersede_duplicates(working : Working, target : Int32) : Bool
+      protected_from = window_start(working.messages, RECENCY_WINDOW_TURNS)
+      newest = newest_call_per_key(working.messages)
+      calls = tool_calls_by_id(working.messages)
+      changed = false
+
+      each_tool_result_position(working.messages) do |message_index, block_index|
+        break if message_index >= protected_from
+        return changed if working.fits?(target)
+
+        block = working.messages[message_index].content[block_index]
+        id = block.tool_call_id
+        next if id.nil?
+
+        call = calls[id]?
+        next if call.nil? || !SUPERSEDABLE_TOOLS.includes?(call[0])
+        next if newest[call]? == id
+
+        text = block.text || ""
+        stub = "[#{call[0]}: #{SUPERSEDED_MARKER}, #{text.bytesize // 1024} KiB omitted by smith]"
+        next if stub.bytesize >= text.bytesize
+
+        working.replace_block(message_index, block_index, LLM::ContentBlock.tool_result(
+          id, stub, block.is_error || false
+        ))
+        changed = true
+      end
+
+      changed
+    end
+
+    # tool_call_id => {tool name, serialized arguments}. A tool_result carries
+    # neither, so the pairing has to be read off the assistant turns.
+    private def self.tool_calls_by_id(messages : Array(LLM::Message)) : Hash(String, {String, String})
+      calls = Hash(String, {String, String}).new
+
+      messages.each do |message|
+        message.content.each do |block|
+          next unless block.type.tool_use?
+          id = block.tool_call_id
+          name = block.tool_name
+          next if id.nil? || name.nil?
+
+          calls[id] = {name, block.tool_args.try(&.to_json) || ""}
+        end
+      end
+
+      calls
+    end
+
+    # For each {name, arguments}, the id of the last call that made it — the one
+    # whose result is still current.
+    private def self.newest_call_per_key(messages : Array(LLM::Message)) : Hash({String, String}, String)
+      newest = Hash({String, String}, String).new
+
+      tool_calls_by_id(messages).each do |id, key|
+        newest[key] = id
+      end
+
+      # Hash order follows insertion, which follows the transcript, so the last
+      # write per key wins — but only if ids were visited in transcript order,
+      # which tool_calls_by_id guarantees.
+      newest
+    end
+
+    # Stage 2 — shortens stale tool results, stopping as soon as the history
+    # fits `target` (a raw history allowance, not a charged cost).
+    #
+    # Two things differ from the version this replaces. Results inside the
+    # recency window are exempt, so compaction cannot truncate the file being
+    # edited out from under the model. And candidates are taken largest first
+    # rather than oldest first, so reclaiming a given number of tokens mangles
+    # as few results as possible.
+    #
+    # A result that already carries a marker collapses to a one-line stub: the
+    # old behaviour kept its 2 KB head forever, which across hundreds of results
+    # is an irreducible mass larger than the budget.
     #
     # Blocks are rebuilt rather than mutated because ContentBlock is read-only.
     # Carrying over tool_call_id and is_error is what keeps the pairing intact.
-    private def self.truncate_old_tool_results(messages : Array(LLM::Message), target : Int32) : Array(LLM::Message)
-      working = messages.dup
+    private def self.truncate_old_tool_results(working : Working, target : Int32, window_turns : Int32 = RECENCY_WINDOW_TURNS) : Bool
+      protected_from = window_start(working.messages, window_turns)
 
-      each_tool_result_position(messages) do |message_index, block_index|
-        return working if estimate_tokens(working) <= target
+      candidates = [] of {Int32, Int32, Int32}
+      each_tool_result_position(working.messages) do |message_index, block_index|
+        break if message_index >= protected_from
 
-        message = working[message_index]
-        block = message.content[block_index]
-        text = block.text || ""
-        next if text.bytesize <= TRUNCATED_RESULT_BYTES
-
-        # Already cut once. Cutting the same head again reclaims nothing, emits
-        # a nonsensical "0 KiB truncated" note, and rewrites a block the
-        # provider had cached — a cache-creation charge for no gain. (Collapsing
-        # these to a stub is the next step, not this one.)
-        next if text.includes?(TRUNCATION_MARKER)
-
-        rebuilt = message.content.dup
-        rebuilt[block_index] = LLM::ContentBlock.tool_result(
-          block.tool_call_id.not_nil!,
-          truncate(text),
-          block.is_error || false
-        )
-
-        working[message_index] = LLM::Message.new(message.role, rebuilt)
+        size = working.messages[message_index].content[block_index].text.try(&.bytesize) || 0
+        candidates << {size, message_index, block_index}
       end
 
-      working
+      candidates.sort_by! { |candidate| -candidate[0] }
+      changed = false
+
+      candidates.each do |(_, message_index, block_index)|
+        return changed if working.fits?(target)
+
+        block = working.messages[message_index].content[block_index]
+        text = block.text || ""
+        shortened = shorten(text)
+        next if shortened.bytesize >= text.bytesize
+
+        working.replace_block(message_index, block_index, LLM::ContentBlock.tool_result(
+          block.tool_call_id.not_nil!, shortened, block.is_error || false
+        ))
+        changed = true
+      end
+
+      changed
     end
 
     private def self.each_tool_result_position(messages : Array(LLM::Message), &)
@@ -359,9 +581,17 @@ module Smith
       end
     end
 
-    private def self.truncate(text : String) : String
-      kept = text.byte_slice(0, TRUNCATED_RESULT_BYTES)
-      dropped_kib = (text.bytesize - TRUNCATED_RESULT_BYTES) // 1024
+    # Reached once: keep a head, so the call still has an identity. Reached
+    # twice, or already superseded: keep only the note.
+    private def self.shorten(text : String) : String
+      if text.includes?(TRUNCATION_MARKER) || text.includes?(SUPERSEDED_MARKER)
+        return "[#{text.bytesize // 1024} KiB #{TRUNCATION_MARKER}]"
+      end
+
+      return text if text.bytesize <= OLD_RESULT_BYTES
+
+      kept = text.byte_slice(0, OLD_RESULT_BYTES)
+      dropped_kib = (text.bytesize - OLD_RESULT_BYTES) // 1024
       "#{kept}\n\n[... #{dropped_kib} KiB #{TRUNCATION_MARKER} ...]"
     end
 
@@ -372,7 +602,9 @@ module Smith
     def self.safe_cut_index(messages : Array(LLM::Message), target : Int32) : Int32
       candidates = [] of Int32
       messages.each_with_index do |message, index|
-        candidates << index if message.role.user? && index > 0
+        # Synthetic messages are skipped: cutting just before an agent-injected
+        # continuation leaves it referring to a response that is no longer there.
+        candidates << index if message.role.user? && !message.synthetic? && index > 0
       end
 
       candidates.each do |candidate|

@@ -217,7 +217,7 @@ module Smith
             outcome = @hooks.run(Hooks::Event::Stop, stop_payload(response))
             if outcome.blocked?
               continuations += 1
-              @messages << LLM::Message.user(outcome.reason || "A stop hook asked you to keep going.")
+              @messages << LLM::Message.user(outcome.reason || "A stop hook asked you to keep going.", synthetic: true)
               next
             end
           end
@@ -281,7 +281,7 @@ module Smith
       keep = truncated_calls ? response.content.reject(&.type.tool_use?) : response.content
 
       @messages << LLM::Message.assistant_with_blocks(keep) unless keep.empty?
-      @messages << LLM::Message.user(truncated_calls ? RETRY_SMALLER : CONTINUE_TEXT)
+      @messages << LLM::Message.user(truncated_calls ? RETRY_SMALLER : CONTINUE_TEXT, synthetic: true)
     end
 
     private def stop_payload(response : LLM::Response) : JSON::Any
