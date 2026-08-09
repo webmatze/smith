@@ -396,8 +396,8 @@ describe Smith::Context::Breakdown do
     # This is the number handed to Context.compact, so the breakdown the user
     # reads and the decision compaction makes come from one computation.
     breakdown = Smith::Context::Breakdown.new(budget(1000))
-    breakdown.add("System prompt", "x" * 400)     # 100 tokens
-    breakdown.add("Tool definitions", "z" * 200)  # 50 tokens
+    breakdown.add("System prompt", "x" * 400)    # 100 tokens
+    breakdown.add("Tool definitions", "z" * 200) # 50 tokens
     breakdown.add_history("Messages", [Smith::LLM::Message.user("y" * 800)])
 
     breakdown.overhead_tokens.should eq(150)
