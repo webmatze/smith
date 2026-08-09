@@ -759,7 +759,7 @@ Compaction is announced on screen, as an intention rather than two bare numbers:
 
 If even the ceiling is out of reach, the run stops with `Context exhausted` rather than paying the provider to reject the request.
 
-**This is destructive.** The compacted transcript is what gets saved, so `smith resume` on a long session shows the summary rather than the original exchange.
+**Compaction is destructive to the working transcript** — the shortened history is what gets saved, so `smith resume` on a long session shows the summary rather than the original exchange. The original is not lost, though: every message is appended to `transcript.jsonl` beside the session file before compaction can touch it, one JSON object per line, append-only. Nothing on the normal path reads it back; it is the record, and the only basis for judging later whether the thresholds were set well. A session recorded before this existed is seeded into it once, on its first resume, and told that its next turn will compact hard.
 
 Every key is optional; unknown keys are ignored, and a malformed file produces a warning on stderr rather than a crash.
 

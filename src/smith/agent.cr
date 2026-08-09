@@ -3,6 +3,7 @@ require "./tools"
 require "./events"
 require "./config"
 require "./context"
+require "./transcript_log"
 require "./hooks"
 
 module Smith
@@ -51,6 +52,7 @@ module Smith
       messages : Array(LLM::Message)? = nil,
       @context_settings : Config::ContextSettings = Config::ContextSettings.new,
       @context_ratio : Float64 = 1.0,
+      @transcript_log : TranscriptLog? = nil,
       @stream : Bool = true,
       @hooks : Hooks::Runner = Hooks::Runner.new,
       @thinking_effort : String? = nil,
@@ -59,6 +61,9 @@ module Smith
       @rates : Pricing::Rates? = nil,
     )
       @messages = messages || Array(LLM::Message).new
+      # Whatever the agent starts with is already on the record: a resumed
+      # session was logged as it happened, or seeded by the caller.
+      @transcript_logged = @messages.size
       @cumulative_usage = LLM::Usage.new(0, 0, 0)
       @listeners = Array(Events::Listener).new
       @stop_requested = false
@@ -83,6 +88,21 @@ module Smith
     def send(user_text : String) : Nil
       @messages << LLM::Message.user(user_text)
       run_loop
+    ensure
+      # The last turn's messages arrive after the final compaction check, so
+      # without this they would never reach the record.
+      flush_transcript_log
+    end
+
+    # Everything appended since the last flush. Compaction is the only thing
+    # that removes messages and it flushes before it runs, so between flushes
+    # the array only ever grows at the end.
+    private def flush_transcript_log : Nil
+      log = @transcript_log
+      return if log.nil? || @transcript_logged >= @messages.size
+
+      log.append(@messages[@transcript_logged..])
+      @transcript_logged = @messages.size
     end
 
     # The amount spent when it has reached the limit, nil otherwise. Without
@@ -296,6 +316,10 @@ module Smith
     # byte-identical — rewriting the prefix would cost a full prompt-cache
     # creation charge on every turn.
     private def compact_history
+      # Before anything is shortened: what compaction is about to discard is
+      # exactly what the record exists to keep.
+      flush_transcript_log
+
       parts = breakdown
       budget = context_budget(parts.overhead_tokens)
 
@@ -305,6 +329,9 @@ module Smith
 
       if result.compacted?
         @messages = result.messages
+        # The surviving suffix is already on the record and the summary is a
+        # compaction artefact, not history — so nothing here is owed to it.
+        @transcript_logged = @messages.size
         @compactions += 1
         @last_compaction = result.strategy
         shift_checkpoints(result.removed_prefix)
