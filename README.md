@@ -744,22 +744,26 @@ Compacting to the first point that fits means the next assistant turn pushes the
 
 What counts against the budget is the **whole request** — system prompt, project context, skills and tool definitions, not just the transcript — scaled by how far the byte estimate has been off from the prompt-token counts the provider reports back. `smith context` shows the same numbers.
 
-Below the trigger nothing happens at all and the transcript is left byte-identical, so the prompt cache survives. Once the trigger is passed, two stages run, each stopping as soon as the target is met:
+Below the trigger nothing happens at all and the transcript is left byte-identical, so the prompt cache survives. Once the trigger is passed, four stages run, each stopping as soon as the target is met — the free ones first, so a compaction often reaches the target without mangling any tool output at all:
 
-1. **Truncate tool results**, oldest first — so the results the model is actively working with usually survive whole, while one oversized `cat` still gets cut down.
-2. **Summarize the oldest turns** via a separate, tool-free provider call, replacing them with a single summary message. If that call fails, the prefix is dropped outright rather than failing the turn.
+1. **Drop stale thinking.** Bulky, worthless once its turn is over, and free in fidelity terms. The current turn is preserved byte for byte, because Anthropic validates the signature on a thinking block.
+2. **Supersede duplicate reads.** Read the same file five times and only the newest is kept in full; the earlier ones become a note saying why they are not there. Only genuinely read-only tools take part — `read_file`, `grep`, `glob`. `bash` is deliberately excluded: running `make test` twice is not a duplicate, it is a before and an after.
+3. **Truncate stale tool results.** Largest first, so reclaiming a given number of tokens mangles as few results as possible. A result reached once keeps a 512-byte head; one already carrying a truncation marker collapses to a single line.
+4. **Summarize the oldest turns** via a separate, tool-free provider call, replacing them with a single summary message. If that call fails, the prefix is dropped outright rather than failing the turn.
+
+The **last three real turns are left alone** by stages 2 and 3, so compaction cannot truncate the file being edited out from under the model. Real turns: the agent injects user messages of its own when a stop hook asks it to keep going or a response hits the output limit, and counting those would let three of them inside a single turn consume the whole window. The window is given up only as a last resort — one oversized `cat` inside the only turn there is gets cut anyway, because protecting the work in hand is worth less than a request the provider will accept at all.
 
 Both stages preserve the pairing between `tool_use` and `tool_result` blocks — providers reject a request where one half is missing, so compaction only ever shortens content or removes whole turns. Checkpoints record positions in the transcript, and summarizing moves them, so they are shifted to match — a rewind still lands on the turn you picked.
 
 Compaction is announced on screen, as an intention rather than two bare numbers:
 
 ```text
-🗜️  Context compacted (summarized): ~96000 → ~51000 tokens, 38% of the budget reclaimed · truncate, summarize
+🗜️  Context compacted (summarized): ~96000 → ~51000 tokens, 38% of the budget reclaimed · thinking, duplicates, truncate
 ```
 
 If even the ceiling is out of reach, the run stops with `Context exhausted` rather than paying the provider to reject the request.
 
-**This is destructive.** The compacted transcript is what gets saved, so `smith resume` on a long session shows the summary rather than the original exchange.
+**Compaction is destructive to the working transcript** — the shortened history is what gets saved, so `smith resume` on a long session shows the summary rather than the original exchange. The original is not lost, though: every message is appended to `transcript.jsonl` beside the session file before compaction can touch it, one JSON object per line, append-only. Nothing on the normal path reads it back; it is the record, and the only basis for judging later whether the thresholds were set well. A session recorded before this existed is seeded into it once, on its first resume, and told that its next turn will compact hard.
 
 Every key is optional; unknown keys are ignored, and a malformed file produces a warning on stderr rather than a crash.
 

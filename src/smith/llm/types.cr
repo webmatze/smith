@@ -84,11 +84,17 @@ module Smith::LLM
     getter role : Role
     getter content : Array(ContentBlock)
 
-    def initialize(@role : Role, @content : Array(ContentBlock))
+    # True for a user message the *agent* wrote, not the user: the stop-hook
+    # continuation and the output-limit continuation. Anything reasoning about
+    # turn boundaries has to skip these — three of them can sit inside a single
+    # real turn. Defaulted so sessions saved before the flag existed load.
+    getter? synthetic : Bool = false
+
+    def initialize(@role : Role, @content : Array(ContentBlock), @synthetic : Bool = false)
     end
 
-    def self.user(text : String) : Message
-      Message.new(Role::User, [ContentBlock.text(text)])
+    def self.user(text : String, synthetic : Bool = false) : Message
+      Message.new(Role::User, [ContentBlock.text(text)], synthetic)
     end
 
     def self.assistant(text : String) : Message

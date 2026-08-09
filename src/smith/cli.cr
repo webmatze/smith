@@ -3,6 +3,7 @@ require "./llm"
 require "./tools"
 require "./agent"
 require "./session"
+require "./transcript_log"
 require "./project_ctx"
 require "./skills"
 require "./mentions"
@@ -574,11 +575,10 @@ module Smith
       end
     end
 
-    private def build_agent(
-      provider : LLM::Provider,
-      messages : Array(LLM::Message)? = nil,
-      context_ratio : Float64 = 1.0,
-    ) : Agent
+    # Takes the whole session rather than its pieces: passing messages and the
+    # calibration ratio separately is how one call site came to carry the
+    # transcript without what had been learned about measuring it.
+    private def build_agent(provider : LLM::Provider, session_data : Session::Data? = nil) : Agent
       effective_model = @model || main_agent.try(&.model) || provider.default_model
 
       # Built once and kept, so the [a]lways answers survive a plan-mode
@@ -664,9 +664,10 @@ module Smith
         registry: registry,
         model: effective_model,
         system_prompt: build_system_prompt,
-        messages: messages,
+        messages: session_data.try(&.messages),
         context_settings: @config.context,
-        context_ratio: context_ratio,
+        context_ratio: session_data.try(&.context_ratio) || 1.0,
+        transcript_log: session_data.try { |data| transcript_log_for(data) },
         stream: @stream.nil? ? @config.stream? : @stream.not_nil!,
         hooks: hooks,
         thinking_effort: thinking_enabled? ? @config.thinking_effort : nil,
@@ -739,7 +740,7 @@ module Smith
       session_data = @session_store.create(model: effective_model, provider: effective_provider_name)
       @session_id = session_data.id
 
-      agent = build_agent(provider)
+      agent = build_agent(provider, session_data)
 
       renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
       renderer.mcp_banner(mcp_manager.summary)
@@ -755,6 +756,35 @@ module Smith
 
       # A failed provider call must not report success to a calling script.
       exit(renderer.exit_code)
+    end
+
+    # The record of what the session looked like before compaction shortened
+    # it, seeded once for a session that predates the log — that is the longest
+    # transcript the user has, and otherwise the only one that never gets a raw
+    # copy.
+    private def transcript_log_for(session_data : Session::Data) : TranscriptLog
+      log = TranscriptLog.new(@session_store.session_dir(session_data.id))
+      return log if log.exists? || session_data.messages.empty?
+
+      log.seed(session_data.messages)
+      announce_first_deep_compaction(session_data, log)
+      log
+    end
+
+    # A session recorded under the old single-threshold compaction sits just
+    # under the ceiling, which is well over the new trigger — so its next turn
+    # compacts hard. Said out loud, that reads as the upgrade working; unsaid,
+    # it reads as a bug.
+    private def announce_first_deep_compaction(session_data : Session::Data, log : TranscriptLog) : Nil
+      budget = @config.context.budget(ratio: session_data.context_ratio)
+      estimate = budget.charged(Context.estimate_tokens(session_data.messages))
+      return if estimate <= budget.trigger_tokens
+
+      presentation.say_block([
+        "This session (~#{format_tokens(estimate)} tokens) is past the compaction trigger,",
+        "so the next turn will compact it down towards #{format_tokens(budget.target_tokens)}.",
+        "The transcript as it stands has been recorded at #{log.path}.",
+      ])
     end
 
     private def persist(session_data : Session::Data, agent : Agent) : Nil
@@ -827,7 +857,7 @@ module Smith
       @session_id = session_data.id
 
       provider = build_provider(session_data.provider)
-      agent = build_agent(provider, session_data.messages, session_data.context_ratio)
+      agent = build_agent(provider, session_data)
 
       renderer.banner(provider.name, agent.model, @skills_catalog.skills.keys)
       renderer.mcp_banner(mcp_manager.summary)
@@ -859,7 +889,7 @@ module Smith
 
     private def run_plain_loop(session_data : Session::Data)
       provider = build_provider(session_data.provider)
-      agent = build_agent(provider, session_data.messages, session_data.context_ratio)
+      agent = build_agent(provider, session_data)
       effective_model = agent.model
 
       puts "⚒️  Smith LLM Agent Harness v#{Smith::VERSION} (Crystal)"
@@ -922,7 +952,7 @@ module Smith
     # streaming text, modals) while the agent works.
     private def run_tui_loop(session_data : Session::Data)
       provider = build_provider(session_data.provider)
-      agent = build_agent(provider, session_data.messages, session_data.context_ratio)
+      agent = build_agent(provider, session_data)
 
       app = tui_app
       app.model_name = agent.model
