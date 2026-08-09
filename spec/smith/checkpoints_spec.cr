@@ -352,3 +352,83 @@ describe "how far a rewind goes" do
     end
   end
 end
+
+describe "checkpoints under a compacted transcript" do
+  it "moves every index back by what compaction removed" do
+    # A checkpoint names a position in the transcript and a rewind truncates
+    # there. Summarizing a prefix moves every later message, so without this
+    # a rewind quietly lands in a different turn than the one picked.
+    with_store do |store, work|
+      file = File.join(work, "a.txt")
+      simulate(store, "write_file", file, "one", message_index: 12)
+      simulate(store, "write_file", file, "two", message_index: 20)
+
+      store.shift_message_indices(7)
+
+      store.list.map(&.message_index).should eq([5, 13])
+    end
+  end
+
+  it "marks a checkpoint whose messages were replaced as no longer addressable" do
+    # Silently clamping several of these to 1 would make a rewind to any of
+    # them cut the whole transcript back to the summary and call that the
+    # point the user picked.
+    with_store do |store, work|
+      file = File.join(work, "a.txt")
+      simulate(store, "write_file", file, "one", message_index: 3)
+
+      store.shift_message_indices(10)
+
+      store.list.first.transcript_lost.should be_true
+    end
+  end
+
+  it "restores the files of such a checkpoint but names no position to cut to" do
+    with_store do |store, work|
+      file = File.join(work, "a.txt")
+      File.write(file, "original")
+      simulate(store, "write_file", file, "changed", message_index: 3)
+      store.shift_message_indices(10)
+
+      result = store.rewind_to(store.list.first)
+
+      result.applied?.should be_true
+      result.restored.should eq([file])
+      File.read(file).should eq("original")
+      result.message_index.should be_nil
+    end
+  end
+
+  it "keeps naming a position when the checkpoint survived the compaction" do
+    with_store do |store, work|
+      file = File.join(work, "a.txt")
+      simulate(store, "write_file", file, "changed", message_index: 20)
+      store.shift_message_indices(7)
+
+      store.list.first.transcript_lost.should be_false
+      store.rewind_to(store.list.first).message_index.should eq(13)
+    end
+  end
+
+  it "leaves everything alone when compaction removed nothing" do
+    with_store do |store, work|
+      file = File.join(work, "a.txt")
+      simulate(store, "write_file", file, "one", message_index: 6)
+
+      store.shift_message_indices(0)
+
+      store.list.first.message_index.should eq(6)
+    end
+  end
+
+  it "survives a round trip through disk" do
+    with_store do |store, work|
+      file = File.join(work, "a.txt")
+      simulate(store, "write_file", file, "one", message_index: 9)
+      store.shift_message_indices(4)
+
+      reopened = Smith::Checkpoints::Store.new(store.session_dir)
+      reopened.list.first.message_index.should eq(5)
+    end
+  end
+end

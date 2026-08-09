@@ -232,3 +232,120 @@ describe "the transcript position handed to checkpoints" do
     store.current_message_index.should eq(1)
   end
 end
+
+class ReportedUsageProvider < Smith::LLM::Provider
+  getter calls = 0
+
+  def initialize(@prompt_tokens : Int32)
+  end
+
+  def name : String
+    "mock"
+  end
+
+  def default_model : String
+    "mock-model"
+  end
+
+  def complete(request : Smith::LLM::Request) : Smith::LLM::Response
+    @calls += 1
+    Smith::LLM::Response.new("resp_#{@calls}", request.model, [
+      Smith::LLM::ContentBlock.text("All done."),
+    ], usage: Smith::LLM::Usage.new(@prompt_tokens, 5, @prompt_tokens + 5))
+  end
+end
+
+describe "the calibration ratio" do
+  it "starts at 1.0, because nothing has been measured yet" do
+    agent = Smith::Agent.new(
+      provider: ReportedUsageProvider.new(50),
+      registry: Smith::Tools::Registry.new
+    )
+
+    agent.context_ratio.should eq(1.0)
+  end
+
+  it "moves toward what the provider says it charged" do
+    # The byte heuristic undercounts; this is the only signal that says by how
+    # much, and it arrives free with every response.
+    agent = Smith::Agent.new(
+      provider: ReportedUsageProvider.new(1_000_000),
+      registry: Smith::Tools::Registry.new
+    )
+
+    agent.send("hello")
+
+    agent.context_ratio.should be > 1.0
+  end
+
+  it "clamps rather than believing an outlier" do
+    # A ratio of 300 would put the session into permanent compaction; it is a
+    # measurement error, not a context window.
+    agent = Smith::Agent.new(
+      provider: ReportedUsageProvider.new(1_000_000),
+      registry: Smith::Tools::Registry.new
+    )
+
+    10.times { agent.send("hello") }
+
+    agent.context_ratio.should be <= Smith::Context::RATIO_MAX
+  end
+
+  it "never drops below 1.0, which the byte heuristic cannot beat" do
+    agent = Smith::Agent.new(
+      provider: ReportedUsageProvider.new(1),
+      registry: Smith::Tools::Registry.new
+    )
+
+    agent.send("hello")
+
+    agent.context_ratio.should eq(Smith::Context::RATIO_MIN)
+  end
+end
+
+describe "the context breakdown the agent acts on" do
+  it "counts the tool definitions actually registered, not a default set" do
+    # A breakdown built from Registry.default is blind to every MCP tool the
+    # session connected, which is exactly the bulk worth reporting.
+    bare = Smith::Agent.new(
+      provider: TextOnlyProvider.new,
+      registry: Smith::Tools::Registry.new
+    )
+    full = Smith::Agent.new(
+      provider: TextOnlyProvider.new,
+      registry: Smith::Tools::Registry.default
+    )
+
+    full.breakdown.overhead_tokens.should be > bare.breakdown.overhead_tokens
+  end
+
+  it "counts the transcript as history rather than as overhead" do
+    agent = Smith::Agent.new(
+      provider: TextOnlyProvider.new,
+      registry: Smith::Tools::Registry.new,
+      messages: [Smith::LLM::Message.user("x" * 4_000)]
+    )
+
+    breakdown = agent.breakdown
+    breakdown.total.should eq(breakdown.overhead_tokens + 1_000)
+  end
+end
+
+describe "a request that cannot be brought under the ceiling" do
+  it "stops the run and says so instead of letting the provider reject it" do
+    provider = TextOnlyProvider.new
+    agent = Smith::Agent.new(
+      provider: provider,
+      registry: Smith::Tools::Registry.new,
+      context_settings: Smith::Config::ContextSettings.new(max_tokens: 100)
+    )
+
+    exhausted = 0
+    agent.on_event { |e| exhausted += 1 if e.is_a?(Smith::Events::ContextExhausted) }
+
+    agent.send("x" * 40_000)
+
+    exhausted.should eq(1)
+    provider.calls.should eq(0)
+  end
+end

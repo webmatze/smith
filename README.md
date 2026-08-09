@@ -135,6 +135,8 @@ deny  = ["bash(rm -rf *)", "read_file(**/.ssh/**)"]
 
 [context]
 max_tokens = 120000
+compact_at = 0.80                # act at 80% of the budget
+compact_to = 0.50                # and compact down to 50%
 
 [mentions]
 max_lines       = 2000           # per file, then truncated and marked
@@ -240,6 +242,8 @@ Context for session my-refactor (120.000 token budget)
   Messages                34.100   28%
   ───────────────────────────────────
   Total                   36.080   30%
+
+  Compacts at 96.000 (80%), down to 60.000 (50%)
 
   Compactions this session: 1 (truncated)
 ```
@@ -726,18 +730,34 @@ Capped at three continuations per prompt, after which the turn fails rather than
 
 ### Context Compaction
 
-Every turn resends the whole transcript, and a single `bash` result may be up to 256 KiB, so a long session would otherwise run into the provider's context limit mid-task. Before each request smith estimates the transcript size and, if it exceeds `[context] max_tokens`, shrinks it in two stages:
+Every turn resends the whole transcript, and a single `bash` result may be up to 256 KiB, so a long session would otherwise run into the provider's context limit mid-task.
 
-1. **Truncate tool results**, oldest first, stopping as soon as the budget is met — so the results the model is actively working with usually survive whole, while one oversized `cat` still gets cut down.
+Compaction works to three numbers rather than one, because "should I act?" and "when do I stop?" are different questions:
+
+| | Default | |
+|---|---|---|
+| `max_tokens` | 120000 | the ceiling the provider will accept |
+| `compact_at` | 0.80 | where compaction starts acting |
+| `compact_to` | 0.50 | what it compacts down to |
+
+Compacting to the first point that fits means the next assistant turn pushes the transcript straight back over, so compaction runs again — every turn, reclaiming almost nothing and paying a full prompt-cache creation charge each time. Aiming at a target well below the trigger is what turns that into a handful of deep compactions per session. The thresholds are fractions, so raising `max_tokens` for a wider-window model scales all three.
+
+What counts against the budget is the **whole request** — system prompt, project context, skills and tool definitions, not just the transcript — scaled by how far the byte estimate has been off from the prompt-token counts the provider reports back. `smith context` shows the same numbers.
+
+Below the trigger nothing happens at all and the transcript is left byte-identical, so the prompt cache survives. Once the trigger is passed, two stages run, each stopping as soon as the target is met:
+
+1. **Truncate tool results**, oldest first — so the results the model is actively working with usually survive whole, while one oversized `cat` still gets cut down.
 2. **Summarize the oldest turns** via a separate, tool-free provider call, replacing them with a single summary message. If that call fails, the prefix is dropped outright rather than failing the turn.
 
-Both stages preserve the pairing between `tool_use` and `tool_result` blocks — providers reject a request where one half is missing, so compaction only ever shortens content or removes whole turns.
+Both stages preserve the pairing between `tool_use` and `tool_result` blocks — providers reject a request where one half is missing, so compaction only ever shortens content or removes whole turns. Checkpoints record positions in the transcript, and summarizing moves them, so they are shifted to match — a rewind still lands on the turn you picked.
 
-Compaction is announced on screen:
+Compaction is announced on screen, as an intention rather than two bare numbers:
 
 ```text
-🗜️  Context compacted (truncated): ~2779 → ~548 tokens
+🗜️  Context compacted (summarized): ~96000 → ~51000 tokens, 38% of the budget reclaimed · truncate, summarize
 ```
+
+If even the ceiling is out of reach, the run stops with `Context exhausted` rather than paying the provider to reject the request.
 
 **This is destructive.** The compacted transcript is what gets saved, so `smith resume` on a long session shows the summary rather than the original exchange.
 

@@ -51,8 +51,18 @@ private def conversation(turns : Int32, result_bytes : Int32 = 8_000)
   messages
 end
 
-private def compact_with_summary(messages, max_tokens, summary = "the earlier work")
-  Smith::Context.compact(messages, max_tokens) { |_| summary }
+private def budget(
+  max_tokens : Int32,
+  compact_at : Float64 = Smith::Context::DEFAULT_COMPACT_AT,
+  compact_to : Float64 = Smith::Context::DEFAULT_COMPACT_TO,
+  overhead : Int32 = 0,
+  ratio : Float64 = 1.0,
+)
+  Smith::Context::Budget.new(max_tokens, compact_at, compact_to, overhead, ratio)
+end
+
+private def compact_with_summary(messages, budget, summary = "the earlier work")
+  Smith::Context.compact(messages, budget) { |_| summary }
 end
 
 describe Smith::Context do
@@ -68,12 +78,55 @@ describe Smith::Context do
       with_args = [assistant_tool_call("c1")]
       Smith::Context.estimate_tokens(with_args).should be > 0
     end
+
+    it "counts thinking signatures, which the provider is sent verbatim" do
+      # Missing these made the estimator blind to what is often the largest
+      # thing in an assistant turn.
+      plain = [Smith::LLM::Message.assistant_with_blocks([
+        Smith::LLM::ContentBlock.thinking("reasoning", nil),
+      ])]
+      signed = [Smith::LLM::Message.assistant_with_blocks([
+        Smith::LLM::ContentBlock.thinking("reasoning", "s" * 4_000),
+      ])]
+
+      Smith::Context.estimate_tokens(signed).should eq(Smith::Context.estimate_tokens(plain) + 1_000)
+    end
+  end
+
+  describe Smith::Context::Budget do
+    it "derives trigger and target from the budget, so one number scales all three" do
+      b = budget(100_000)
+
+      b.trigger_tokens.should eq(80_000)
+      b.target_tokens.should eq(50_000)
+    end
+
+    it "charges the overhead against the history" do
+      budget(100_000, overhead: 10_000).charged(5_000).should eq(15_000)
+    end
+
+    it "charges the calibration ratio against the whole request" do
+      budget(100_000, overhead: 10_000, ratio: 1.5).charged(10_000).should eq(30_000)
+    end
+
+    it "reports the history that still fits, which is the inverse of charging" do
+      b = budget(100_000, overhead: 10_000, ratio: 1.25)
+
+      b.charged(b.target_allowance).should be <= b.target_tokens
+    end
+
+    it "reports no allowance at all when the overhead alone fills the target" do
+      budget(100_000, overhead: 90_000).target_allowance.should eq(0)
+    end
   end
 
   describe ".compact" do
-    it "leaves a history under budget completely untouched" do
+    it "leaves a history below the trigger byte-identical" do
+      # Not merely equal — the same object. Rewriting the prefix invalidates
+      # the provider's prompt cache, which is most of what made compacting
+      # every turn expensive.
       messages = conversation(2, result_bytes: 100)
-      result = compact_with_summary(messages, 100_000)
+      result = compact_with_summary(messages, budget(100_000))
 
       result.compacted?.should be_false
       result.strategy.should eq(Smith::Context::Strategy::None)
@@ -81,25 +134,103 @@ describe Smith::Context do
       assert_tool_pairing(result.messages)
     end
 
-    it "truncates oldest-first and stops as soon as the budget is met" do
-      # 8 x 20 KiB ~= 40k tokens; a 25k budget needs roughly half of them cut.
+    it "acts at the trigger, before the budget is exceeded" do
+      # ~10k tokens against a 12k budget: under the ceiling, over the 80%
+      # trigger. Waiting for the ceiling is what let a single large result
+      # push a request over it.
+      messages = conversation(4, result_bytes: 10_000)
+      before = Smith::Context.estimate_tokens(messages)
+      b = budget(12_000)
+
+      before.should be < b.max_tokens
+      before.should be > b.trigger_tokens
+
+      compact_with_summary(messages, b).compacted?.should be_true
+    end
+
+    it "compacts down to the target rather than to the first point that fits" do
+      # The reported symptom, as a regression test: reclaiming just enough is
+      # what made the next turn compact again.
       messages = conversation(8, result_bytes: 20_000)
-      result = compact_with_summary(messages, 25_000)
+      b = budget(40_000)
+      result = compact_with_summary(messages, b)
 
       result.strategy.should eq(Smith::Context::Strategy::Truncated)
-      result.after_tokens.should be <= 25_000
-      result.after_tokens.should be < result.before_tokens
+      result.after_tokens.should be <= b.target_tokens
+      result.reached_target?.should be_true
       assert_tool_pairing(result.messages)
 
       results = result.messages.flat_map(&.content).select(&.type.tool_result?)
       results.size.should eq(8)
 
       # Oldest is cut...
-      results.first.text.not_nil!.should contain("truncated by smith")
+      results.first.text.not_nil!.should contain(Smith::Context::TRUNCATION_MARKER)
       results.first.text.not_nil!.bytesize.should be < 20_000
 
       # ...and the newest survives whole, because the loop stopped early.
       results.last.text.not_nil!.bytesize.should eq(20_000)
+    end
+
+    it "does not compact a history it has just compacted" do
+      messages = conversation(20, result_bytes: 20_000)
+      b = budget(40_000)
+
+      first = compact_with_summary(messages, b)
+      first.compacted?.should be_true
+
+      second = compact_with_summary(first.messages, b)
+      second.strategy.should eq(Smith::Context::Strategy::None)
+      second.messages.should be(first.messages)
+    end
+
+    it "compacts a handful of times over a long session, not every turn" do
+      # The only test that exercises the reported symptom *as* a symptom: the
+      # complaint was never about one call, it was about the cadence.
+      messages = [] of Smith::LLM::Message
+      compactions = 0
+      b = budget(40_000)
+
+      30.times do |i|
+        messages << user_msg("request number #{i}")
+        messages << assistant_tool_call("call-#{i}")
+        messages << tool_result("call-#{i}", "x" * 8_000)
+
+        result = compact_with_summary(messages, b)
+        if result.compacted?
+          compactions += 1
+          messages = result.messages
+        end
+
+        assert_tool_pairing(messages)
+      end
+
+      compactions.should be < 5
+    end
+
+    it "counts the reserved overhead against every threshold" do
+      # Same history, same ceiling: what differs is what else is in the
+      # request. A history that fits alone need not fit alongside the tool
+      # definitions.
+      messages = conversation(4, result_bytes: 10_000)
+
+      compact_with_summary(messages, budget(30_000)).compacted?.should be_false
+      compact_with_summary(messages, budget(30_000, overhead: 15_000)).compacted?.should be_true
+    end
+
+    it "counts the calibration ratio against every threshold" do
+      messages = conversation(4, result_bytes: 10_000)
+
+      compact_with_summary(messages, budget(20_000)).compacted?.should be_false
+      compact_with_summary(messages, budget(20_000, ratio: 2.0)).compacted?.should be_true
+    end
+
+    it "reports the cost of the request, not of the history alone" do
+      messages = conversation(4, result_bytes: 10_000)
+      b = budget(30_000, overhead: 15_000)
+
+      result = compact_with_summary(messages, b)
+
+      result.before_tokens.should eq(b.charged(Smith::Context.estimate_tokens(messages)))
     end
 
     it "will cut even a single oversized result rather than give up" do
@@ -111,11 +242,11 @@ describe Smith::Context do
         tool_result("c1", "z" * 400_000),
       ]
 
-      result = compact_with_summary(messages, 1_000)
+      result = compact_with_summary(messages, budget(1_000))
 
       result.after_tokens.should be < result.before_tokens
       block = result.messages.last.content.first
-      block.text.not_nil!.should contain("truncated by smith")
+      block.text.not_nil!.should contain(Smith::Context::TRUNCATION_MARKER)
       assert_tool_pairing(result.messages)
     end
 
@@ -124,10 +255,25 @@ describe Smith::Context do
       # cut to — so it must not claim a compaction that did not happen.
       messages = [user_msg("x" * 40_000)]
 
-      result = compact_with_summary(messages, 100)
+      result = compact_with_summary(messages, budget(100))
 
       result.strategy.should eq(Smith::Context::Strategy::None)
       result.compacted?.should be_false
+    end
+
+    it "reports exhaustion when even the ceiling is out of reach" do
+      # The caller stops the run on this rather than paying the provider to
+      # reject the request.
+      messages = [user_msg("x" * 40_000)]
+
+      result = compact_with_summary(messages, budget(100))
+
+      result.exhausted?.should be_true
+      result.reached_target?.should be_false
+    end
+
+    it "does not report exhaustion when it got under the ceiling" do
+      compact_with_summary(conversation(8, result_bytes: 20_000), budget(40_000)).exhausted?.should be_false
     end
 
     it "preserves is_error when truncating" do
@@ -138,7 +284,7 @@ describe Smith::Context do
         messages << tool_result("c#{i}", "y" * 20_000, is_error: true)
       end
 
-      result = compact_with_summary(messages, 25_000)
+      result = compact_with_summary(messages, budget(40_000))
 
       truncated = result.messages.flat_map(&.content).select(&.type.tool_result?).first
       truncated.is_error.should be_true
@@ -147,7 +293,7 @@ describe Smith::Context do
 
     it "summarizes the oldest turns when truncation is not enough" do
       messages = conversation(10, result_bytes: 60_000)
-      result = compact_with_summary(messages, 1_000, summary: "we listed files")
+      result = compact_with_summary(messages, budget(1_000), summary: "we listed files")
 
       result.strategy.should eq(Smith::Context::Strategy::Summarized)
       result.messages.first.role.user?.should be_true
@@ -156,9 +302,30 @@ describe Smith::Context do
       assert_tool_pairing(result.messages)
     end
 
+    it "reports which stages ran" do
+      truncated = compact_with_summary(conversation(8, result_bytes: 20_000), budget(40_000))
+      truncated.stages.should eq(["truncate"])
+
+      summarized = compact_with_summary(conversation(10, result_bytes: 60_000), budget(1_000))
+      summarized.stages.should contain("summarize")
+    end
+
+    it "reports how many messages left the front, so checkpoints can follow" do
+      messages = conversation(10, result_bytes: 60_000)
+      result = compact_with_summary(messages, budget(1_000))
+
+      # A prefix of N messages became one summary.
+      result.removed_prefix.should eq(messages.size - result.messages.size)
+      result.removed_prefix.should be > 0
+    end
+
+    it "reports nothing removed when it only truncated" do
+      compact_with_summary(conversation(8, result_bytes: 20_000), budget(40_000)).removed_prefix.should eq(0)
+    end
+
     it "never cuts into the middle of a turn" do
       messages = conversation(10, result_bytes: 60_000)
-      result = compact_with_summary(messages, 1_000)
+      result = compact_with_summary(messages, budget(1_000))
 
       # Everything after the injected summary must still start at a turn
       # boundary, so no tool_result can precede its tool_use.
@@ -169,7 +336,7 @@ describe Smith::Context do
     it "falls back to dropping the prefix when summarizing fails" do
       messages = conversation(10, result_bytes: 60_000)
 
-      result = Smith::Context.compact(messages, 1_000) do |_|
+      result = Smith::Context.compact(messages, budget(1_000)) do |_|
         raise "provider exploded"
       end
 
@@ -182,8 +349,8 @@ describe Smith::Context do
     it "keeps the pairing intact across a range of budgets" do
       messages = conversation(12, result_bytes: 30_000)
 
-      [50, 500, 5_000, 50_000].each do |budget|
-        assert_tool_pairing(compact_with_summary(messages, budget).messages)
+      [50, 500, 5_000, 50_000].each do |ceiling|
+        assert_tool_pairing(compact_with_summary(messages, budget(ceiling)).messages)
       end
     end
   end
@@ -216,20 +383,87 @@ describe Smith::Context::Breakdown do
   end
 
   it "sums its parts and reports each as a share of the budget" do
-    breakdown = Smith::Context::Breakdown.new(1000)
+    breakdown = Smith::Context::Breakdown.new(budget(1000))
     breakdown.add("System prompt", "x" * 400) # 100 tokens
-    breakdown.add("Messages", [Smith::LLM::Message.user("y" * 800)])
+    breakdown.add_history("Messages", [Smith::LLM::Message.user("y" * 800)])
 
     breakdown.total.should eq(300)
     breakdown.percent(breakdown.total).should eq(30)
     breakdown.entries.map(&.label).should eq(["System prompt", "Messages"])
   end
 
+  it "reports everything compaction cannot touch as the overhead" do
+    # This is the number handed to Context.compact, so the breakdown the user
+    # reads and the decision compaction makes come from one computation.
+    breakdown = Smith::Context::Breakdown.new(budget(1000))
+    breakdown.add("System prompt", "x" * 400)    # 100 tokens
+    breakdown.add("Tool definitions", "z" * 200) # 50 tokens
+    breakdown.add_history("Messages", [Smith::LLM::Message.user("y" * 800)])
+
+    breakdown.overhead_tokens.should eq(150)
+  end
+
+  it "reports the total as the provider will charge it" do
+    breakdown = Smith::Context::Breakdown.new(budget(1000, ratio: 1.5))
+    breakdown.add("System prompt", "x" * 400)
+
+    breakdown.total.should eq(100)
+    breakdown.charged_total.should eq(150)
+  end
+
   it "keeps an empty part visible rather than hiding it" do
     # "Skills 0" answers "are skills eating my context?"; a missing line does not.
-    breakdown = Smith::Context::Breakdown.new(1000)
+    breakdown = Smith::Context::Breakdown.new(budget(1000))
     breakdown.add("Skills", "")
 
     breakdown.entries.map(&.tokens).should eq([0])
+  end
+end
+
+describe "compaction when the overhead alone fills the target" do
+  it "aims at the ceiling rather than shredding the history to reach zero" do
+    # A fat MCP tool set can leave no room at all under the target. Compacting
+    # to an impossible number would throw away the whole conversation while
+    # half the window sat unused.
+    messages = conversation(10, result_bytes: 20_000)
+    b = budget(120_000, overhead: 60_000)
+
+    b.target_allowance.should eq(0)
+
+    result = compact_with_summary(messages, b)
+
+    result.after_tokens.should be <= b.max_tokens
+    result.messages.size.should be > 3
+    assert_tool_pairing(result.messages)
+  end
+
+  it "leaves the history alone when not even the ceiling can be reached" do
+    # Nothing done to the transcript changes this, so it is not worth
+    # destroying it to find out.
+    messages = conversation(4, result_bytes: 20_000)
+    b = budget(10_000, overhead: 50_000)
+
+    result = compact_with_summary(messages, b)
+
+    result.messages.should be(messages)
+    result.exhausted?.should be_true
+  end
+end
+
+describe "compacting a history that was already truncated once" do
+  it "does not re-cut a result it has already cut" do
+    # Slicing the same head again reclaims nothing, writes a "0 KiB truncated"
+    # note into the transcript, and rewrites a block the provider had cached.
+    messages = conversation(8, result_bytes: 20_000)
+    b = budget(40_000)
+
+    once = compact_with_summary(messages, b)
+    truncated = once.messages.flat_map(&.content).select(&.type.tool_result?).first.text.not_nil!
+
+    twice = compact_with_summary(once.messages, budget(20_000))
+    again = twice.messages.flat_map(&.content).select(&.type.tool_result?).first.text.not_nil!
+
+    again.should eq(truncated)
+    again.should_not contain("0 KiB")
   end
 end

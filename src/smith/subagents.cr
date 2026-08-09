@@ -171,6 +171,7 @@ module Smith::Subagents
 
       final_text = ""
       turns = 0
+      failure = nil.as(String?)
 
       child_agent.on_event do |event|
         case event
@@ -178,6 +179,13 @@ module Smith::Subagents
           final_text += event.text
         when Smith::Events::TurnCompleted
           turns = event.turns
+        when Smith::Events::ContextExhausted
+          # A child that ran out of window returns from run_loop with no text,
+          # which is indistinguishable from a quiet success unless it is caught
+          # here — no renderer is attached to a child to notice it.
+          failure = "Subagent ran out of context (~#{event.estimated_tokens} tokens " \
+                    "against a #{event.budget_tokens} budget) before it could work. " \
+                    "Delegate a narrower task."
         end
       end
 
@@ -192,6 +200,16 @@ module Smith::Subagents
       end
 
       done_channel.receive
+
+      if reason = failure
+        return Report.new(
+          node_id: node_id,
+          status: "failed",
+          summary: reason,
+          turns_used: turns,
+          usage: child_agent.cumulative_usage
+        )
+      end
 
       Report.new(
         node_id: node_id,

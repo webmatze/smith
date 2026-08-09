@@ -650,3 +650,87 @@ describe "thinking settings" do
     end
   end
 end
+
+describe "context compaction settings" do
+  it "applies the built-in thresholds when the config says nothing" do
+    with_sandbox do |temp_dir, _home|
+      settings = Smith::Config.load(make_project(temp_dir)).context
+
+      settings.max_tokens.should eq(Smith::Config::DEFAULT_MAX_CONTEXT_TOKENS)
+      settings.compact_at.should eq(Smith::Context::DEFAULT_COMPACT_AT)
+      settings.compact_to.should eq(Smith::Context::DEFAULT_COMPACT_TO)
+    end
+  end
+
+  it "reads the thresholds as fractions, so they scale with max_tokens" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [context]
+        max_tokens = 400000
+        compact_at = 0.9
+        compact_to = 0.4
+        TOML
+
+      budget = Smith::Config.load(project).context.budget
+
+      budget.max_tokens.should eq(400_000)
+      budget.trigger_tokens.should eq(360_000)
+      budget.target_tokens.should eq(160_000)
+    end
+  end
+
+  it "falls back to the defaults when the target sits above the trigger" do
+    # A target above the trigger is not a preference, it is a typo — and
+    # honouring it would make compaction nonsense.
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [context]
+        compact_at = 0.4
+        compact_to = 0.9
+        TOML
+
+      settings = Smith::Config.load(project).context
+      settings.compact_at.should eq(Smith::Context::DEFAULT_COMPACT_AT)
+      settings.compact_to.should eq(Smith::Context::DEFAULT_COMPACT_TO)
+    end
+  end
+
+  it "falls back to the defaults when a threshold sits above the budget" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [context]
+        compact_at = 1.5
+        compact_to = 0.5
+        TOML
+
+      Smith::Config.load(project).context.compact_at.should eq(Smith::Context::DEFAULT_COMPACT_AT)
+    end
+  end
+
+  it "keeps a custom max_tokens even when the thresholds are nonsense" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [context]
+        max_tokens = 200000
+        compact_to = 2.0
+        TOML
+
+      Smith::Config.load(project).context.max_tokens.should eq(200_000)
+    end
+  end
+end
+
+describe "a context budget that cannot work" do
+  it "falls back to the default rather than stopping every run" do
+    # max_tokens = 0 makes every threshold 0, which reads as "nothing can ever
+    # fit" — the run would abort before its first request over one typo.
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [context]
+        max_tokens = 0
+        TOML
+
+      Smith::Config.load(project).context.max_tokens.should eq(Smith::Config::DEFAULT_MAX_CONTEXT_TOKENS)
+    end
+  end
+end

@@ -77,6 +77,10 @@ module Smith::Session
     property name : String? = nil
     property parent_id : String? = nil
 
+    # How far the token estimate was off, last time the provider said. Carried
+    # across a resume so the first turn back is not blind about a long history.
+    property context_ratio : Float64 = 1.0
+
     def initialize(
       @id : String,
       @cwd : String,
@@ -286,6 +290,10 @@ module Smith::Session
         name: unique_name(source.name.try { |n| "#{n}-fork" }, nil),
         parent_id: source.id
       )
+      # The fork inherits the transcript, so it must inherit what was learned
+      # about measuring it — otherwise its first turn is blind about a history
+      # the parent already knew the size of.
+      copy.context_ratio = source.context_ratio
 
       save(copy, derive_name: false, check_name: false)
       copy

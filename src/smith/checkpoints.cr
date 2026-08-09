@@ -32,7 +32,15 @@ module Smith::Checkpoints
     # a change made outside smith since.
     property after_digest : String?
 
-    getter message_index : Int32
+    # Writable because compaction can shorten the transcript underneath a
+    # checkpoint; see Store#shift_message_indices.
+    property message_index : Int32
+
+    # True once compaction has replaced the messages this checkpoint pointed
+    # at. The files it snapshotted are still restorable; the position is not.
+    # Defaults so checkpoints written before compaction knew about them load.
+    property transcript_lost : Bool = false
+
     getter created_at : Time
 
     def initialize(
@@ -126,6 +134,38 @@ module Smith::Checkpoints
       entry
     end
 
+    # Compaction replaced a prefix of the transcript with a single summary
+    # message, so every index recorded before that points `removed` messages
+    # too far back — and a rewind truncates the transcript at one of these.
+    # Without this, compacting silently moves every checkpoint to the wrong
+    # turn.
+    #
+    # An index that pointed *into* the replaced prefix cannot be recovered: the
+    # messages it named are gone. Clamping it to 1 and saying nothing would be
+    # worse than losing it — several checkpoints would collapse onto the same
+    # position, and rewinding to any of them would cut the whole transcript back
+    # to the summary while claiming that was the point picked. So the position
+    # is marked lost, and a rewind then restores the files without touching the
+    # transcript.
+    def shift_message_indices(removed : Int32) : Nil
+      return if removed <= 0
+
+      list.each do |entry|
+        shifted = entry.message_index - removed
+
+        if shifted < 1
+          entry.transcript_lost = true
+          entry.message_index = 1
+        else
+          entry.message_index = shifted
+        end
+
+        write_entry(entry)
+      end
+
+      @current_message_index = Math.max(1, @current_message_index - removed)
+    end
+
     # Called once the tool has run, so a later rewind can tell smith's own
     # change apart from one made afterwards by someone else.
     #
@@ -196,7 +236,10 @@ module Smith::Checkpoints
         end
       end
 
-      result = RestoreResult.new(restored, deleted, conflicts, target.message_index)
+      # nil rather than 1: compaction replaced the messages this checkpoint
+      # named, so there is no position to cut back to.
+      cut_to = target.transcript_lost ? nil : target.message_index
+      result = RestoreResult.new(restored, deleted, conflicts, cut_to)
 
       # Consumed only once the rewind actually completed.
       if !dry_run && result.applied?

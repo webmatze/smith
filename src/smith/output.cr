@@ -135,7 +135,16 @@ module Smith::Output
         end
         event.skipped.each { |skip| @io.puts "⚠️  #{skip.path} — #{skip.reason}" }
       when Events::HistoryCompacted
-        @io.puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → ~#{event.after_tokens} tokens"
+        stages = event.stages.empty? ? "" : " · #{event.stages.join(", ")}"
+        @io.puts "\n🗜️  Context compacted (#{event.strategy}): ~#{event.before_tokens} → " \
+                 "~#{event.after_tokens} tokens, #{event.reclaimed_percent}% of the budget reclaimed#{stages}"
+        unless event.reached_target?
+          @io.puts "⚠️  Could not reach the ~#{event.target_tokens} token target — consider starting a fresh session."
+        end
+      when Events::ContextExhausted
+        @failed = true
+        @io.puts "\n🧱 Context exhausted: ~#{event.estimated_tokens} tokens against a #{event.budget_tokens} " \
+                 "budget, only #{event.reclaimed_tokens} reclaimable — start a fresh session."
       when Events::BudgetExceeded
         @budget_exceeded = true
         @io.puts "\n💸 Budget spent: #{Pricing.format(event.spent_usd)} of #{Pricing.format(event.limit_usd)} — stopping here."
@@ -294,6 +303,17 @@ module Smith::Output
           json.field "strategy", event.strategy
           json.field "before_tokens", event.before_tokens
           json.field "after_tokens", event.after_tokens
+          json.field "target_tokens", event.target_tokens
+          json.field "budget_tokens", event.budget_tokens
+          json.field "stages", event.stages
+        end
+      when Events::ContextExhausted
+        @failed = true
+        emit do |json|
+          json.field "type", "context_exhausted"
+          json.field "estimated_tokens", event.estimated_tokens
+          json.field "budget_tokens", event.budget_tokens
+          json.field "reclaimed_tokens", event.reclaimed_tokens
         end
       when Events::BudgetExceeded
         @budget_exceeded = true
