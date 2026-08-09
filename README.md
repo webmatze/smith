@@ -753,7 +753,7 @@ Below the trigger nothing happens at all and the transcript is left byte-identic
 
 The **last three real turns are left alone** by stages 2 and 3, so compaction cannot truncate the file being edited out from under the model. Real turns: the agent injects user messages of its own when a stop hook asks it to keep going or a response hits the output limit, and counting those would let three of them inside a single turn consume the whole window. The window is given up only as a last resort — one oversized `cat` inside the only turn there is gets cut anyway, because protecting the work in hand is worth less than a request the provider will accept at all.
 
-Both stages preserve the pairing between `tool_use` and `tool_result` blocks — providers reject a request where one half is missing, so compaction only ever shortens content or removes whole turns. Checkpoints record positions in the transcript, and summarizing moves them, so they are shifted to match — a rewind still lands on the turn you picked.
+Every stage preserves the pairing between `tool_use` and `tool_result` blocks — providers reject a request where one half is missing, so compaction only ever shortens content or removes whole turns. Checkpoints name the message they were taken at rather than a position in the transcript, so summarizing a prefix cannot move them: a rewind still lands on the turn you picked, and a checkpoint whose message was summarized away restores its files and says the transcript was left alone.
 
 Compaction is announced on screen, as an intention rather than two bare numbers:
 

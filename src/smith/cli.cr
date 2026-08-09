@@ -1119,7 +1119,7 @@ module Smith
         return
       end
 
-      if index = result.message_index
+      if index = rewind_cut(result, session_data.messages)
         session_data.messages = Session::Transcript.truncate(session_data.messages, index)
         @session_store.save(session_data)
       end
@@ -1165,6 +1165,17 @@ module Smith
       end
 
       data
+    end
+
+    # Where a rewind cuts the transcript, as the checkpoint named it: by
+    # message id, or by the raw index for checkpoints written before ids
+    # existed. nil means the message is gone and the transcript stays as it is.
+    private def rewind_cut(result : Checkpoints::RestoreResult, messages : Array(LLM::Message)) : Int32?
+      if id = result.message_id
+        Session::Transcript.index_after(messages, id)
+      else
+        result.message_index
+      end
     end
 
     private def checkpoint_store_for(session : Session::Data) : Checkpoints::Store
@@ -1255,14 +1266,14 @@ module Smith
       puts "\nChanges made by bash are not covered by checkpoints."
       return if @dry_run || @files_only || !result.applied?
 
-      if index = result.message_index
+      if index = rewind_cut(result, session.messages)
         session.messages = Session::Transcript.truncate(session.messages, index)
         @session_store.save(session)
         puts "Transcript cut back to #{session.messages.size} messages."
       else
         # Say it rather than leave the files and the transcript quietly out of
-        # step: the position this checkpoint named was compacted away.
-        puts "Transcript left alone — compaction replaced the messages this checkpoint pointed at."
+        # step: the message this checkpoint named was compacted away.
+        puts "Transcript left alone — compaction replaced the message this checkpoint pointed at."
       end
     end
 

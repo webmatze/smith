@@ -50,3 +50,26 @@ describe "how big the prompt actually was" do
     Smith::LLM::Usage.new(1_200, 50, 1_250).billed_prompt_tokens.should eq(1_200)
   end
 end
+
+describe "message identity" do
+  it "gives every message its own id" do
+    a = Smith::LLM::Message.user("hello")
+    b = Smith::LLM::Message.user("hello")
+
+    a.id.should_not eq(b.id)
+  end
+
+  it "survives a round trip through JSON, which is what makes it an anchor" do
+    message = Smith::LLM::Message.user("hello")
+
+    Smith::LLM::Message.from_json(message.to_json).id.should eq(message.id)
+  end
+
+  it "gives a message saved before ids existed one on the way in" do
+    # Checkpoints from that era point by index and keep working; anything taken
+    # from here on points at these ids.
+    legacy = %({"role":"user","content":[{"type":"text","text":"hi"}]})
+
+    Smith::LLM::Message.from_json(legacy).id.should_not be_empty
+  end
+end

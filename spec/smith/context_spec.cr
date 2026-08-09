@@ -310,17 +310,15 @@ describe Smith::Context do
       summarized.stages.should contain("summarize")
     end
 
-    it "reports how many messages left the front, so checkpoints can follow" do
-      messages = conversation(10, result_bytes: 60_000)
-      result = compact_with_summary(messages, budget(1_000))
+    it "keeps the id of a message whose content it rewrote" do
+      # Checkpoints point at messages by identity, and a result that was
+      # shortened is still the same message.
+      messages = with_quiet_tail(conversation(10, result_bytes: 20_000))
+      before = messages.map(&.id)
 
-      # A prefix of N messages became one summary.
-      result.removed_prefix.should eq(messages.size - result.messages.size)
-      result.removed_prefix.should be > 0
-    end
+      result = compact_with_summary(messages, budget(60_000))
 
-    it "reports nothing removed when it only truncated" do
-      compact_with_summary(conversation(8, result_bytes: 20_000), budget(40_000)).removed_prefix.should eq(0)
+      result.messages.map(&.id).should eq(before)
     end
 
     it "never cuts into the middle of a turn" do

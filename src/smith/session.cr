@@ -135,6 +135,16 @@ module Smith::Session
   # where a tool_use has no matching tool_result, the same invariant
   # Context.compact upholds.
   module Transcript
+    # Where the transcript has to be cut so that `id` is the last message left.
+    #
+    # nil means the message is not there any more — compaction replaced it with
+    # a summary. That is a real answer, not a failure: a rewind to such a
+    # checkpoint restores its files and leaves the transcript alone, rather
+    # than guessing at a position and cutting somewhere else.
+    def self.index_after(messages : Array(Smith::LLM::Message), id : String) : Int32?
+      messages.index { |message| message.id == id }.try(&.+(1))
+    end
+
     def self.truncate(messages : Array(Smith::LLM::Message), index : Int32) : Array(Smith::LLM::Message)
       kept = messages[0, Math.min(index, messages.size)]
 

@@ -305,3 +305,31 @@ describe "forking a session" do
     end
   end
 end
+
+describe "resolving a checkpoint against the transcript" do
+  it "cuts just after the message the checkpoint named" do
+    messages = [
+      Smith::LLM::Message.user("first"),
+      Smith::LLM::Message.assistant("second"),
+      Smith::LLM::Message.user("third"),
+    ]
+
+    Smith::Session::Transcript.index_after(messages, messages[1].id).should eq(2)
+  end
+
+  it "answers nil when compaction replaced that message" do
+    # A guess would cut the transcript somewhere the user never picked.
+    messages = [Smith::LLM::Message.user("Summary of the earlier conversation: ...")]
+
+    Smith::Session::Transcript.index_after(messages, "m-gone").should be_nil
+  end
+
+  it "still names the same message after a prefix became a summary" do
+    kept = Smith::LLM::Message.user("the turn I care about")
+    before = [Smith::LLM::Message.user("old"), Smith::LLM::Message.assistant("older"), kept]
+    after = [Smith::LLM::Message.user("Summary of the earlier conversation: ..."), kept]
+
+    Smith::Session::Transcript.index_after(before, kept.id).should eq(3)
+    Smith::Session::Transcript.index_after(after, kept.id).should eq(2)
+  end
+end
