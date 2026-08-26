@@ -121,6 +121,55 @@ module Smith
       end
     end
 
+    # The same honesty as `carryable`, one level in: a tool that produced an
+    # image has already told the model it did, and a provider that cannot take
+    # one inside a tool result would silently drop the block — leaving the
+    # model to answer about a picture it never saw.
+    #
+    # The explanation is folded into the result's own text rather than added
+    # as a text block beside it. In a Role::Tool message every serializer
+    # keeps only tool_result blocks, so a sibling note would vanish exactly
+    # like the image it was meant to explain.
+    private def carryable_results(blocks : Array(LLM::ContentBlock)) : Array(LLM::ContentBlock)
+      return blocks if @provider.supports_tool_result_media?
+
+      dropped = blocks.select { |block| block.media? && block.data }
+      return blocks if dropped.empty?
+
+      notes = Hash(String, Array(String)).new
+
+      dropped.each do |block|
+        id = block.tool_call_id
+        next if id.nil?
+        (notes[id] ||= Array(String).new) << media_note(block)
+      end
+
+      blocks.compact_map do |block|
+        next nil if block.media?
+        next block unless block.type.tool_result?
+
+        lines = notes[block.tool_call_id]?
+        next block if lines.nil?
+
+        LLM::ContentBlock.tool_result(
+          block.tool_call_id.not_nil!,
+          "#{block.text}\n\n#{lines.join("\n")}",
+          block.is_error || false
+        )
+      end
+    end
+
+    private def media_note(block : LLM::ContentBlock) : String
+      if block.type.document?
+        "[#{block.media_label} (#{block.media_type}) was produced, but the #{@provider.name} " \
+        "provider cannot read a document returned by a tool. Extract its text with a " \
+        "command-line tool via `bash` — `pdftotext` for a PDF — and read that instead.]"
+      else
+        "[#{block.media_label} (#{block.media_type}) was produced, but the #{@provider.name} " \
+        "provider cannot receive an image returned by a tool.]"
+      end
+    end
+
     # Everything appended since the last flush. Compaction is the only thing
     # that removes messages and it flushes before it runs, so between flushes
     # the array only ever grows at the end.
@@ -268,9 +317,11 @@ module Smith
           @registry.checkpoints.try(&.current_message_id = @messages.last?.try(&.id))
 
           # Execute tools concurrently or serially via registry
-          tool_result_blocks = @registry.execute_calls(call_requests)
+          tool_result_blocks = carryable_results(@registry.execute_calls(call_requests))
 
           tool_result_blocks.each do |result_block|
+            next unless result_block.type.tool_result?
+
             call_id = result_block.tool_call_id.not_nil!
             res_text = result_block.text || ""
             is_err = result_block.is_error || false

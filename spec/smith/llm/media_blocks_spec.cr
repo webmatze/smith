@@ -145,3 +145,78 @@ describe "image and document serialization" do
     end
   end
 end
+
+# A tool turn as the registry now builds it: the result, and the image the
+# call produced beside it under the same id.
+private def tool_message_with_image(id : String = "t1")
+  Smith::LLM::Message.new(Smith::LLM::Role::Tool, [
+    Smith::LLM::ContentBlock.tool_result(id, "Attached 'shot.png' as image/png (12 B)."),
+    Smith::LLM::ContentBlock.new(
+      Smith::LLM::ContentBlock::BlockType::Image,
+      tool_call_id: id,
+      media_type: "image/png",
+      data: "QUJD",
+      source: "shot.png"
+    ),
+  ])
+end
+
+private def tool_content(payload : JSON::Any, index : Int32 = 0) : JSON::Any
+  payload["messages"].as_a.last["content"].as_a[index]
+end
+
+describe "an attachment returned by a tool" do
+  describe Smith::LLM::Anthropic do
+    it "folds it into the content of the result it belongs to" do
+      payload = ProbeAnthropic.new(api_key: "k", cache: false)
+        .payload_for(request(tool_message_with_image))
+
+      result = tool_content(payload)
+      result["type"].should eq("tool_result")
+      result["tool_use_id"].should eq("t1")
+
+      parts = result["content"].as_a
+      parts.size.should eq(2)
+      parts[0]["type"].should eq("text")
+      parts[0]["text"].as_s.should contain("shot.png")
+      parts[1]["type"].should eq("image")
+      parts[1]["source"]["type"].should eq("base64")
+      parts[1]["source"]["media_type"].should eq("image/png")
+      parts[1]["source"]["data"].should eq("QUJD")
+    end
+
+    it "leaves a text-only result a plain string, so no running prefix is reshaped" do
+      message = Smith::LLM::Message.new(Smith::LLM::Role::Tool, [
+        Smith::LLM::ContentBlock.tool_result("t1", "1: alpha"),
+      ])
+
+      tool_content(ProbeAnthropic.new(api_key: "k", cache: false).payload_for(request(message)))["content"]
+        .should eq("1: alpha")
+    end
+
+    it "says so, so the agent knows it need not downgrade" do
+      Smith::LLM::Anthropic.new(api_key: "k").supports_tool_result_media?.should be_true
+    end
+  end
+
+  describe "the OpenAI shape" do
+    it "has nowhere to put one, and says so" do
+      Smith::LLM::OpenAI.new(api_key: "k").supports_tool_result_media?.should be_false
+      Smith::LLM::OpenRouter.new(api_key: "k").supports_tool_result_media?.should be_false
+      Smith::LLM::Ollama.new.supports_tool_result_media?.should be_false
+    end
+
+    it "never smuggles an image into a tool message" do
+      [
+        ProbeOpenAI.new(api_key: "k").payload_for(request(tool_message_with_image)),
+        ProbeOllama.new.payload_for(request(tool_message_with_image)),
+        ProbeOpenRouter.new(api_key: "k", cache: false).payload_for(request(tool_message_with_image)),
+      ].each do |payload|
+        tool_turns = payload["messages"].as_a.select { |message| message["role"] == "tool" }
+        tool_turns.size.should eq(1)
+        tool_turns.first["content"].as_s.should contain("shot.png")
+        payload.to_json.should_not contain("image_url")
+      end
+    end
+  end
+end

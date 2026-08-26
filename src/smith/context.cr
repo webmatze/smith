@@ -351,6 +351,15 @@ module Smith
         # give. One oversized `cat` inside the current turn is the case this
         # exists for: protecting the work in hand is worth less than a request
         # the provider will accept at all.
+        # Attachments first, here as everywhere: shortening the text of a
+        # result while its image stays behind gives up the readable part and
+        # keeps the expensive one.
+        if drop_stale_media(working, target, window_turns: 0, tool_only: true)
+          stages << "attachments" unless stages.includes?("attachments")
+          staged = working.messages
+          after = budget.charged(working.tokens)
+        end
+
         if truncate_old_tool_results(working, target, window_turns: 0)
           stages << "truncate" unless stages.includes?("truncate")
           staged = working.messages
@@ -494,25 +503,71 @@ module Smith
     # is still being worked on.
     #
     # Returns whether anything changed.
-    private def self.drop_stale_media(working : Working, target : Int32) : Bool
-      protected_from = window_start(working.messages, RECENCY_WINDOW_TURNS)
+    # `tool_only` is for the desperate pass, where even the current turn is
+    # fair game. What a *tool* returned may go — the model asked for it and can
+    # ask again — but not what the user attached to the question being
+    # answered: dropping that leaves the request pointless rather than smaller.
+    private def self.drop_stale_media(
+      working : Working,
+      target : Int32,
+      window_turns : Int32 = RECENCY_WINDOW_TURNS,
+      tool_only : Bool = false,
+    ) : Bool
+      protected_from = window_start(working.messages, window_turns)
       changed = false
 
       working.messages.each_with_index do |message, index|
         break if index >= protected_from
+        next if tool_only && !message.role.tool?
         next unless message.content.any?(&.media?)
         return changed if working.fits?(target)
 
-        rebuilt = message.content.map do |block|
-          next block unless block.media?
-          LLM::ContentBlock.text("[#{block.media_label} — #{MEDIA_MARKER}]")
-        end
-
-        working.replace(index, LLM::Message.new(message.role, rebuilt, message.synthetic?, message.id))
+        working.replace(index, without_media(message))
         changed = true
       end
 
       changed
+    end
+
+    # The same message with its attachments replaced by a note naming them.
+    #
+    # Where the note goes depends on the role. In a user message it is a text
+    # block of its own. In a tool message it cannot be: every provider adapter
+    # keeps only tool_result blocks under that role, so a note beside them
+    # would disappear as silently as the image it explains — it is appended to
+    # the text of the result the attachment came back with instead.
+    private def self.without_media(message : LLM::Message) : LLM::Message
+      content = if message.role.tool?
+                  notes = Hash(String, Array(String)).new
+
+                  message.content.each do |block|
+                    next unless block.media?
+                    id = block.tool_call_id
+                    next if id.nil?
+                    (notes[id] ||= Array(String).new) << "[#{block.media_label} — #{MEDIA_MARKER}]"
+                  end
+
+                  message.content.compact_map do |block|
+                    next nil if block.media?
+                    next block unless block.type.tool_result?
+
+                    lines = notes[block.tool_call_id]?
+                    next block if lines.nil?
+
+                    LLM::ContentBlock.tool_result(
+                      block.tool_call_id.not_nil!,
+                      "#{block.text}\n\n#{lines.join("\n")}",
+                      block.is_error || false
+                    )
+                  end
+                else
+                  message.content.map do |block|
+                    next block unless block.media?
+                    LLM::ContentBlock.text("[#{block.media_label} — #{MEDIA_MARKER}]")
+                  end
+                end
+
+      LLM::Message.new(message.role, content, message.synthetic?, message.id)
     end
 
     # Stage 1 — reads that a later identical read has superseded.

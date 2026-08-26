@@ -97,7 +97,10 @@ module Smith
       nil
     end
 
-    def self.human_size(bytes : Int32) : String
+    # Takes any integer so a caller with a `File.size` — a UInt64 — does not
+    # have to narrow it first and risk wrapping a genuinely huge file into a
+    # small number.
+    def self.human_size(bytes : Int) : String
       return "#{bytes} B" if bytes < 1024
       kb = bytes / 1024.0
       return "#{kb.round(1)} KB" if kb < 10

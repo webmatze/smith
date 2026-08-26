@@ -234,3 +234,143 @@ describe "attachments in the output" do
     line["files"][0]["bytes"].should eq(1024)
   end
 end
+
+# A tool that answers with a picture, so the agent path can be exercised
+# without a real file on disk.
+private class PictureTool < Smith::Tools::Tool
+  include Smith::Tools::ParallelTool
+
+  def name : String
+    "picture"
+  end
+
+  def description : String
+    "Returns a picture."
+  end
+
+  def parameters : JSON::Any
+    JSON.parse(%({"type": "object", "properties": {}}))
+  end
+
+  def run(args : JSON::Any) : String
+    "Attached 'shot.png' as image/png (3 B)."
+  end
+
+  def run_with_media(args : JSON::Any) : Tuple(String, Array(Smith::LLM::ContentBlock))?
+    {run(args), [Smith::LLM::ContentBlock.image("image/png", "QUJD", "shot.png")]}
+  end
+end
+
+# Asks for the picture once, then finishes.
+private class PictureCaller < Smith::LLM::Provider
+  getter requests = Array(Smith::LLM::Request).new
+
+  def initialize(@tool_result_media : Bool = false)
+  end
+
+  def name : String
+    "picture-caller"
+  end
+
+  def default_model : String
+    "picture-model"
+  end
+
+  def supports_tool_result_media? : Bool
+    @tool_result_media
+  end
+
+  def complete(request : Smith::LLM::Request) : Smith::LLM::Response
+    @requests << request
+
+    if @requests.size == 1
+      Smith::LLM::Response.new("r1", request.model, [
+        Smith::LLM::ContentBlock.tool_use("p1", "picture", JSON.parse("{}")),
+      ])
+    else
+      Smith::LLM::Response.new("r2", request.model, [Smith::LLM::ContentBlock.text("a red button")])
+    end
+  end
+end
+
+private def picture_agent(provider)
+  registry = Smith::Tools::Registry.new
+  registry.register(PictureTool.new)
+  Smith::Agent.new(provider: provider, registry: registry, model: "picture-model")
+end
+
+describe "an attachment a tool produced" do
+  it "reaches a provider that can take one, beside its result" do
+    provider = PictureCaller.new(tool_result_media: true)
+    agent = picture_agent(provider)
+    agent.send("what colour is the button?")
+
+    tool_turn = provider.requests.last.messages.find! { |message| message.role.tool? }
+    tool_turn.content.size.should eq(2)
+    tool_turn.content[0].type.tool_result?.should be_true
+    tool_turn.content[1].type.image?.should be_true
+    # The id is what lets the provider adapter fold the two back together.
+    tool_turn.content[1].tool_call_id.should eq("p1")
+  end
+
+  it "becomes a line in the result for a provider that cannot" do
+    provider = PictureCaller.new(tool_result_media: false)
+    agent = picture_agent(provider)
+    agent.send("what colour is the button?")
+
+    tool_turn = provider.requests.last.messages.find! { |message| message.role.tool? }
+    tool_turn.content.size.should eq(1)
+
+    text = tool_turn.content.first.text.not_nil!
+    text.should contain("shot.png")
+    text.should contain("picture-caller")
+    text.should contain("cannot receive an image")
+  end
+
+  it "reports the call once, whatever came back with it" do
+    provider = PictureCaller.new(tool_result_media: true)
+    agent = picture_agent(provider)
+
+    finished = 0
+    agent.on_event do |event|
+      finished += 1 if event.is_a?(Smith::Events::ToolFinished)
+    end
+    agent.send("what colour is the button?")
+
+    finished.should eq(1)
+  end
+end
+
+describe "an attachment a tool produced, under compaction" do
+  it "leaves the note where the result is, not beside it" do
+    id = "t1"
+    tool_turn = Smith::LLM::Message.new(Smith::LLM::Role::Tool, [
+      Smith::LLM::ContentBlock.tool_result(id, "Attached 'old.png' as image/png (3 B)."),
+      Smith::LLM::ContentBlock.new(
+        Smith::LLM::ContentBlock::BlockType::Image,
+        tool_call_id: id,
+        media_type: "image/png",
+        data: "QUJD",
+        source: "old.png"
+      ),
+    ])
+
+    messages = [Smith::LLM::Message.user("look"), tool_turn] of Smith::LLM::Message
+    5.times do |index|
+      messages << Smith::LLM::Message.user("turn #{index}")
+      messages << Smith::LLM::Message.assistant("answer #{index}")
+    end
+
+    budget = Smith::Context::Budget.new(max_tokens: 2_000)
+    result = Smith::Context.compact(messages, budget) { "a summary" }
+
+    compacted = result.messages.find! { |message| message.role.tool? }
+    # No stray text block: under role tool every adapter keeps only
+    # tool_result blocks, so a note beside one would vanish with the image.
+    compacted.content.size.should eq(1)
+    compacted.content.first.type.tool_result?.should be_true
+    compacted.content.first.tool_call_id.should eq(id)
+    compacted.content.first.text.not_nil!.should contain("old.png")
+    result.stages.should contain("attachments")
+  end
+end

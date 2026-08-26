@@ -1,3 +1,4 @@
+require "base64"
 require "file_utils"
 require "../../spec_helper"
 require "../../../src/smith/tools"
@@ -15,6 +16,22 @@ end
 private def read(path : String, args = {} of String => JSON::Any) : String
   args["path"] = JSON::Any.new(path)
   Smith::Tools::ReadFile.new.run(JSON::Any.new(args))
+end
+
+# The smallest files that still carry a real signature — nothing here decodes
+# an image.
+PNG_FILE = Bytes[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0x03]
+PDF_FILE = Bytes[0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x37]
+
+private def write_bytes(dir : String, name : String, bytes : Bytes) : String
+  path = File.join(dir, name)
+  File.open(path, "w") { |file| file.write(bytes) }
+  path
+end
+
+private def attach(path : String, tool = Smith::Tools::ReadFile.new, args = {} of String => JSON::Any)
+  args["path"] = JSON::Any.new(path)
+  tool.run_with_media(JSON::Any.new(args)).should_not be_nil
 end
 
 describe Smith::Tools::ReadFile do
@@ -96,6 +113,85 @@ describe Smith::Tools::ReadFile do
 
       result.should contain("Content truncated at 256 KiB limit")
       result.bytesize.should be < Smith::Tools::ReadFile::MAX_BYTES + 128
+    end
+  end
+end
+
+describe "read_file on an attachment" do
+  it "hands back the image itself, not a refusal" do
+    with_tempdir do |dir|
+      path = write_bytes(dir, "shot.png", PNG_FILE)
+
+      text, media = attach(path)
+
+      text.should contain(path)
+      text.should contain("image/png")
+      text.should_not contain("looks binary")
+
+      media.size.should eq(1)
+      block = media.first
+      block.type.image?.should be_true
+      block.media_type.should eq("image/png")
+      block.source.should eq(path)
+      block.data.should_not be_nil
+    end
+  end
+
+  it "reads a PDF as a document" do
+    with_tempdir do |dir|
+      path = write_bytes(dir, "spec.pdf", PDF_FILE)
+
+      _, media = attach(path)
+
+      media.first.type.document?.should be_true
+      media.first.media_type.should eq("application/pdf")
+    end
+  end
+
+  it "keeps the bytes out of the text-only path" do
+    with_tempdir do |dir|
+      path = write_bytes(dir, "shot.png", PNG_FILE)
+
+      # `run` is what a caller with nowhere to put a block gets. It must name
+      # the attachment without paying for base64 nobody asked for.
+      result = read(path)
+
+      result.should contain("image/png")
+      result.should_not contain(Base64.strict_encode(PNG_FILE))
+    end
+  end
+
+  it "goes by signature, not by extension" do
+    with_tempdir do |dir|
+      path = File.join(dir, "shot.png")
+      File.write(path, "alpha\n")
+
+      text, media = attach(path)
+
+      media.should be_empty
+      text.should eq("1: alpha\n")
+    end
+  end
+
+  it "refuses one over the limit rather than shrinking it" do
+    with_tempdir do |dir|
+      path = write_bytes(dir, "huge.png", PNG_FILE)
+
+      text, media = attach(path, Smith::Tools::ReadFile.new(max_media_bytes: 4))
+
+      media.should be_empty
+      text.should contain("over the")
+      text.should contain("[media] max_bytes")
+    end
+  end
+
+  it "says that a line range does not apply to a picture" do
+    with_tempdir do |dir|
+      path = write_bytes(dir, "shot.png", PNG_FILE)
+
+      text, _ = attach(path, args: {"start_line" => JSON::Any.new(2_i64)})
+
+      text.should contain("line range")
     end
   end
 end

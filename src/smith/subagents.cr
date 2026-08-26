@@ -3,6 +3,7 @@ require "./llm"
 require "./tools"
 require "./agent"
 require "./agents"
+require "./media"
 
 module Smith::Subagents
   enum Mode
@@ -90,6 +91,11 @@ module Smith::Subagents
     # rather than having that logic duplicated here.
     property provider_factory : Proc(String, Smith::LLM::Provider)?
 
+    # What a child's `read_file` may attach, `[media] max_bytes`. Injected for
+    # the same reason as the factory: the setting lives in config, which is
+    # the CLI's business, not this supervisor's.
+    property max_media_bytes : Int32 = Smith::Media::DEFAULT_MAX_BYTES
+
     def initialize(
       @approver : Smith::Tools::Approver = Smith::Tools::AutoApprover.new,
       @max_depth : Int32 = MAX_DEPTH,
@@ -116,6 +122,7 @@ module Smith::Subagents
       )
       supervisor.plan_mode = @plan_mode
       supervisor.provider_factory = @provider_factory
+      supervisor.max_media_bytes = @max_media_bytes
       supervisor
     end
 
@@ -283,7 +290,7 @@ module Smith::Subagents
       model : String,
     ) : Smith::Tools::Tool?
       case name
-      when "read_file"  then Smith::Tools::ReadFile.new
+      when "read_file"  then Smith::Tools::ReadFile.new(max_media_bytes: @max_media_bytes)
       when "grep"       then Smith::Tools::Grep.new
       when "glob"       then Smith::Tools::Glob.new
       when "bash"       then Smith::Tools::Bash.new
