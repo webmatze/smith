@@ -421,3 +421,59 @@ describe "checkpoints under a compacted transcript" do
     end
   end
 end
+
+# Store.open is what every start path calls at startup — interactive,
+# `smith run` and `smith -c`. The two headless ones went without a store at
+# all until this existed, which is why construction and pruning are one step.
+describe "Smith::Checkpoints::Store.open" do
+  it "prunes what is already there before the run adds to it" do
+    with_store do |store, work|
+      path = File.join(work, "a.txt")
+      3.times do |i|
+        File.write(path, "v#{i}")
+        simulate(store, "write_file", path, "next")
+      end
+
+      opened = Smith::Checkpoints::Store.open(
+        store.session_dir,
+        enabled: true,
+        max: 1,
+        retention: 30.days
+      )
+
+      opened.list.map(&.sequence).should eq([3])
+    end
+  end
+
+  it "carries the enabled flag through, so a disabled store still snapshots nothing" do
+    with_store do |store, work|
+      opened = Smith::Checkpoints::Store.open(
+        store.session_dir,
+        enabled: false,
+        max: 100,
+        retention: 30.days
+      )
+
+      path = File.join(work, "a.txt")
+      File.write(path, "original")
+
+      opened.enabled?.should be_false
+      simulate(opened, "write_file", path, "changed").should be_nil
+      opened.list.should be_empty
+    end
+  end
+
+  it "opens a session that has no checkpoints yet" do
+    with_store do |store, _work|
+      opened = Smith::Checkpoints::Store.open(
+        store.session_dir,
+        enabled: true,
+        max: 100,
+        retention: 30.days
+      )
+
+      opened.list.should be_empty
+      Dir.exists?(opened.session_dir).should be_false
+    end
+  end
+end

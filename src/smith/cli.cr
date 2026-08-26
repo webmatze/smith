@@ -739,6 +739,7 @@ module Smith
       # what just happened rather than an unrelated older chat.
       session_data = @session_store.create(model: effective_model, provider: effective_provider_name)
       @session_id = session_data.id
+      setup_checkpoints(session_data)
 
       agent = build_agent(provider, session_data)
 
@@ -855,6 +856,7 @@ module Smith
       @model = session_data.model
       @provider_name = session_data.provider
       @session_id = session_data.id
+      setup_checkpoints(session_data)
 
       provider = build_provider(session_data.provider)
       agent = build_agent(provider, session_data)
@@ -875,10 +877,7 @@ module Smith
       # Set before the runner is built, so hooks see the real session id.
       @session_id = session_data.id
 
-      settings = @config.checkpoints
-      store = Checkpoints::Store.new(@session_store.session_dir(session_data.id), enabled: settings.enabled?)
-      store.prune(max: settings.max_per_session, retention: settings.retention)
-      @checkpoints = store
+      setup_checkpoints(session_data)
 
       if @interactive_tui
         run_tui_loop(session_data)
@@ -1157,10 +1156,9 @@ module Smith
 
       if data.nil?
         STDERR.puts "❌ No sessions found."
-        # `smith run` is stateless, so it has no session to hang checkpoints
-        # off. Saying so beats leaving the user to guess.
-        STDERR.puts "   Checkpoints belong to a session; `smith run` does not create one."
-        STDERR.puts "   Use `smith chat` (or `smith resume`) for a run you may want to undo."
+        # Checkpoints hang on a session, and every run creates one — so the
+        # only way to get here is to have no runs at all yet.
+        STDERR.puts "   Checkpoints belong to a session, and nothing has been run yet."
         exit(1)
       end
 
@@ -1180,6 +1178,25 @@ module Smith
 
     private def checkpoint_store_for(session : Session::Data) : Checkpoints::Store
       Checkpoints::Store.new(@session_store.session_dir(session.id), enabled: @config.checkpoints.enabled?)
+    end
+
+    # Hangs the store on the session directory and puts it where build_agent
+    # picks it up, so it has to run before that call.
+    #
+    # Every start path goes through here — the interactive loop as much as
+    # `smith run` and `smith -c`. It lived inline in the interactive setup
+    # once, which is exactly why the two headless paths spent their lives
+    # writing files no checkpoint covered. Pruning belongs in the same place:
+    # a headless session that never pruned grows without limit.
+    private def setup_checkpoints(session_data : Session::Data) : Nil
+      settings = @config.checkpoints
+
+      @checkpoints = Checkpoints::Store.open(
+        @session_store.session_dir(session_data.id),
+        enabled: settings.enabled?,
+        max: settings.max_per_session,
+        retention: settings.retention
+      )
     end
 
     private def list_checkpoints(session_id : String?)
