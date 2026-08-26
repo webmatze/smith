@@ -1,4 +1,5 @@
 require "json"
+require "../file_kind"
 require "./tool"
 
 module Smith::Tools
@@ -46,6 +47,13 @@ module Smith::Tools
 
       if File.directory?(path)
         return "Error: Path '#{path}' is a directory, not a file."
+      end
+
+      # Before the read, not after: the bytes of a binary file are worth
+      # nothing here and cost a slice of the context window every turn once
+      # they are in the transcript.
+      if Smith::FileKind.binary?(path)
+        return "Error: File '#{path}' looks binary, not text. Use bash to inspect it."
       end
 
       start_line = args["start_line"]?.try(&.as_i?)
