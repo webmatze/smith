@@ -111,6 +111,19 @@ module Smith::Checkpoints
     def initialize(@session_dir : String, @enabled : Bool = true)
     end
 
+    # What a run needs at startup: a store on this session's directory, pruned
+    # to the configured limits before anything new is written to it.
+    #
+    # Every start path calls this — the interactive loop, `smith run` and
+    # `smith -c`. Construction and pruning are one step on purpose: they were
+    # two, inline in the interactive setup, and the headless paths reached
+    # neither. A path that gets its store from here cannot forget to prune.
+    def self.open(session_dir : String, enabled : Bool, max : Int32, retention : Time::Span) : Store
+      store = new(session_dir, enabled: enabled)
+      store.prune(max: max, retention: retention)
+      store
+    end
+
     def checkpoints_dir : String
       File.join(@session_dir, "checkpoints")
     end

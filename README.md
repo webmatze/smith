@@ -1031,9 +1031,17 @@ ID     WHEN                 TOOL         PATH
 
 A file the run *created* is deleted again on rewind, not merely emptied.
 
-#### Two things checkpoints do not cover
+#### Headless runs are covered too
 
-**`smith run` has no checkpoints.** They belong to a session, and a headless run does not create one. Use `smith chat` for anything you might want to undo. (Making headless runs checkpointable is a worthwhile follow-up — it is the `--yes` case, where an undo matters most.)
+**`smith run` and `smith -c` snapshot like any other run.** A headless run saves its session, so it has a session directory to hang checkpoints on, and afterwards `smith checkpoints` and `smith rewind` work exactly as they do after a chat — no extra flag, no separate path:
+
+```bash
+smith run --yes "rewrite the config loader"
+smith checkpoints                  # the run's snapshots, newest last
+smith rewind                       # one step back
+```
+
+That is deliberately the `--yes` case: an unattended run is the one with nobody there to say no before the next write, so it is the one that most needs a way back. `max_per_session` and `retention_days` prune it like any other session.
 
 #### `bash` is not covered
 
