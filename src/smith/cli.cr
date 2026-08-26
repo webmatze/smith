@@ -15,7 +15,6 @@ require "./todos"
 require "./plan"
 require "./chat_commands"
 require "./checkpoints"
-require "file_utils"
 require "./hooks"
 require "./trust"
 require "./mcp"
@@ -45,7 +44,7 @@ module Smith
     @max_budget_usd : Float64? = nil
     @trust_hooks : Bool = false
     @hooks : Hooks::Runner? = nil
-    @session_id : String = "headless"
+    @session_id : String? = nil
     @hook_context : String? = nil
     @checkpoints : Checkpoints::Store? = nil
     @bash_jobs : Tools::BashJobs? = nil
@@ -453,6 +452,15 @@ module Smith
       Tools::RuleApprover.new(rules, inner)
     end
 
+    # Every entry point opens or resumes a session and assigns this before it
+    # builds an agent — and the agent is what first reaches the hooks runner
+    # and the bash job directory. There is no run without a session, so rather
+    # than carry a sentinel that can never be observed, reading it early is an
+    # error.
+    private def session_id : String
+      @session_id || raise "session id was read before a session was opened"
+    end
+
     # A project config that defines hooks is code from whoever wrote the repo,
     # so it needs a one-time trust decision. `--yes` deliberately does not
     # grant it — that flag is about tools the *model* chose, not about code a
@@ -466,7 +474,7 @@ module Smith
                         @config.hooks
                       end
 
-        runner = Hooks::Runner.new(definitions, session_id: @session_id, warn_io: notice_io)
+        runner = Hooks::Runner.new(definitions, session_id: session_id, warn_io: notice_io)
         runner.on_fire = ->(event : Hooks::Event, command : String, blocked : Bool) do
           renderer.handle(Events::HookFired.new(event, command, blocked))
         end
@@ -483,13 +491,10 @@ module Smith
         .allow?(project, digest, @config.hooks.map(&.command))
     end
 
-    # Job logs live beside the session they belong to. A headless run has no
-    # session, so it gets a per-process directory instead — cleaned up when the
-    # run ends, along with the jobs themselves.
+    # Job logs live beside the session they belong to — every run has one,
+    # headless included, so there is no second place for them to go.
     private def bash_jobs_dir : String
-      return File.join(@session_store.session_dir(@session_id), "bash") unless @session_id == "headless"
-
-      File.join(Dir.tempdir, "smith-bash-#{Process.pid}")
+      File.join(@session_store.session_dir(session_id), "bash")
     end
 
     # Started eagerly at session start, not lazily on first use: `tools/list`
@@ -534,7 +539,6 @@ module Smith
       end
 
       jobs.shutdown_all
-      FileUtils.rm_rf(jobs.dir) if @session_id == "headless" && Dir.exists?(jobs.dir)
     end
 
     # Only Anthropic implements thinking in the form smith speaks, so asking

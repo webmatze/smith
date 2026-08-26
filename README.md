@@ -1007,7 +1007,7 @@ tick 2
 
 Jobs belong to the session that started them and are terminated when it ends — SIGTERM, then SIGKILL after five seconds — including on Ctrl+C. An orphaned dev server still holding its port is a bug, not a feature.
 
-Output is written to `~/.smith/sessions/<id>/bash/<job>.log` rather than kept in memory, so a chatty job cannot grow without bound. A headless run has no session, so its jobs use a per-process temporary directory that is removed with them.
+Output is written to `~/.smith/sessions/<id>/bash/<job>.log` rather than kept in memory, so a chatty job cannot grow without bound. That holds for a headless run too — it opens a session like any other, so its job logs are kept alongside it and are still there after the run.
 
 ### Checkpoints & Rewind
 
