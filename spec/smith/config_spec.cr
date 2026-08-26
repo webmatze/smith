@@ -185,6 +185,22 @@ describe Smith::Config do
     end
   end
 
+  it "stops the upward walk at a worktree root, where .git is a file" do
+    with_sandbox({"SMITH_PROVIDER" => nil, "SMITH_MODEL" => nil}) do |temp_dir, _home|
+      FileUtils.mkdir_p(File.join(temp_dir, ".smith"))
+      File.write(File.join(temp_dir, ".smith", "config.toml"), "[defaults]\nprovider = \"anthropic\"\n")
+
+      # A worktree and a submodule both leave `.git` as a regular file. Asking
+      # for a directory says "no" here, and the walk would run past the project
+      # and pick up the config above it.
+      project = File.join(temp_dir, "worktree")
+      FileUtils.mkdir_p(project)
+      File.write(File.join(project, ".git"), "gitdir: #{temp_dir}/.git/worktrees/worktree\n")
+
+      Smith::Config.load(project).provider.should eq("openrouter")
+    end
+  end
+
   it "warns and keeps running when a config file is malformed" do
     with_sandbox({"SMITH_PROVIDER" => nil, "SMITH_MODEL" => nil}) do |temp_dir, home_dir|
       File.write(File.join(home_dir, "config.toml"), "[defaults\nthis is not valid toml")

@@ -16,4 +16,24 @@ describe Smith::ProjectContext do
       FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
     end
   end
+
+  it "stops at a worktree root, so a neighbour's instructions stay out" do
+    outer = File.join(Dir.tempdir, "smith_ctx_worktree_#{Random::Secure.hex(4)}")
+    project = File.join(outer, "worktree")
+    FileUtils.mkdir_p(project)
+
+    # Worktrees are typically collected under one shared parent, which is
+    # exactly where somebody else's AGENTS.md is likely to sit.
+    File.write(File.join(outer, "AGENTS.md"), "Instructions from outside the project.")
+    File.write(File.join(project, "SMITH.md"), "Instructions that belong to it.")
+    File.write(File.join(project, ".git"), "gitdir: #{outer}/.git/worktrees/worktree\n")
+
+    begin
+      ctx = Smith::ProjectContext.discover(start_dir: project).to_s
+      ctx.should contain("Instructions that belong to it.")
+      ctx.should_not contain("Instructions from outside the project.")
+    ensure
+      FileUtils.rm_rf(outer) if Dir.exists?(outer)
+    end
+  end
 end

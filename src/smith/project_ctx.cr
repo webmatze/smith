@@ -29,7 +29,7 @@ module Smith
         parent = File.dirname(curr)
         break if parent == curr # Reached filesystem root
         # Stop walk at git repository root boundary
-        break if Dir.exists?(File.join(curr, ".git"))
+        break if Smith.git_root?(curr)
         curr = parent
       end
 
