@@ -1,4 +1,5 @@
 require "json"
+require "../media"
 require "./protocol"
 require "../version"
 
@@ -44,12 +45,28 @@ module Smith::MCP
     end
   end
 
-  # What `tools/call` came back with, already flattened to text.
+  # What `tools/call` came back with: the text, and any attachment that came
+  # with it.
   struct ToolResult
     getter text : String
     getter? error : Bool
 
-    def initialize(@text : String, @error : Bool = false)
+    # Images the server returned, decoded far enough to know what they are.
+    # Kept as `Media::Attachment` rather than an LLM content block so the
+    # protocol layer keeps knowing nothing about the tool layer.
+    getter media : Array(Smith::Media::Attachment)
+
+    # How many attachments one call may hand back. A server that answers with
+    # twenty screenshots is a context window, and the cap is what stops one
+    # call from spending it. What is over the cap is named in the text, never
+    # dropped in silence.
+    MAX_ATTACHMENTS = 4
+
+    def initialize(
+      @text : String,
+      @error : Bool = false,
+      @media : Array(Smith::Media::Attachment) = Array(Smith::Media::Attachment).new,
+    )
     end
 
     def self.from_result(result : JSON::Any?) : ToolResult
@@ -57,9 +74,26 @@ module Smith::MCP
       return new("(no result)") if fields.nil?
 
       parts = Array(String).new
+      media = Array(Smith::Media::Attachment).new
+      skipped = 0
+
       fields["content"]?.try(&.as_a?).try &.each do |block|
+        if attachment = attach(block)
+          if media.size < MAX_ATTACHMENTS
+            media << attachment
+            parts << "[image: #{attachment.media_type}, #{Smith::Media.human_size(attachment.bytes)}, attached]"
+          else
+            skipped += 1
+          end
+          next
+        end
+
         rendered = render_block(block)
         parts << rendered unless rendered.nil?
+      end
+
+      if skipped > 0
+        parts << "[#{skipped} further image#{skipped == 1 ? "" : "s"} were not attached: at most #{MAX_ATTACHMENTS} per call.]"
       end
 
       # v2.0.21: servers may answer with structured data only. Dropping it
@@ -72,28 +106,55 @@ module Smith::MCP
 
       new(
         parts.empty? ? "(empty result)" : parts.join("\n"),
-        fields["isError"]?.try(&.as_bool?) || false
+        fields["isError"]?.try(&.as_bool?) || false,
+        media
       )
     end
 
-    # Only text is worth spending context on. Anything else is named so the
-    # model knows something came back, without the bytes landing in the window.
+    # An `image` block, if its payload really is one. nil for everything else,
+    # including an image block whose data is not a format smith attaches —
+    # `render_block` then names it, so the model is told something came back
+    # that it cannot see.
+    private def self.attach(block : JSON::Any) : Smith::Media::Attachment?
+      fields = block.as_h?
+      return nil if fields.nil?
+      return nil unless fields["type"]?.try(&.as_s?) == "image"
+
+      data = fields["data"]?.try(&.as_s?)
+      return nil if data.nil?
+
+      Smith::Media.from_base64(data)
+    end
+
+    # Text, and a name for everything smith cannot carry. Naming rather than
+    # dropping: a block that disappears leaves the model answering about a
+    # result it was never fully given, with no way to know that.
     private def self.render_block(block : JSON::Any) : String?
       fields = block.as_h?
       return nil if fields.nil?
 
-      case fields["type"]?.try(&.as_s?)
+      type = fields["type"]?.try(&.as_s?)
+      mime = fields["mimeType"]?.try(&.as_s?)
+
+      case type
       when "text"
         fields["text"]?.try(&.as_s?)
       when "image"
-        "[image: #{fields["mimeType"]?.try(&.as_s?) || "unknown type"}, not shown]"
+        # Reached only when `attach` refused it: the payload is not base64, or
+        # not a format smith attaches. The claimed type is worth printing —
+        # it is what the server says it sent.
+        "[image: #{mime || "unknown type"}, not shown — smith could not read it as one]"
       when "resource"
         resource = fields["resource"]?.try(&.as_h?)
         text = resource.try(&.["text"]?).try(&.as_s?)
         uri = resource.try(&.["uri"]?).try(&.as_s?) || "unknown"
         text || "[resource: #{uri}, not shown]"
-      else
+      when Nil
         nil
+      else
+        # `audio`, and whatever the protocol grows next. This branch used to
+        # return nil, which deleted the block from the result without a word.
+        "[#{type} content#{mime ? " (#{mime})" : ""}, not shown]"
       end
     end
   end

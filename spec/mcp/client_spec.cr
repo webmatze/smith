@@ -215,14 +215,66 @@ describe Smith::MCP::Client do
     server.connected.call_tool("echo", JSON.parse("{}")).text.should eq(%({"rows":2}))
   end
 
-  it "names an image block instead of putting it in the context" do
+  it "attaches an image block and names it in the text" do
     server = FakeServer.new
     server.on_call = ->(id : Int64, _tool : String, _args : JSON::Any) do
       server.reply(id, %({"content": [{"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo="}]}))
     end
 
     result = server.connected.call_tool("echo", JSON.parse("{}"))
-    result.text.should eq("[image: image/png, not shown]")
+
+    result.media.size.should eq(1)
+    result.media.first.media_type.should eq("image/png")
+    result.media.first.data.should eq("iVBORw0KGgo=")
+    result.text.should contain("image/png")
+    # The payload belongs in the block, never in the text — that is the whole
+    # difference between attaching a picture and pasting base64 into the
+    # window.
     result.text.should_not contain("iVBORw0KGgo=")
+  end
+
+  it "goes by the bytes, not by the mimeType the server claims" do
+    server = FakeServer.new
+    server.on_call = ->(id : Int64, _tool : String, _args : JSON::Any) do
+      # Valid base64, but "hello" is no image. A claim about a payload is not
+      # the payload.
+      server.reply(id, %({"content": [{"type": "image", "mimeType": "image/png", "data": "aGVsbG8="}]}))
+    end
+
+    result = server.connected.call_tool("echo", JSON.parse("{}"))
+
+    result.media.should be_empty
+    result.text.should contain("image/png")
+    result.text.should contain("not shown")
+  end
+
+  it "caps how many images one call may hand back, and says how many it dropped" do
+    png = "iVBORw0KGgo="
+    blocks = Array.new(6) { %({"type": "image", "mimeType": "image/png", "data": "#{png}"}) }
+
+    server = FakeServer.new
+    server.on_call = ->(id : Int64, _tool : String, _args : JSON::Any) do
+      server.reply(id, %({"content": [#{blocks.join(",")}]}))
+    end
+
+    result = server.connected.call_tool("echo", JSON.parse("{}"))
+
+    result.media.size.should eq(Smith::MCP::ToolResult::MAX_ATTACHMENTS)
+    result.text.should contain("2 further images were not attached")
+  end
+
+  it "names a content type it cannot carry instead of dropping it" do
+    server = FakeServer.new
+    server.on_call = ->(id : Int64, _tool : String, _args : JSON::Any) do
+      server.reply(id, %({"content": [{"type": "audio", "mimeType": "audio/wav", "data": "AAAA"}]}))
+    end
+
+    result = server.connected.call_tool("echo", JSON.parse("{}"))
+
+    # It used to return nil here, which deleted the block from the result
+    # without a word and left a successful call looking empty.
+    result.text.should contain("audio")
+    result.text.should contain("audio/wav")
+    result.text.should_not eq("(empty result)")
   end
 end

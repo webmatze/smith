@@ -620,7 +620,12 @@ module Smith
       # among the ones it wants — and after the built-ins, so a server can
       # never shadow one: the mcp__ prefix keeps them apart, and a collision
       # inside the prefix is resolved by McpTool.register_all.
-      Tools::McpTool.register_all(registry, mcp_manager, @config.bash.max_output_bytes)
+      Tools::McpTool.register_all(
+        registry,
+        mcp_manager,
+        @config.bash.max_output_bytes,
+        @config.mentions.max_media_bytes
+      )
 
       # Fired before the system prompt is built, so a hook can inject context
       # into it — the branch, the open tickets, whatever the project needs.

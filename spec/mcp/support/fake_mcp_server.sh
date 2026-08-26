@@ -14,6 +14,8 @@
 #                      exists — so a restarted process serves the retry
 #   FAKE_TOOL_NAME     name of the single exported tool (default: echo)
 #   FAKE_SILENT        accept the connection but never answer anything
+#   FAKE_IMAGE         return an image block beside the text (a bare PNG
+#                      signature — enough for the detector, no decoder runs)
 
 [ -n "$FAKE_PID_FILE" ] && printf '%s' "$$" > "$FAKE_PID_FILE"
 
@@ -45,7 +47,11 @@ while IFS= read -r line; do
         : > "$FAKE_CRASH_ONCE"
         exit 3
       fi
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"pong%s"}]}}\n' "$id" "${FAKE_LABEL:+ $FAKE_LABEL}"
+      if [ -n "$FAKE_IMAGE" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"pong%s"},{"type":"image","mimeType":"image/png","data":"iVBORw0KGgo="}]}}\n' "$id" "${FAKE_LABEL:+ $FAKE_LABEL}"
+      else
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"pong%s"}]}}\n' "$id" "${FAKE_LABEL:+ $FAKE_LABEL}"
+      fi
       ;;
   esac
 done

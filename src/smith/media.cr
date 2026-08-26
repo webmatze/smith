@@ -100,6 +100,26 @@ module Smith
     # Takes any integer so a caller with a `File.size` — a UInt64 — does not
     # have to narrow it first and risk wrapping a genuinely huge file into a
     # small number.
+    # An attachment from something that arrived already encoded — an MCP
+    # server's `image` content block, which carries base64 and a `mimeType`.
+    #
+    # The mime type is not consulted. A server *claims* a type in a field, and
+    # a claim about a file is not the file: the same rule that decides an
+    # `@`-mention and a `read_file` decides here, from the bytes. nil when the
+    # payload is not base64 at all, or not a format smith attaches.
+    def self.from_base64(data : String) : Attachment?
+      raw = begin
+        Base64.decode(data)
+      rescue Base64::Error
+        return nil
+      end
+
+      format = detect(raw)
+      return nil if format.nil?
+
+      Attachment.new(format, data, raw.size)
+    end
+
     def self.human_size(bytes : Int) : String
       return "#{bytes} B" if bytes < 1024
       kb = bytes / 1024.0
