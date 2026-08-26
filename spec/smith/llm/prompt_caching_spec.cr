@@ -213,3 +213,215 @@ describe "cache usage parsing" do
     usage.cache_read_tokens.should eq(5900)
   end
 end
+
+private class ProbeOpenRouter < Smith::LLM::OpenRouter
+  def raw_payload_for(request : Smith::LLM::Request, model : String) : String
+    build_payload(model, request)
+  end
+
+  def payload_for(request : Smith::LLM::Request, model : String) : JSON::Any
+    JSON.parse(raw_payload_for(request, model))
+  end
+
+  def parse(body : String) : Smith::LLM::Response
+    parse_response(body)
+  end
+end
+
+private def openrouter(cache : Bool = true)
+  ProbeOpenRouter.new(api_key: "k", cache: cache)
+end
+
+private def or_request(
+  messages : Array(Smith::LLM::Message) = [Smith::LLM::Message.user("hi")],
+  system : String? = "You are Smith.",
+  tools : Array(Smith::LLM::ToolSpec)? = [tool("read_file"), tool("write_file")],
+)
+  Smith::LLM::Request.new(model: "", messages: messages, system: system, tools: tools)
+end
+
+# Three turns, so there is a second-to-last user turn to roll onto.
+private def or_turns
+  [
+    Smith::LLM::Message.user("first"),
+    Smith::LLM::Message.assistant("ok"),
+    Smith::LLM::Message.user("second"),
+    Smith::LLM::Message.assistant("ok"),
+    Smith::LLM::Message.user("third"),
+  ]
+end
+
+describe "OpenRouter prompt caching" do
+  it "marks the system prompt in multipart form on an anthropic route" do
+    system = openrouter.payload_for(or_request, "anthropic/claude-sonnet-5")["messages"][0]
+
+    system["role"].as_s.should eq("system")
+    system["content"].as_a.size.should eq(1)
+    system["content"][0]["type"].as_s.should eq("text")
+    system["content"][0]["text"].as_s.should eq("You are Smith.")
+    system["content"][0]["cache_control"]["type"].as_s.should eq("ephemeral")
+  end
+
+  it "leaves the tool definitions unmarked, since OpenRouter discards those" do
+    payload = openrouter.payload_for(or_request, "anthropic/claude-sonnet-5")
+
+    payload["tools"].as_a.each { |t| markers(t).should be_empty }
+  end
+
+  it "rolls a breakpoint along the transcript, on the second-to-last user turn" do
+    messages = openrouter.payload_for(or_request(messages: or_turns), "anthropic/claude-sonnet-5")["messages"].as_a
+
+    # Index 0 is the system prompt, so the transcript starts at 1.
+    messages[3]["content"][0]["cache_control"]["type"].as_s.should eq("ephemeral")
+    messages[1]["content"].as_s.should eq("first")
+    messages[5]["content"].as_s.should eq("third")
+  end
+
+  it "stays well inside Anthropic's four breakpoints" do
+    messages = (1..10).flat_map do |i|
+      [Smith::LLM::Message.user("q#{i}"), Smith::LLM::Message.assistant("a#{i}")]
+    end
+
+    markers(openrouter.payload_for(or_request(messages: messages), "anthropic/claude-opus-5")).size.should eq(2)
+  end
+
+  it "skips the marker when the breakpoint lands on a tool result" do
+    messages = [
+      Smith::LLM::Message.user("do it"),
+      Smith::LLM::Message.assistant("ok"),
+      Smith::LLM::Message.tool_results([Smith::LLM::ContentBlock.tool_result("call_1", "done")]),
+      Smith::LLM::Message.assistant("ok"),
+      Smith::LLM::Message.user("thanks"),
+    ]
+
+    payload = openrouter.payload_for(or_request(messages: messages), "anthropic/claude-sonnet-5")
+
+    # Only the system prompt is marked; the tool turn keeps its string content.
+    markers(payload).should eq(["messages[0].content[0]"])
+    payload["messages"][3]["content"].as_s.should eq("done")
+  end
+
+  it "sends a non-anthropic route the payload it has always sent, cache flag or not" do
+    request = or_request(messages: or_turns)
+
+    with_cache = openrouter(cache: true).raw_payload_for(request, "openai/gpt-5.6")
+    without = openrouter(cache: false).raw_payload_for(request, "openai/gpt-5.6")
+
+    with_cache.should eq(without)
+    markers(JSON.parse(with_cache)).should be_empty
+  end
+
+  it "sends an anthropic route the same payload when caching is off" do
+    request = or_request(messages: or_turns)
+
+    off = openrouter(cache: false).raw_payload_for(request, "anthropic/claude-sonnet-5")
+
+    # Byte-identical to the shape every other model gets: flat string content.
+    off.should eq(openrouter(cache: false).raw_payload_for(request, "openai/gpt-5.6").sub("openai/gpt-5.6", "anthropic/claude-sonnet-5"))
+    markers(JSON.parse(off)).should be_empty
+  end
+end
+
+describe "OpenRouter cache usage parsing" do
+  # OpenRouter counts the cached tokens *inside* prompt_tokens; smith's
+  # prompt_tokens is the uncached remainder and the cost model adds the cache
+  # counters on top. Passing the number through would bill the prefix twice.
+  it "subtracts the cached tokens out of the prompt count" do
+    usage = openrouter.parse(%({
+      "id": "gen_1",
+      "model": "anthropic/claude-haiku-4.5",
+      "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+      "usage": {
+        "prompt_tokens": 4199,
+        "completion_tokens": 34,
+        "total_tokens": 4233,
+        "prompt_tokens_details": {"cached_tokens": 4187}
+      }
+    })).usage.not_nil!
+
+    usage.prompt_tokens.should eq(12)
+    usage.cache_read_tokens.should eq(4187)
+    usage.completion_tokens.should eq(34)
+    usage.billed_prompt_tokens.should eq(4199)
+  end
+
+  it "reads a cache write the same way" do
+    usage = openrouter.parse(%({
+      "id": "gen_1",
+      "model": "anthropic/claude-haiku-4.5",
+      "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+      "usage": {
+        "prompt_tokens": 4199,
+        "completion_tokens": 34,
+        "prompt_tokens_details": {"cache_write_tokens": 4187, "cached_tokens": 0}
+      }
+    })).usage.not_nil!
+
+    usage.prompt_tokens.should eq(12)
+    usage.cache_creation_tokens.should eq(4187)
+    usage.cache_read_tokens.should eq(0)
+  end
+
+  it "leaves both counters at zero when the details are missing" do
+    usage = openrouter.parse(%({
+      "id": "gen_1",
+      "model": "anthropic/claude-haiku-4.5",
+      "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+      "usage": {"prompt_tokens": 4199, "completion_tokens": 34, "total_tokens": 4233}
+    })).usage.not_nil!
+
+    usage.prompt_tokens.should eq(4199)
+    usage.cached_tokens.should eq(0)
+  end
+
+  it "does not touch a non-anthropic route, whose cached_tokens are billed differently" do
+    usage = openrouter.parse(%({
+      "id": "gen_1",
+      "model": "openai/gpt-5.6",
+      "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+      "usage": {
+        "prompt_tokens": 4199,
+        "completion_tokens": 34,
+        "total_tokens": 4233,
+        "prompt_tokens_details": {"cached_tokens": 4187}
+      }
+    })).usage.not_nil!
+
+    usage.prompt_tokens.should eq(4199)
+    usage.cached_tokens.should eq(0)
+  end
+
+  it "reads them on the streaming path too, which is the default" do
+    sse = <<-SSE
+    data: {"id":"gen_1","model":"anthropic/claude-haiku-4.5","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}
+
+    data: {"id":"gen_1","model":"anthropic/claude-haiku-4.5","choices":[],"usage":{"prompt_tokens":4199,"completion_tokens":34,"total_tokens":4233,"prompt_tokens_details":{"cached_tokens":4187}}}
+
+    data: [DONE]
+
+    SSE
+
+    usage = Smith::LLM::OpenAIStream
+      .read(IO::Memory.new(sse), "anthropic/claude-haiku-4.5", cache_usage: true) { |_| }
+      .usage.not_nil!
+
+    usage.prompt_tokens.should eq(12)
+    usage.cache_read_tokens.should eq(4187)
+  end
+
+  it "leaves the stream reading alone for everyone else" do
+    sse = <<-SSE
+    data: {"id":"c_1","model":"gpt-5.6","choices":[{"delta":{"content":"hi"}}]}
+
+    data: {"id":"c_1","model":"gpt-5.6","choices":[],"usage":{"prompt_tokens":4199,"completion_tokens":34,"total_tokens":4233,"prompt_tokens_details":{"cached_tokens":4187}}}
+
+    data: [DONE]
+
+    SSE
+
+    usage = Smith::LLM::OpenAIStream.read(IO::Memory.new(sse), "gpt-5.6") { |_| }.usage.not_nil!
+
+    usage.prompt_tokens.should eq(4199)
+    usage.cached_tokens.should eq(0)
+  end
+end
