@@ -1129,7 +1129,7 @@ module Smith
         @session_store.save(session_data)
       end
 
-      chat_puts("⏪ Rewound. Changes made by bash are not covered.")
+      chat_puts("⏪ Rewound. #{bash_note("Changes made by bash are not covered.")}")
     end
 
     # Without this, Ctrl+C kills the process outright and the turn in flight is
@@ -1205,13 +1205,39 @@ module Smith
       )
     end
 
+    # The bash limit, with somewhere to go when there is somewhere to go.
+    #
+    # `bash` is deliberately never snapshotted — what a shell command touches
+    # is not predictable, and a rewind that claims more than it delivers is
+    # worse than none (#62). Inside a git repo there is a real answer to point
+    # at, so the limit arrives with one instead of only being a limit.
+    private def bash_note(lead : String) : String
+      return lead unless git_repo?
+
+      "#{lead} `git diff` shows what a command changed since your last commit."
+    end
+
+    # `.git` is a directory in a normal clone and a *file* in a worktree or a
+    # submodule, so this asks whether it exists at all rather than whether it
+    # is a directory.
+    private def git_repo?(start_dir : String = Dir.current) : Bool
+      curr = File.expand_path(start_dir)
+
+      loop do
+        return true if File.exists?(File.join(curr, ".git"))
+        parent = File.dirname(curr)
+        return false if parent == curr
+        curr = parent
+      end
+    end
+
     private def list_checkpoints(session_id : String?)
       session = resolve_session(session_id)
       entries = checkpoint_store_for(session).list
 
       if entries.empty?
         puts "No checkpoints for session #{session.id}."
-        puts "Note: changes made by bash are never snapshotted — see the README."
+        puts bash_note("Note: changes made by bash are never snapshotted — see the README.")
         return
       end
 
@@ -1229,7 +1255,7 @@ module Smith
       end
       puts "--------------------------------------------------------------------------------"
       puts "Rewind with: smith rewind #{session.id} --to <ID>"
-      puts "Changes made by bash are not covered."
+      puts bash_note("Changes made by bash are not covered.")
     end
 
     private def run_rewind(session_id : String?)
@@ -1286,7 +1312,7 @@ module Smith
       remaining = store.list.size
       puts "   #{remaining} earlier checkpoint#{remaining == 1 ? "" : "s"} left — run rewind again to go further." if remaining > 0 && result.applied? && !@dry_run
 
-      puts "\nChanges made by bash are not covered by checkpoints."
+      puts "\n#{bash_note("Changes made by bash are not covered by checkpoints.")}"
       return if @dry_run || @files_only || !result.applied?
 
       if index = rewind_cut(result, session.messages)

@@ -1105,7 +1105,9 @@ That is deliberately the `--yes` case: an unattended run is the one with nobody 
 
 #### `bash` is not covered
 
-**Changes made by `bash` are never snapshotted.** What a shell command touches is not predictable, and a rewind that claims more than it delivers is worse than none, so the limit is stated wherever the feature appears rather than hidden. Snapshotting a git tree before each shell call would cover it, but only inside a git repo and only for tracked files — a later step, not this one.
+**Changes made by `bash` are never snapshotted.** What a shell command touches is not predictable, and a rewind that claims more than it delivers is worse than none, so the limit is stated wherever the feature appears rather than hidden — and inside a git repo it comes with `git diff`, which shows what a command changed since your last commit.
+
+Snapshotting a git tree before each shell call was measured and rejected: it restores the contents of *tracked* files, but a file `bash` deleted without git knowing it does not come back, and one `bash` created stays behind. What it would uniquely add — undoing uncommitted work a command mangled — is narrow enough not to be worth a rewind that holds two different promises at once.
 
 #### Changes made outside smith
 
