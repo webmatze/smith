@@ -206,6 +206,60 @@ describe Smith::Tools::McpTool do
     end
   end
 
+  it "attaches an image the server returned, and warns about it too" do
+    with_manager(spec_for("fs", {"FAKE_IMAGE" => "1"})) do |manager, _warnings|
+      registry = Smith::Tools::Registry.new
+      Smith::Tools::McpTool.register_all(registry, manager)
+
+      text, media = registry.get("mcp__fs__echo").not_nil!
+        .run_with_media(JSON.parse("{}")).not_nil!
+
+      media.size.should eq(1)
+      media.first.type.image?.should be_true
+      media.first.media_type.should eq("image/png")
+      # Named after the server and tool it came from, so a renderer and the
+      # session store have something to print.
+      media.first.source.should eq("fs/echo")
+
+      text.should contain("pong")
+      # The warning is about the whole result. An image that arrives beside it
+      # can carry instructions just as text can, so it is named in the same
+      # sentence rather than travelling unannounced.
+      text.should contain("the attached image included")
+      text.should_not contain("iVBORw0KGgo=")
+    end
+  end
+
+  it "refuses an image over the media limit instead of shrinking it" do
+    with_manager(spec_for("fs", {"FAKE_IMAGE" => "1"})) do |manager, _warnings|
+      registry = Smith::Tools::Registry.new
+      Smith::Tools::McpTool.register_all(registry, manager, max_media_bytes: 4)
+
+      text, media = registry.get("mcp__fs__echo").not_nil!
+        .run_with_media(JSON.parse("{}")).not_nil!
+
+      media.should be_empty
+      text.should contain("was not attached")
+      text.should contain("[media] max_bytes")
+    end
+  end
+
+  it "carries the image through the registry as a sibling of the result" do
+    with_manager(spec_for("fs", {"FAKE_IMAGE" => "1"})) do |manager, _warnings|
+      registry = Smith::Tools::Registry.new
+      Smith::Tools::McpTool.register_all(registry, manager)
+
+      blocks = registry.execute_calls([
+        Smith::Tools::CallRequest.new("c1", "mcp__fs__echo", JSON.parse("{}")),
+      ])
+
+      blocks.size.should eq(2)
+      blocks[0].type.tool_result?.should be_true
+      blocks[1].type.image?.should be_true
+      blocks[1].tool_call_id.should eq("c1")
+    end
+  end
+
   it "reports a dead server as a tool error rather than raising" do
     with_manager(spec_for("gone", {"FAKE_CRASH_ON_CALL" => "1"})) do |manager, _warnings|
       registry = Smith::Tools::Registry.new
