@@ -44,6 +44,12 @@ module Smith::LLM
       true
     end
 
+    # A tool_result's content may be an array of blocks, images among them —
+    # which is what lets `read_file` hand back a screenshot.
+    def supports_tool_result_media? : Bool
+      true
+    end
+
     def complete(request : Request) : Response
       model_to_use = request.model.empty? ? @default_model : request.model
       payload = build_payload(model_to_use, request)
@@ -289,11 +295,43 @@ module Smith::LLM
           json.field "content" do
             json.array do
               results = msg.content.select(&.type.tool_result?)
+
+              # Attachments travel as siblings of the result they belong to
+              # and are folded back in here, by call id. This is the only
+              # place that knows about the nesting.
+              media = msg.content.select { |b| b.media? && b.data }
+                .group_by { |b| b.tool_call_id }
+
               results.each_with_index do |b, index|
+                attached = media[b.tool_call_id]?
+
                 json.object do
                   json.field "type", "tool_result"
                   json.field "tool_use_id", b.tool_call_id
-                  json.field "content", b.text || ""
+                  json.field "content" do
+                    if attached
+                      json.array do
+                        json.object do
+                          json.field "type", "text"
+                          json.field "text", b.text || ""
+                        end
+
+                        attached.each do |m|
+                          json.object do
+                            json.field "type", m.type.image? ? "image" : "document"
+                            json.field "source" do
+                              base64_source(json, m)
+                            end
+                          end
+                        end
+                      end
+                    else
+                      # The string form, byte for byte as before. Reshaping a
+                      # text-only result into an array would invalidate the
+                      # prompt cache of every session already running.
+                      json.scalar b.text || ""
+                    end
+                  end
                   if b.is_error
                     json.field "is_error", true
                   end

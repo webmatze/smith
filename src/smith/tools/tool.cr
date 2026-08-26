@@ -18,6 +18,18 @@ module Smith::Tools
     abstract def parameters : JSON::Any
     abstract def run(args : JSON::Any) : String
 
+    # The text result plus the blocks that travel beside it — an image or a
+    # PDF a call produced, rather than described.
+    #
+    # nil, the default, means this tool only ever answers in text, which is
+    # true of every tool but `read_file`. Returning the pair rather than
+    # keeping the blocks on the instance is deliberate: a ParallelTool is
+    # shared between fibers, and state on it would belong to whichever call
+    # wrote last.
+    def run_with_media(args : JSON::Any) : Tuple(String, Array(Smith::LLM::ContentBlock))?
+      nil
+    end
+
     def spec : Smith::LLM::ToolSpec
       Smith::LLM::ToolSpec.new(
         name: name,

@@ -65,6 +65,15 @@ module Smith::LLM
       false
     end
 
+    # Whether an attachment may travel inside a *tool result*, which is a
+    # narrower question than `supports_images?` and deliberately its own.
+    # The OpenAI shape takes an image in a user message but has nowhere to put
+    # one under `role: "tool"`, and quietly conflating the two would drop a
+    # picture the model was told it had. Only Anthropic says yes today.
+    def supports_tool_result_media? : Bool
+      false
+    end
+
     # Streaming entry point. The default does no streaming at all — it runs
     # complete() and hands the text over in one piece.
     #

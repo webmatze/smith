@@ -610,7 +610,8 @@ module Smith
         max_output_bytes: bash.max_output_bytes,
         web_allow_private: web.allow_private,
         web_max_bytes: web.max_bytes,
-        search: Web::SearchProvider.build(web.search_provider, searxng_host: web.searxng_host)
+        search: Web::SearchProvider.build(web.search_provider, searxng_host: web.searxng_host),
+        max_media_bytes: @config.mentions.max_media_bytes
       )
       registry.hooks = hooks
       registry.checkpoints = @checkpoints
@@ -641,6 +642,7 @@ module Smith
       # Building a provider needs API keys and the config chain, which belong
       # here rather than duplicated in the supervisor.
       supervisor.provider_factory = ->(name : String) { build_provider(name) }
+      supervisor.max_media_bytes = @config.mentions.max_media_bytes
 
       # max_children = 0 means "no subagents at all", so the tool is not even
       # advertised — offering one that always refuses just wastes turns.

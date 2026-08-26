@@ -5,6 +5,7 @@ require "./todo_write"
 require "../llm/types"
 require "../hooks"
 require "../checkpoints"
+require "../media"
 
 module Smith::Tools
   struct CallRequest
@@ -21,11 +22,40 @@ module Smith::Tools
     getter content : String
     getter is_error : Bool
 
-    def initialize(@id : String, @content : String, @is_error : Bool = false)
+    # An image or PDF the call produced. Empty for every error path and for
+    # every tool that answers in text, which is nearly all of them.
+    getter media : Array(Smith::LLM::ContentBlock)
+
+    def initialize(
+      @id : String,
+      @content : String,
+      @is_error : Bool = false,
+      @media : Array(Smith::LLM::ContentBlock) = Array(Smith::LLM::ContentBlock).new,
+    )
     end
 
-    def to_content_block : Smith::LLM::ContentBlock
-      Smith::LLM::ContentBlock.tool_result(@id, @content, @is_error)
+    # The tool_result, then whatever travelled with it — flat, as siblings in
+    # the same message, each stamped with the call's id.
+    #
+    # Nesting them inside the tool_result would match Anthropic's wire shape,
+    # but every part of smith that walks a message — the session store that
+    # externalizes attachment bytes, the token estimate, the renderers — reads
+    # top-level blocks. Flat keeps all of that working untouched, and the one
+    # provider that wants them nested folds them back at serialization time.
+    def to_content_blocks : Array(Smith::LLM::ContentBlock)
+      blocks = [Smith::LLM::ContentBlock.tool_result(@id, @content, @is_error)]
+
+      @media.each do |block|
+        blocks << Smith::LLM::ContentBlock.new(
+          block.type,
+          tool_call_id: @id,
+          media_type: block.media_type,
+          data: block.data,
+          source: block.source
+        )
+      end
+
+      blocks
     end
   end
 
@@ -86,12 +116,12 @@ module Smith::Tools
         if chunk.first_parallel?
           # Concurrent fiber execution
           chunk_results = execute_parallel_chunk(chunk.calls)
-          results.concat(chunk_results.map(&.to_content_block))
+          chunk_results.each { |res| results.concat(res.to_content_blocks) }
         else
           # Serial execution
           chunk.calls.each do |call|
             res = execute_single_call(call)
-            results << res.to_content_block
+            results.concat(res.to_content_blocks)
           end
         end
       end
@@ -190,8 +220,10 @@ module Smith::Tools
       # that actually runs rather than the one the model asked for.
       checkpoint = @checkpoints.try(&.snapshot(call.name, call.args))
 
-      output = begin
-        tool.run(call.args)
+      # A tool that can only answer in text says so by leaving
+      # `run_with_media` at its default, and takes the path it always took.
+      output, media = begin
+        tool.run_with_media(call.args) || {tool.run(call.args), Array(Smith::LLM::ContentBlock).new}
       rescue ex : Exception
         return CallResult.new(call.id, "Tool execution failed: #{ex.message}", is_error: true)
       end
@@ -207,7 +239,7 @@ module Smith::Tools
         output = "#{output}\n\n#{context}"
       end
 
-      CallResult.new(call.id, output, is_error: false)
+      CallResult.new(call.id, output, is_error: false, media: media)
     end
 
     private def tool_payload(call : CallRequest, result : String? = nil) : JSON::Any
@@ -235,6 +267,7 @@ module Smith::Tools
       web_allow_private : Bool = false,
       web_max_bytes : Int32 = WebFetch::DEFAULT_MAX,
       search : Smith::Web::SearchProvider? = nil,
+      max_media_bytes : Int32 = Smith::Media::DEFAULT_MAX_BYTES,
     ) : Registry
       registry = Registry.new(approver)
 
@@ -242,7 +275,7 @@ module Smith::Tools
       registry.register(bash)
       registry.register(BashOutput.new(bash.jobs))
       registry.register(BashKill.new(bash.jobs))
-      registry.register(ReadFile.new)
+      registry.register(ReadFile.new(max_media_bytes: max_media_bytes))
       registry.register(WriteFile.new)
       registry.register(EditFile.new)
       registry.register(Grep.new)

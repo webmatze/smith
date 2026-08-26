@@ -19,7 +19,7 @@ It is inspired by and built according to the policy-free agent loop principles o
   - Discovers custom agents in `.smith/agents/<name>.md` and `~/.smith/agents/`, sharing the frontmatter parser with skills.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
 - **↩️ Auto-Continue at the output limit**: A response cut off mid-sentence is continued automatically; a tool call cut off mid-JSON is discarded rather than half-executed.
-- **🖼️ Image & PDF Input**: `@screenshot.png` attaches the image itself rather than its bytes as text — format decided from the magic bytes, not the extension, capped and refused rather than silently scaled. PDFs go to Anthropic natively; elsewhere the model is told to extract the text with a real tool.
+- **🖼️ Image & PDF Input**: `@screenshot.png` attaches the image itself rather than its bytes as text, and `read_file` on one hands the model the picture instead of a refusal — format decided from the magic bytes, not the extension, capped and refused rather than silently scaled. PDFs go to Anthropic natively; elsewhere the model is told to extract the text with a real tool.
 - **🌐 Web Tools (`Smith::Web`)**: `web_fetch` turns a page into markdown, `web_search` sits behind a provider adapter. Both mark their output as untrusted, and fetching is guarded against SSRF **after** DNS resolution.
 - **🔌 MCP Client (`Smith::MCP`)**: stdio servers from `mcp.json` are started with the session and their tools registered as `mcp__<server>__<tool>` — through the same approval gate as everything else, with their output marked untrusted. Concurrent calls are matched by request id, a crashed server is restarted once, and nothing is left behind as an orphan.
 - **⏱️ Background Commands (`Smith::Tools::BashJobs`)**: Dev servers and log tails run in the background, and a foreground command that outruns its timeout is moved there rather than killed — so its output is never thrown away.
@@ -318,7 +318,7 @@ allow_outside   = false
 Three things worth knowing:
 
 - **A mention that leaves the project is refused** unless `allow_outside` is set. A prompt does not always come from you — a skill body could otherwise pull in `@~/.ssh/id_rsa`.
-- **Binary files are not embedded** — except images and PDFs, which are attached rather than inlined; see [Images & PDFs](#images--pdfs). For everything else, detection is a null byte in the first kilobyte, the same test `grep` uses.
+- **Binary files are not embedded** — except images and PDFs, which are attached rather than inlined; see [Images & PDFs](#images--pdfs). For everything else, detection is a null byte in the first kilobyte, the same test `grep` uses. `read_file` draws the same line.
 - **Skills expand first, mentions second**, so a skill body that references `@files` resolves too. Exactly one level: what a mention pulls in is never scanned again, so a file cannot drag itself back in through a skill.
 
 ### Images & PDFs
@@ -330,7 +330,15 @@ A screenshot of the failure says in one attachment what a paragraph of descripti
 🖼️  shot.png (image/png, 412 KB)
 ```
 
-**What a file is, is decided from its bytes.** A screenshot saved as `notes.txt` is attached as the PNG it is; a text file named `screenshot.png` is inlined as the text it is. The extension is a claim, and acting on it is the bug this avoids.
+**`read_file` reaches one too.** The model does not have to wait for you to attach a picture — it can fetch one itself, and gets the image rather than a refusal:
+
+```
+> is the button aligned in build/preview.png?
+🔧 read_file(path: build/preview.png)
+   Attached 'build/preview.png' as image/png (240 KB).
+```
+
+**What a file is, is decided from its bytes.** A screenshot saved as `notes.txt` is attached as the PNG it is; a text file named `screenshot.png` is inlined as the text it is. The extension is a claim, and acting on it is the bug this avoids. `read_file` uses the same test and the same `[media] max_bytes` ceiling — how a file entered the context says nothing about what it costs once it is there.
 
 | Format | Sent as |
 |---|---|
@@ -347,6 +355,7 @@ Four things worth knowing:
 
 - **Nothing is scaled down.** Over the limit is a refusal that names the size, not a quiet re-encode: smith has no image library, and a half-good one is worse than an honest no.
 - **A PDF only goes to Anthropic.** It is the one provider that reads one natively. Elsewhere the model is told the file was attached and to extract its text with `pdftotext` via `bash` — a message it can act on, rather than a provider error it cannot.
+- **An image *from a tool* is Anthropic-only as well.** The OpenAI shape takes a picture in a user message but has nowhere to put one in a tool result, so there `read_file` on a screenshot comes back as a line saying so. `@shot.png` still works on every provider that takes an image at all.
 - **Attachments are the first thing compaction drops.** An image is worth around 1600 tokens and is resent on every turn until it goes. Once its turn is three turns old it becomes a line naming the file, so you can mention it again if it is still needed.
 - **The bytes never enter session.json.** They are stored once, content-addressed, under `~/.smith/sessions/<id>/media/`, and the transcript keeps a reference. Base64 appears in neither the session file, the raw transcript log, nor the `--json` stream.
 
@@ -1241,7 +1250,7 @@ src/
     │   ├── bash_output.cr   # bash_output & bash_kill tools
     │   ├── web_fetch.cr     # URL fetching, redirect and content-type handling
     │   ├── web_search.cr    # Search tool over a provider adapter
-    │   ├── read_file.cr     # File reading tool
+    │   ├── read_file.cr     # File reading tool, text or attached image/PDF
     │   ├── write_file.cr    # File writing tool
     │   ├── edit_file.cr     # Precise string replacement tool
     │   ├── grep.cr          # Regex search tool
