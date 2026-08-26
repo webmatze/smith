@@ -1,5 +1,6 @@
 require "json"
 require "./types"
+require "./anthropic_caching"
 
 module Smith::LLM
   # Server-Sent Events framing: blank-line separated records whose payload
@@ -39,7 +40,11 @@ module Smith::LLM
       property arguments : String = ""
     end
 
-    def self.read(io : IO, default_model : String, &on_delta : String -> Nil) : Response
+    # *cache_usage* switches the usage frame to the reading that carries
+    # Anthropic cache counters. Off by default: OpenAI reports a
+    # `cached_tokens` of its own under the same key, billed at its own rate,
+    # and treating it as an Anthropic cache read would misprice it.
+    def self.read(io : IO, default_model : String, cache_usage : Bool = false, &on_delta : String -> Nil) : Response
       text = String::Builder.new
       tool_calls = Hash(Int32, PartialToolCall).new
       id = ""
@@ -60,10 +65,14 @@ module Smith::LLM
 
         if u = chunk["usage"]?
           unless u.raw.nil?
-            prompt = u["prompt_tokens"]?.try(&.as_i?) || 0
-            completion = u["completion_tokens"]?.try(&.as_i?) || 0
-            total = u["total_tokens"]?.try(&.as_i?) || (prompt + completion)
-            usage = Usage.new(prompt, completion, total)
+            if cache_usage
+              usage = AnthropicCaching.usage(u)
+            else
+              prompt = u["prompt_tokens"]?.try(&.as_i?) || 0
+              completion = u["completion_tokens"]?.try(&.as_i?) || 0
+              total = u["total_tokens"]?.try(&.as_i?) || (prompt + completion)
+              usage = Usage.new(prompt, completion, total)
+            end
           end
         end
 

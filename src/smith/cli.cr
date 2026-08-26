@@ -353,7 +353,7 @@ module Smith
 
       case name
       when "openrouter"
-        LLM::OpenRouter.new(api_key: require_api_key("OPENROUTER_API_KEY"), default_model: default_m, timeouts: timeouts)
+        LLM::OpenRouter.new(api_key: require_api_key("OPENROUTER_API_KEY"), default_model: default_m, timeouts: timeouts, cache: @config.cache_for(name))
       when "ollama"
         LLM::Ollama.new(host: @config.ollama_host, default_model: default_m, timeouts: timeouts)
       when "anthropic"

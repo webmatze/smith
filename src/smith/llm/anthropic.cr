@@ -4,9 +4,12 @@ require "./provider"
 require "./types"
 require "./retry"
 require "./anthropic_stream"
+require "./anthropic_caching"
 
 module Smith::LLM
   class Anthropic < Provider
+    include AnthropicCaching
+
     DEFAULT_ENDPOINT   = "https://api.anthropic.com/v1/messages"
     DEFAULT_MODEL      = "claude-sonnet-5"
     DEFAULT_MAX_TOKENS = 4096
@@ -177,32 +180,6 @@ module Smith::LLM
           end
         end
       end
-    end
-
-    private def cache_control(json : JSON::Builder) : Nil
-      json.field "cache_control" do
-        json.object { json.field "type", "ephemeral" }
-      end
-    end
-
-    # The index of the message to mark, or nil when there is nothing worth
-    # marking yet.
-    #
-    # The *second-to-last* user turn, not the last: the newest one changes with
-    # the next request, so a breakpoint there would write a cache nothing ever
-    # reads. Tool results count — Anthropic receives them as user turns.
-    #
-    # Note this is invalidated whenever Context.compact rewrites the prefix.
-    # That is unavoidable and correct; the system prompt and tools stay cached
-    # either way.
-    private def transcript_breakpoint(messages : Array(Message)) : Int32?
-      user_turns = Array(Int32).new
-      messages.each_with_index do |msg, index|
-        user_turns << index if msg.role.user? || msg.role.tool?
-      end
-      return nil if user_turns.size < 2
-
-      user_turns[-2]
     end
 
     private def serialize_message(json : JSON::Builder, msg : Message, cache : Bool = false)

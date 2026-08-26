@@ -25,7 +25,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **⏪ Checkpoints & Rewind (`Smith::Checkpoints`)**: Every `write_file` and `edit_file` is snapshotted first, content-addressed, so a run can be taken back — files and transcript — without having committed anything.
 - **🎭 Custom Agents (`Smith::Agents`)**: Specialists defined in `.smith/agents/<name>.md` — own system prompt, tools, model and provider. Delegate to one via `agent_type`, or run the main thread as one with `--agent`.
 - **🔐 Permission Rules (`Smith::Tools::RuleSet`)**: `allow` / `ask` / `deny` rules with path scoping and wildcards. Deny wins over everything, including `--yes`, and reaches read-only tools too.
-- **💰 Prompt Caching (Anthropic)**: The system prompt, the tool definitions and a rolling transcript prefix carry cache breakpoints, so a long session stops paying full price for the same prefix on every turn.
+- **💰 Prompt Caching (Anthropic)**: The system prompt, the tool definitions and a rolling transcript prefix carry cache breakpoints, so a long session stops paying full price for the same prefix on every turn — directly, or through OpenRouter on an `anthropic/` model.
 - **🪝 Hooks (`Smith::Hooks`)**: Five extension points — `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `stop` — that run configured shell commands and can inject context, rewrite tool arguments, block a call, or keep the loop going until the tests pass.
 - **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
@@ -353,7 +353,7 @@ Two details worth knowing:
 
 Every turn resends the whole transcript, so a 50-turn session pays for the system prompt and all tool definitions 50 times. For Anthropic, smith marks that prefix as cacheable — reads cost 0.1x the normal input price.
 
-Three breakpoints:
+On the direct route, three breakpoints:
 
 1. **the system prompt**, which includes the skills catalog and `SMITH.md`
 2. **the tool definitions**, marked on the last entry so everything before it is covered
@@ -385,7 +385,25 @@ cache = false
 
 Two caveats. [Context compaction](#context-compaction) rewrites the transcript prefix and therefore invalidates that breakpoint; the system prompt and tools stay cached regardless. And the tool order must stay stable for the tools breakpoint to hit — `Registry#specs` relies on Crystal's `Hash` preserving insertion order, so do not sort it.
 
-Only Anthropic. OpenRouter accepts the same syntax when it routes to an Anthropic model, but that is deliberately left for later; `ollama`, `openai` and `openrouter` build byte-identical requests to before.
+#### Through OpenRouter, with two breakpoints instead of three
+
+OpenRouter passes `cache_control` on to Anthropic, so a model id starting with `anthropic/` gets the same treatment:
+
+```toml
+[providers.openrouter]
+model = "anthropic/claude-sonnet-5"
+cache = true    # the default; only ever acts on an anthropic/ model
+```
+
+The prefix is the whole test — no metadata lookup. Any other model (`openai/*`, `google/*`, ...) is sent the payload it has always been sent, byte for byte, whatever `cache` says.
+
+Two of the three breakpoints, not three. **The tool definitions carry no marker**, because OpenRouter discards one there without a word — measured at ~4000 tokens of tool definitions: `cache_write_tokens: 0`, both directly on the tool and nested inside `function`. They are cached anyway: Anthropic builds its prefix in the order tools → system → messages, so the marker on the system prompt covers them. The rolling transcript breakpoint is set on a user turn only; when it would land on a tool result it is dropped, since the array form of a `role: "tool"` message is untested on this route and a wrong guess there fails every request of the session.
+
+One consequence of the pass-through: a marker on a *short* block is discarded rather than honoured, so the rolling breakpoint often does nothing. The system prompt is the one that pays, and with the skills catalog and `SMITH.md` in it, it clears the minimum comfortably.
+
+Usage comes back under OpenAI's names (`prompt_tokens_details.cache_write_tokens` / `.cached_tokens`) and, unlike Anthropic, counts the cached tokens *inside* `prompt_tokens`. smith subtracts them back out, so the usage line and the cost stay comparable to the direct route rather than counting the same prefix twice. Missing fields stay `0`; nothing is estimated.
+
+`ollama` and `openai` build byte-identical requests to before.
 
 ### Approval Mode
 

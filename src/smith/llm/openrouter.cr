@@ -4,20 +4,34 @@ require "./provider"
 require "./types"
 require "./retry"
 require "./sse"
+require "./anthropic_caching"
 
 module Smith::LLM
   class OpenRouter < Provider
+    include AnthropicCaching
+
     DEFAULT_SITE_URL = "https://github.com/webmatze/smith"
     DEFAULT_APP_NAME = "smith"
     DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
+    # OpenRouter model ids for Anthropic models all carry this prefix, and it
+    # is the whole capability test — no metadata call, no model table.
+    ANTHROPIC_PREFIX = "anthropic/"
+
     getter api_key : String
     getter default_model : String
+
+    # Prompt caching, and only reachable on an `anthropic/` route. On by
+    # default like the direct Anthropic provider: on any other route the
+    # markers are a verified no-op — OpenRouter answers 200 and ignores them —
+    # so leaving it on costs nothing.
+    getter? cache : Bool
 
     def initialize(
       @api_key : String = ENV.fetch("OPENROUTER_API_KEY", ""),
       @default_model : String = "qwen/qwen3.8-max",
       @timeouts : Timeouts = Timeouts.default,
+      @cache : Bool = true,
     )
       if @api_key.empty?
         raise ArgumentError.new("OpenRouter API key is missing. Set OPENROUTER_API_KEY environment variable.")
@@ -47,7 +61,7 @@ module Smith::LLM
       Retry.with_retry do
         begin
           stream_request(URI.parse(DEFAULT_ENDPOINT), stream_headers, payload, "OpenRouter") do |body_io|
-            OpenAIStream.read(body_io, @default_model) do |chunk|
+            OpenAIStream.read(body_io, @default_model, cache_usage: cache_route?(model_to_use)) do |chunk|
               emitted = true
               on_delta.call(chunk)
             end
@@ -70,7 +84,21 @@ module Smith::LLM
       }
     end
 
+    # Whether this request goes somewhere the cache markers mean anything.
+    # OpenRouter hands them to Anthropic and drops them everywhere else, so a
+    # false positive costs nothing — but a marker also forces `content` from a
+    # string into an array, and there is no reason to reshape a payload that
+    # nothing will read.
+    private def cache_route?(model : String) : Bool
+      @cache && model.starts_with?(ANTHROPIC_PREFIX)
+    end
+
     private def build_payload(model : String, request : Request, streaming : Bool = false) : String
+      caching = cache_route?(model)
+      # Only computed to be compared against, so an off route never enters the
+      # branch at all and the payload stays byte-identical to before caching.
+      breakpoint = caching ? transcript_breakpoint(request.messages) : nil
+
       String.build do |str|
         JSON.build(str) do |json|
           json.object do
@@ -97,13 +125,26 @@ module Smith::LLM
                 if sys = request.system
                   json.object do
                     json.field "role", "system"
-                    json.field "content", sys
+                    if caching
+                      # The one breakpoint that reliably pays. Anthropic caches
+                      # the prefix in the order tools → system → messages, so a
+                      # marker here covers the tool definitions as well — which
+                      # is just as well, because a marker *on* a tool
+                      # definition is dropped by OpenRouter without a word.
+                      json.field "content" do
+                        json.array do
+                          text_part(json, sys, cache: true)
+                        end
+                      end
+                    else
+                      json.field "content", sys
+                    end
                   end
                 end
 
                 # Messages translation
-                request.messages.each do |msg|
-                  serialize_message(json, msg)
+                request.messages.each_with_index do |msg, index|
+                  serialize_message(json, msg, cache: index == breakpoint)
                 end
               end
             end
@@ -134,13 +175,19 @@ module Smith::LLM
       end
     end
 
-    private def serialize_message(json : JSON::Builder, msg : Message)
+    private def serialize_message(json : JSON::Builder, msg : Message, cache : Bool = false)
       case msg.role
       when Role::User
         text_content = msg.content.select { |b| b.type.text? }.map(&.text).compact.join("\n")
         json.object do
           json.field "role", "user"
-          json.field "content", text_content
+          if cache
+            json.field "content" do
+              json.array { text_part(json, text_content, cache: true) }
+            end
+          else
+            json.field "content", text_content
+          end
         end
       when Role::Assistant
         tool_uses = msg.content.select { |b| b.type.tool_use? }
@@ -175,6 +222,12 @@ module Smith::LLM
           end
         end
       when Role::Tool
+        # No marker here even when the breakpoint lands on a tool turn. A
+        # `role: "tool"` message with an array `content` is not a shape this
+        # route has been tried with, and getting it wrong fails every request
+        # of the session, not one. What is given up is small: the rolling
+        # breakpoint only pays on a large turn, and the triage measured a
+        # marker on a short block as discarded anyway.
         msg.content.each do |block|
           next unless block.type.tool_result?
           json.object do
@@ -185,6 +238,16 @@ module Smith::LLM
         end
       else
         # System messages handled separately
+      end
+    end
+
+    # An OpenAI content part. Only reached on a caching route — everywhere
+    # else `content` stays the plain string it has always been.
+    private def text_part(json : JSON::Builder, text : String, cache : Bool) : Nil
+      json.object do
+        json.field "type", "text"
+        json.field "text", text
+        cache_control(json) if cache
       end
     end
 
@@ -246,10 +309,15 @@ module Smith::LLM
 
       usage = nil
       if u = json["usage"]?
-        prompt_tokens = u["prompt_tokens"]?.try(&.as_i) || 0
-        completion_tokens = u["completion_tokens"]?.try(&.as_i) || 0
-        total_tokens = u["total_tokens"]?.try(&.as_i) || 0
-        usage = Usage.new(prompt_tokens, completion_tokens, total_tokens)
+        usage = if cache_route?(model)
+                  AnthropicCaching.usage(u)
+                else
+                  Usage.new(
+                    u["prompt_tokens"]?.try(&.as_i) || 0,
+                    u["completion_tokens"]?.try(&.as_i) || 0,
+                    u["total_tokens"]?.try(&.as_i) || 0
+                  )
+                end
       end
 
       Response.new(
