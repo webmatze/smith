@@ -1,3 +1,4 @@
+require "./file_kind"
 require "./tools/permissions"
 
 module Smith
@@ -13,9 +14,6 @@ module Smith
   module Mentions
     DEFAULT_MAX_LINES       = 2000
     DEFAULT_MAX_TOTAL_BYTES = 256 * 1024
-
-    # How much of a file to look at when deciding whether it is text.
-    SNIFF_BYTES = 1024
 
     # `@` only counts at the start of a word, which is what keeps
     # foo@bar.com from being read as a mention. Either a quoted path — for
@@ -108,7 +106,7 @@ module Smith
           next
         end
 
-        if binary?(resolved)
+        if FileKind.binary?(resolved)
           skipped << Skip.new(written, "looks binary")
           next
         end
@@ -153,17 +151,6 @@ module Smith
 
     private def self.inside?(path : String, root : String) : Bool
       path == root || path.starts_with?("#{root}#{File::SEPARATOR}")
-    end
-
-    # Null bytes in the first block. Crude, and the same test `grep` uses.
-    private def self.binary?(path : String) : Bool
-      File.open(path) do |file|
-        buffer = Bytes.new(SNIFF_BYTES)
-        read = file.read(buffer)
-        buffer[0, read].includes?(0_u8)
-      end
-    rescue IO::Error
-      true
     end
 
     private def self.read_text(path : String, max_lines : Int32) : {String, Int32, Bool}
