@@ -2,6 +2,7 @@ require "http/client"
 require "json"
 require "./provider"
 require "./types"
+require "./openai_content"
 require "./retry"
 require "./sse"
 require "./anthropic_caching"
@@ -179,11 +180,21 @@ module Smith::LLM
       case msg.role
       when Role::User
         text_content = msg.content.select { |b| b.type.text? }.map(&.text).compact.join("\n")
+        images = OpenAIContent.images(msg)
+
         json.object do
           json.field "role", "user"
-          if cache
+          if cache || !images.empty?
             json.field "content" do
-              json.array { text_part(json, text_content, cache: true) }
+              json.array do
+                # The marker rides on the text part. A turn that is nothing
+                # but an image gets none: a marker belongs on the last block
+                # of the prefix being cached, and putting it on an image part
+                # is a shape this route has not been tried with — the same
+                # reason tool results are left unmarked below.
+                text_part(json, text_content, cache: cache) unless text_content.empty? && !images.empty?
+                images.each { |image| OpenAIContent.image_part(json, image) }
+              end
             end
           else
             json.field "content", text_content

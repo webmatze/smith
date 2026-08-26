@@ -198,4 +198,77 @@ describe Smith::Mentions do
       end
     end
   end
+
+  describe "attachments" do
+    # A real PNG header, then arbitrary bytes. Nothing decodes it; the
+    # signature is the whole point.
+    png = Bytes[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01]
+
+    it "attaches an image as a block instead of inlining it as text" do
+      with_project do |dir|
+        File.open(File.join(dir, "shot.png"), "w") { |file| file.write(png) }
+
+        result = expand("what is wrong in @shot.png?", dir)
+
+        result.text.should eq("what is wrong in @shot.png?")
+        result.attachments.size.should eq(1)
+        result.attachments[0].type.should eq(Smith::LLM::ContentBlock::BlockType::Image)
+        result.attachments[0].media_type.should eq("image/png")
+        result.attachments[0].source.should eq("shot.png")
+        result.files[0].media_type.should eq("image/png")
+        result.files[0].bytes.should eq(png.size)
+      end
+    end
+
+    it "goes by the signature, not the extension, in both directions" do
+      with_project do |dir|
+        File.open(File.join(dir, "shot.txt"), "w") { |file| file.write(png) }
+        File.write(File.join(dir, "notes.png"), "actually just words")
+
+        result = expand("see @shot.txt and @notes.png", dir)
+
+        result.attachments.size.should eq(1)
+        result.attachments[0].source.should eq("shot.txt")
+        # The misnamed text file went down the text path and was inlined.
+        result.text.should contain("actually just words")
+      end
+    end
+
+    it "attaches a PDF as a document block" do
+      with_project do |dir|
+        File.open(File.join(dir, "paper.pdf"), "w") { |file| file.write(Bytes[0x25, 0x50, 0x44, 0x46, 0x2D]) }
+
+        result = expand("summarise @paper.pdf", dir)
+
+        result.attachments[0].type.should eq(Smith::LLM::ContentBlock::BlockType::Document)
+        result.attachments[0].media_type.should eq("application/pdf")
+      end
+    end
+
+    it "refuses a file over the limit rather than shrinking or truncating it" do
+      with_project do |dir|
+        big = Bytes.new(2048)
+        png.each_with_index { |byte, index| big[index] = byte }
+        File.open(File.join(dir, "big.png"), "w") { |file| file.write(big) }
+
+        result = expand("look at @big.png", dir, max_media_bytes: 1024)
+
+        result.attachments.should be_empty
+        result.skipped.size.should eq(1)
+        result.skipped[0].reason.should contain("over the")
+        result.skipped[0].reason.should contain("[media] max_bytes")
+      end
+    end
+
+    it "still skips a binary it does not recognise, saying why" do
+      with_project do |dir|
+        File.open(File.join(dir, "a.out"), "w") { |file| file.write(Bytes[0x00, 0x01, 0x02, 0x03]) }
+
+        result = expand("run @a.out", dir)
+
+        result.attachments.should be_empty
+        result.skipped[0].reason.should eq("looks binary")
+      end
+    end
+  end
 end

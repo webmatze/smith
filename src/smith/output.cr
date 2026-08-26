@@ -2,6 +2,7 @@ require "json"
 require "./events"
 require "./pricing"
 require "./llm/types"
+require "./media"
 
 module Smith::Output
   # Turns the agent's event stream into something for a consumer to read —
@@ -129,6 +130,11 @@ module Smith::Output
         @io.puts "\n🧭 Switched to #{event.mode.to_s.downcase} mode."
       when Events::FilesMentioned
         event.files.each do |file|
+          if (media_type = file.media_type)
+            @io.puts "🖼️  #{file.path} (#{media_type}, #{Media.human_size(file.bytes || 0)})"
+            next
+          end
+
           size = file.lines.zero? ? "directory" : "#{file.lines} lines"
           size += ", truncated" if file.truncated?
           @io.puts "📎 #{file.path} (#{size})"
@@ -282,6 +288,13 @@ module Smith::Output
                   json.field "path", file.path
                   json.field "lines", file.lines
                   json.field "truncated", file.truncated?
+                  # Metadata only. The base64 exists a few objects away and
+                  # putting it in a line-delimited stream is how the stream
+                  # stops being readable by anything.
+                  if (media_type = file.media_type)
+                    json.field "media_type", media_type
+                    json.field "bytes", file.bytes
+                  end
                 end
               end
             end

@@ -6,6 +6,7 @@ require "./mode"
 require "./hooks"
 require "./subagents"
 require "./mentions"
+require "./media"
 require "./pricing"
 
 module Smith
@@ -390,7 +391,10 @@ module Smith
       Mentions::Settings.new(
         max_lines: lookup("mentions", "max_lines").try(&.as_i?) || Mentions::DEFAULT_MAX_LINES,
         max_total_bytes: lookup("mentions", "max_total_bytes").try(&.as_i?) || Mentions::DEFAULT_MAX_TOTAL_BYTES,
-        allow_outside: lookup("mentions", "allow_outside").try(&.as_bool?) || false
+        allow_outside: lookup("mentions", "allow_outside").try(&.as_bool?) || false,
+        # Under [media] rather than [mentions] because the limit is about what
+        # an attachment costs, not about how it got here.
+        max_media_bytes: lookup("media", "max_bytes").try(&.as_i?) || Media::DEFAULT_MAX_BYTES
       )
     end
 

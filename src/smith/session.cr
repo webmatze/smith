@@ -1,5 +1,6 @@
 require "json"
 require "file_utils"
+require "digest/sha256"
 require "./atomic_file"
 require "./paths"
 require "./llm/types"
@@ -192,6 +193,12 @@ module Smith::Session
       File.join(@sessions_dir, id)
     end
 
+    # Where attachment bytes live. Content-addressed, like the checkpoint
+    # blobs: the same screenshot mentioned in five turns is stored once.
+    def media_dir(id : String) : String
+      File.join(session_dir(id), "media")
+    end
+
     # `derive_name` and `check_name` exist so a rename can write a name the
     # normal path would have refused or replaced; everyday saves want both.
     def save(session : Data, derive_name : Bool = true, check_name : Bool = true) : Nil
@@ -204,6 +211,10 @@ module Smith::Session
       if check_name && (name = session.name)
         assert_available(name, session.id)
       end
+
+      # Before the JSON is built, because externalizing is what puts the
+      # `media_ref` into the block that the JSON is supposed to carry.
+      externalize_media(session)
 
       AtomicFile.write(File.join(session_dir(session.id), "session.json"), session.to_json)
 
@@ -223,7 +234,54 @@ module Smith::Session
         raise ArgumentError.new("Session '#{id}' not found at #{path}")
       end
 
-      Data.from_json(File.read(path))
+      data = Data.from_json(File.read(path))
+      restore_media(data)
+      data
+    end
+
+    # Attachment bytes go into files of their own, and the message keeps only
+    # the digest that finds them again.
+    #
+    # They cannot stay in session.json: the base64 is resent on every turn of
+    # the session anyway, and a copy in the session file — plus the second one
+    # the raw transcript log would take — turns a 400 KB screenshot into
+    # megabytes of JSON that nothing ever reads. What the JSON needs is enough
+    # to know an image was there and how to get it back.
+    private def externalize_media(session : Data) : Nil
+      dir = media_dir(session.id)
+
+      session.messages.each do |message|
+        message.content.each do |block|
+          data = block.data
+          next if data.nil?
+
+          # Not skipped when the block already has a ref: a fork inherits the
+          # transcript of another session, and its own directory has none of
+          # the files yet. Reusing the known digest is what keeps that from
+          # costing a hash of every attachment on every save.
+          digest = block.media_ref || Digest::SHA256.hexdigest(data)
+          path = File.join(dir, digest)
+          AtomicFile.write(path, data) unless File.exists?(path)
+          block.media_ref = digest
+        end
+      end
+    end
+
+    # A missing file is not fatal: the transcript still says an image was
+    # attached, and losing the bytes is better than refusing to open the
+    # session that mentions them.
+    private def restore_media(session : Data) : Nil
+      dir = media_dir(session.id)
+
+      session.messages.each do |message|
+        message.content.each do |block|
+          ref = block.media_ref
+          next if ref.nil? || !block.data.nil?
+
+          path = File.join(dir, ref)
+          block.data = File.read(path) if File.exists?(path)
+        end
+      end
     end
 
     private def legacy_path(id : String) : String

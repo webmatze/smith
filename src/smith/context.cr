@@ -33,6 +33,19 @@ module Smith
     # goes for anything that observes changing state.
     SUPERSEDABLE_TOOLS = %w[read_file grep glob]
 
+    # What an attachment is assumed to cost. Anthropic charges an image at
+    # roughly `(width x height) / 750` tokens and caps it around 1600, which is
+    # the number taken here — smith does not parse image dimensions, and
+    # guessing low is the expensive mistake. A PDF is page-count-dependent and
+    # regularly worse, so it gets its own, larger figure.
+    IMAGE_TOKENS    = 1_600
+    DOCUMENT_TOKENS = 5_000
+
+    # Replaces an attachment once its turn is over. It names the file, so the
+    # model can ask for it again rather than being left with a hole it cannot
+    # see.
+    MEDIA_MARKER = "removed to stay within the context window; mention it again to re-attach it"
+
     # Fractions of the budget: compaction acts at the trigger and compacts down
     # to the target. Expressed as fractions rather than token counts so raising
     # `max_tokens` for a wider-window model scales both.
@@ -129,7 +142,25 @@ module Smith
         (block.text.try(&.bytesize) || 0) +
           (block.tool_args.try(&.to_json.bytesize) || 0) +
           (block.tool_name.try(&.bytesize) || 0) +
-          (block.signature.try(&.bytesize) || 0)
+          (block.signature.try(&.bytesize) || 0) +
+          media_bytes(block)
+      end
+    end
+
+    # An attachment costs tokens by area, not by file size: a 40 KB PNG and a
+    # 900 KB PNG of the same screen cost the same. Counting the base64 instead
+    # would be wrong in both directions at once, so a flat allowance stands in
+    # — deliberately at the ceiling of what an image can cost, because
+    # understating the transcript is what makes compaction run too late and
+    # the request fail anyway.
+    #
+    # Returned as bytes because everything else here is bytes; the division by
+    # four happens once, at the end.
+    private def self.media_bytes(block : LLM::ContentBlock) : Int32
+      case block.type
+      when LLM::ContentBlock::BlockType::Image    then IMAGE_TOKENS * 4
+      when LLM::ContentBlock::BlockType::Document then DOCUMENT_TOKENS * 4
+      else                                             0
       end
     end
 
@@ -290,6 +321,12 @@ module Smith
       # byte-for-byte because Anthropic validates its signatures.
       stages << "thinking" if drop_stale_thinking(working, target)
 
+      # Stage 0b — attachments from turns that are over. The single most
+      # expensive thing an old turn can be carrying, and unlike thinking it is
+      # replaced rather than deleted: a note naming the file leaves the model
+      # able to ask for it back.
+      stages << "attachments" if drop_stale_media(working, target)
+
       # Stage 1 — a read superseded by a later identical read is not
       # information. Also free, and it runs before anything lossy.
       stages << "duplicates" if supersede_duplicates(working, target)
@@ -441,6 +478,37 @@ module Smith
         next if kept.empty?
 
         working.replace(index, LLM::Message.new(message.role, kept, message.synthetic?, message.id))
+        changed = true
+      end
+
+      changed
+    end
+
+    # Stage 0b — attachments from turns that are over.
+    #
+    # An image is worth a fifth of a small context window and is resent in full
+    # on every turn until it is dropped, which makes it the most expensive
+    # thing an old turn holds. The recency window here is the same three turns
+    # the lossy stages use, not the single turn thinking gets: no protocol
+    # requires an attachment back, so what protects it is judgement about what
+    # is still being worked on.
+    #
+    # Returns whether anything changed.
+    private def self.drop_stale_media(working : Working, target : Int32) : Bool
+      protected_from = window_start(working.messages, RECENCY_WINDOW_TURNS)
+      changed = false
+
+      working.messages.each_with_index do |message, index|
+        break if index >= protected_from
+        next unless message.content.any?(&.media?)
+        return changed if working.fits?(target)
+
+        rebuilt = message.content.map do |block|
+          next block unless block.media?
+          LLM::ContentBlock.text("[#{block.media_label} — #{MEDIA_MARKER}]")
+        end
+
+        working.replace(index, LLM::Message.new(message.role, rebuilt, message.synthetic?, message.id))
         changed = true
       end
 

@@ -2,6 +2,7 @@ require "http/client"
 require "json"
 require "./provider"
 require "./types"
+require "./openai_content"
 require "./retry"
 require "./sse"
 
@@ -141,9 +142,25 @@ module Smith::LLM
       case msg.role
       when Role::User
         text_content = msg.content.select { |b| b.type.text? }.map(&.text).compact.join("\n")
+        images = OpenAIContent.images(msg)
+
         json.object do
           json.field "role", "user"
-          json.field "content", text_content
+          if images.empty?
+            json.field "content", text_content
+          else
+            json.field "content" do
+              json.array do
+                unless text_content.empty?
+                  json.object do
+                    json.field "type", "text"
+                    json.field "text", text_content
+                  end
+                end
+                images.each { |image| OpenAIContent.image_part(json, image) }
+              end
+            end
+          end
         end
       when Role::Assistant
         tool_uses = msg.content.select { |b| b.type.tool_use? }

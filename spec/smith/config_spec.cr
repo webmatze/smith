@@ -613,6 +613,23 @@ describe "mention settings" do
       mentions.allow_outside?.should be_true
     end
   end
+
+  it "caps an attachment at 3 MB by default" do
+    with_sandbox do |temp_dir, _home|
+      Smith::Config.load(make_project(temp_dir)).mentions.max_media_bytes.should eq(3 * 1024 * 1024)
+    end
+  end
+
+  it "reads the attachment cap from [media], not from [mentions]" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [media]
+        max_bytes = 4096
+        TOML
+
+      Smith::Config.load(project).mentions.max_media_bytes.should eq(4096)
+    end
+  end
 end
 
 describe "thinking settings" do

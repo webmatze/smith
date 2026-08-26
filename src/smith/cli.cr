@@ -731,7 +731,7 @@ module Smith
         expanded = "#{expanded}\n\n#{context}"
       end
 
-      agent.send(expanded)
+      agent.send(expanded, mentions.attachments)
       true
     end
 
