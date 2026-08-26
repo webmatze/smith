@@ -48,6 +48,23 @@ module Smith::LLM
     abstract def default_model : String
     abstract def complete(request : Request) : Response
 
+    # Whether an image block can be sent at all. Every provider smith ships
+    # with can carry one, so the default is true — but for Ollama that depends
+    # on the *model*, which nothing here can see, and a provider added later
+    # may not take images at all. What this gates is honest: a provider that
+    # says no gets a line of text describing the attachment instead of a
+    # request it would reject.
+    def supports_images? : Bool
+      true
+    end
+
+    # PDFs are narrower. Anthropic parses one natively; the OpenAI shape has
+    # no equivalent, so everywhere else the answer is to say so and point at
+    # `bash` and a real tool, rather than ship a PDF parser inside smith.
+    def supports_documents? : Bool
+      false
+    end
+
     # Streaming entry point. The default does no streaming at all — it runs
     # complete() and hands the text over in one piece.
     #

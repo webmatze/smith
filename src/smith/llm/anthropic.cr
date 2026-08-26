@@ -38,6 +38,12 @@ module Smith::LLM
       "anthropic"
     end
 
+    # The one provider that takes a PDF as a document block and reads it
+    # itself, pages and all.
+    def supports_documents? : Bool
+      true
+    end
+
     def complete(request : Request) : Response
       model_to_use = request.model.empty? ? @default_model : request.model
       payload = build_payload(model_to_use, request)
@@ -182,20 +188,54 @@ module Smith::LLM
       end
     end
 
+    # Images and PDFs take the same source object; only the block type around
+    # it differs.
+    private def base64_source(json : JSON::Builder, block : ContentBlock)
+      json.object do
+        json.field "type", "base64"
+        json.field "media_type", block.media_type
+        json.field "data", block.data
+      end
+    end
+
     private def serialize_message(json : JSON::Builder, msg : Message, cache : Bool = false)
       case msg.role
       when Role::User
-        blocks = msg.content.select { |b| b.type.text? && b.text }
+        # Attachments sit between text blocks in the order the user wrote
+        # them, so a prompt that says "compare @before.png with @after.png"
+        # still says which is which.
+        blocks = msg.content.select { |b| (b.type.text? && b.text) || (b.media? && b.data) }
 
         json.object do
           json.field "role", "user"
           json.field "content" do
             json.array do
               blocks.each_with_index do |b, index|
-                json.object do
-                  json.field "type", "text"
-                  json.field "text", b.text
-                  cache_control(json) if cache && index == blocks.size - 1
+                last = cache && index == blocks.size - 1
+
+                case b.type
+                when ContentBlock::BlockType::Image
+                  json.object do
+                    json.field "type", "image"
+                    json.field "source" do
+                      base64_source(json, b)
+                    end
+                    cache_control(json) if last
+                  end
+                when ContentBlock::BlockType::Document
+                  json.object do
+                    json.field "type", "document"
+                    json.field "source" do
+                      base64_source(json, b)
+                    end
+                    cache_control(json) if last
+                  end
+                else
+                  json.object do
+                    json.field "type", "text"
+                    json.field "text", b.text
+                    cache_control(json) if last
+                  end
                 end
               end
             end

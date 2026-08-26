@@ -85,13 +85,40 @@ module Smith
       @listeners.each(&.call(event))
     end
 
-    def send(user_text : String) : Nil
-      @messages << LLM::Message.user(user_text)
+    def send(user_text : String, attachments : Array(LLM::ContentBlock) = Array(LLM::ContentBlock).new) : Nil
+      blocks = [LLM::ContentBlock.text(user_text)] of LLM::ContentBlock
+      blocks.concat(attachments.map { |block| carryable(block) })
+
+      @messages << LLM::Message.new(LLM::Role::User, blocks)
       run_loop
     ensure
       # The last turn's messages arrive after the final compaction check, so
       # without this they would never reach the record.
       flush_transcript_log
+    end
+
+    # An attachment this provider cannot take is described rather than
+    # dropped. Dropping it would leave the model answering a question about a
+    # picture it was never shown and with no way to know that; a line of text
+    # says what was attached, so it can ask for another way in.
+    private def carryable(block : LLM::ContentBlock) : LLM::ContentBlock
+      case block.type
+      when LLM::ContentBlock::BlockType::Image
+        return block if @provider.supports_images?
+        LLM::ContentBlock.text(
+          "[#{block.media_label} (#{block.media_type}) was attached, but the #{@provider.name} " \
+          "provider cannot receive images.]"
+        )
+      when LLM::ContentBlock::BlockType::Document
+        return block if @provider.supports_documents?
+        LLM::ContentBlock.text(
+          "[#{block.media_label} (#{block.media_type}) was attached, but the #{@provider.name} " \
+          "provider cannot read documents. Extract its text with a command-line tool via `bash` " \
+          "— `pdftotext` for a PDF — and read that instead.]"
+        )
+      else
+        block
+      end
     end
 
     # Everything appended since the last flush. Compaction is the only thing

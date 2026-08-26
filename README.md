@@ -19,6 +19,7 @@ It is inspired by and built according to the policy-free agent loop principles o
   - Discovers custom agents in `.smith/agents/<name>.md` and `~/.smith/agents/`, sharing the frontmatter parser with skills.
   - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
 - **↩️ Auto-Continue at the output limit**: A response cut off mid-sentence is continued automatically; a tool call cut off mid-JSON is discarded rather than half-executed.
+- **🖼️ Image & PDF Input**: `@screenshot.png` attaches the image itself rather than its bytes as text — format decided from the magic bytes, not the extension, capped and refused rather than silently scaled. PDFs go to Anthropic natively; elsewhere the model is told to extract the text with a real tool.
 - **🌐 Web Tools (`Smith::Web`)**: `web_fetch` turns a page into markdown, `web_search` sits behind a provider adapter. Both mark their output as untrusted, and fetching is guarded against SSRF **after** DNS resolution.
 - **🔌 MCP Client (`Smith::MCP`)**: stdio servers from `mcp.json` are started with the session and their tools registered as `mcp__<server>__<tool>` — through the same approval gate as everything else, with their output marked untrusted. Concurrent calls are matched by request id, a crashed server is restarted once, and nothing is left behind as an orphan.
 - **⏱️ Background Commands (`Smith::Tools::BashJobs`)**: Dev servers and log tails run in the background, and a foreground command that outruns its timeout is moved there rather than killed — so its output is never thrown away.
@@ -170,6 +171,9 @@ retention_days  = 30
 [mcp]
 enabled = true                   # the servers themselves live in mcp.json
 timeout = 60                     # seconds per MCP tool call
+
+[media]
+max_bytes = 3145728              # 3 MB per image or PDF, before base64
 ```
 
 Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `OLLAMA_HOST`, `SMITH_HOME`, `MCP_TOOL_TIMEOUT`.
@@ -178,7 +182,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[mcp]` is smith's side of the MCP arrangement; the servers are configured in `mcp.json` — see [MCP](#mcp). `[web]` controls fetching and search — see [Web Tools](#web-tools). `[bash]` tunes the command timeout and background jobs — see [Background Commands](#background-commands). `[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode).
+`[mcp]` is smith's side of the MCP arrangement; the servers are configured in `mcp.json` — see [MCP](#mcp). `[web]` controls fetching and search — see [Web Tools](#web-tools). `[bash]` tunes the command timeout and background jobs — see [Background Commands](#background-commands). `[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode). `[media] max_bytes` caps an attached image or PDF — see [Images & PDFs](#images--pdfs).
 
 ### Streaming
 
@@ -314,8 +318,37 @@ allow_outside   = false
 Three things worth knowing:
 
 - **A mention that leaves the project is refused** unless `allow_outside` is set. A prompt does not always come from you — a skill body could otherwise pull in `@~/.ssh/id_rsa`.
-- **Binary files are not embedded.** Detection is a null byte in the first kilobyte, the same test `grep` uses.
+- **Binary files are not embedded** — except images and PDFs, which are attached rather than inlined; see [Images & PDFs](#images--pdfs). For everything else, detection is a null byte in the first kilobyte, the same test `grep` uses.
 - **Skills expand first, mentions second**, so a skill body that references `@files` resolves too. Exactly one level: what a mention pulls in is never scanned again, so a file cannot drag itself back in through a skill.
+
+### Images & PDFs
+
+A screenshot of the failure says in one attachment what a paragraph of description gets wrong. `@` takes one:
+
+```
+> why does the layout break here? @shot.png
+🖼️  shot.png (image/png, 412 KB)
+```
+
+**What a file is, is decided from its bytes.** A screenshot saved as `notes.txt` is attached as the PNG it is; a text file named `screenshot.png` is inlined as the text it is. The extension is a claim, and acting on it is the bug this avoids.
+
+| Format | Sent as |
+|---|---|
+| PNG, JPEG, GIF, WebP | image |
+| PDF | document — **Anthropic only** |
+| anything else binary | not attached, skipped with a reason |
+
+```toml
+[media]
+max_bytes = 3145728        # 3 MB per file, measured before base64
+```
+
+Four things worth knowing:
+
+- **Nothing is scaled down.** Over the limit is a refusal that names the size, not a quiet re-encode: smith has no image library, and a half-good one is worse than an honest no.
+- **A PDF only goes to Anthropic.** It is the one provider that reads one natively. Elsewhere the model is told the file was attached and to extract its text with `pdftotext` via `bash` — a message it can act on, rather than a provider error it cannot.
+- **Attachments are the first thing compaction drops.** An image is worth around 1600 tokens and is resent on every turn until it goes. Once its turn is three turns old it becomes a line naming the file, so you can mention it again if it is still needed.
+- **The bytes never enter session.json.** They are stored once, content-addressed, under `~/.smith/sessions/<id>/media/`, and the transcript keeps a reference. Base64 appears in neither the session file, the raw transcript log, nor the `--json` stream.
 
 ### Thinking
 
@@ -1161,6 +1194,7 @@ src/
     ├── presentation.cr      # Renderer, gates & stray-line output as one swappable seam
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
+    ├── media.cr             # Magic-byte detection & base64 for image and PDF attachments
     ├── mentions.cr          # @path expansion: file embedding, budgets & path guard
     ├── pricing.cr           # Token counts to dollars, per provider/model
     ├── agents.cr            # Custom agent definitions in .smith/agents/<name>.md

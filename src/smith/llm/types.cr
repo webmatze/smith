@@ -33,6 +33,8 @@ module Smith::LLM
       ToolResult
       Thinking
       RedactedThinking
+      Image
+      Document
     end
 
     getter type : BlockType
@@ -48,7 +50,24 @@ module Smith::LLM
     # saved before thinking existed still deserialize.
     getter signature : String? = nil
 
-    def initialize(@type : BlockType, @text : String? = nil, @tool_call_id : String? = nil, @tool_name : String? = nil, @tool_args : JSON::Any? = nil, @is_error : Bool? = nil, @signature : String? = nil)
+    # An attached image or PDF. `media_type` is what the bytes actually are,
+    # never what the file was called, and `source` is the name only so a
+    # renderer has something to print.
+    getter media_type : String? = nil
+    getter source : String? = nil
+
+    # The base64 payload, and the one field that must never be written
+    # anywhere. It is resent in full on every turn of the session, so a copy
+    # in session.json and a second copy in the raw transcript log would grow
+    # with each resume and be read by nobody. The session store puts the bytes
+    # in a file of their own and leaves `media_ref` behind to find them again;
+    # everything else that serializes a message gets the metadata and no blob.
+    @[JSON::Field(ignore: true)]
+    property data : String? = nil
+
+    property media_ref : String? = nil
+
+    def initialize(@type : BlockType, @text : String? = nil, @tool_call_id : String? = nil, @tool_name : String? = nil, @tool_args : JSON::Any? = nil, @is_error : Bool? = nil, @signature : String? = nil, @media_type : String? = nil, @data : String? = nil, @source : String? = nil, @media_ref : String? = nil)
     end
 
     def self.text(content : String) : ContentBlock
@@ -73,8 +92,27 @@ module Smith::LLM
       ContentBlock.new(BlockType::RedactedThinking, text: data)
     end
 
+    def self.image(media_type : String, data : String, source : String? = nil) : ContentBlock
+      ContentBlock.new(BlockType::Image, media_type: media_type, data: data, source: source)
+    end
+
+    def self.document(media_type : String, data : String, source : String? = nil) : ContentBlock
+      ContentBlock.new(BlockType::Document, media_type: media_type, data: data, source: source)
+    end
+
     def thinking? : Bool
       @type.thinking? || @type.redacted_thinking?
+    end
+
+    def media? : Bool
+      @type.image? || @type.document?
+    end
+
+    # What to call it in a message meant for a human or for the model. The
+    # path if there was one, otherwise the media type — never nothing, because
+    # "an attachment was removed" without saying which is not information.
+    def media_label : String
+      @source || @media_type || "attachment"
     end
   end
 

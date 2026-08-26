@@ -1,4 +1,6 @@
 require "./file_kind"
+require "./media"
+require "./llm/types"
 require "./tools/permissions"
 
 module Smith
@@ -30,10 +32,16 @@ module Smith
       getter max_total_bytes : Int32
       getter? allow_outside : Bool
 
+      # Its own budget, not a share of max_total_bytes: that one counts what
+      # is inlined as text, and a limit meant for source files says nothing
+      # about what an image is worth.
+      getter max_media_bytes : Int32
+
       def initialize(
         @max_lines : Int32 = DEFAULT_MAX_LINES,
         @max_total_bytes : Int32 = DEFAULT_MAX_TOTAL_BYTES,
         @allow_outside : Bool = false,
+        @max_media_bytes : Int32 = Media::DEFAULT_MAX_BYTES,
       )
       end
     end
@@ -45,7 +53,22 @@ module Smith
       getter lines : Int32
       getter? truncated : Bool
 
-      def initialize(@path : String, @lines : Int32, @truncated : Bool = false)
+      # Set for an attachment, nil for text and directories. `lines` says
+      # nothing about a PNG, so the renderers need something else to print.
+      getter media_type : String?
+      getter bytes : Int32?
+
+      def initialize(
+        @path : String,
+        @lines : Int32,
+        @truncated : Bool = false,
+        @media_type : String? = nil,
+        @bytes : Int32? = nil,
+      )
+      end
+
+      def media? : Bool
+        !@media_type.nil?
       end
     end
 
@@ -64,7 +87,17 @@ module Smith
       getter files : Array(Embedded)
       getter skipped : Array(Skip)
 
-      def initialize(@text : String, @files : Array(Embedded), @skipped : Array(Skip))
+      # Images and PDFs, as blocks to hang beside the text. They cannot go
+      # *into* it — that is the whole difference between a mention of a source
+      # file and a mention of a screenshot.
+      getter attachments : Array(LLM::ContentBlock)
+
+      def initialize(
+        @text : String,
+        @files : Array(Embedded),
+        @skipped : Array(Skip),
+        @attachments : Array(LLM::ContentBlock) = Array(LLM::ContentBlock).new,
+      )
       end
 
       def any? : Bool
@@ -76,6 +109,7 @@ module Smith
       files = Array(Embedded).new
       skipped = Array(Skip).new
       attachments = Array(String).new
+      media = Array(LLM::ContentBlock).new
       seen = Set(String).new
       spent = 0
 
@@ -106,6 +140,36 @@ module Smith
           next
         end
 
+        # Before the binary check, not after: an image *is* binary, and the
+        # signature is what tells the two apart. A `.png` holding text falls
+        # through to the text path below and is inlined as what it is.
+        if Media.detect_file(resolved)
+          size = File.size(resolved)
+
+          if size > settings.max_media_bytes
+            skipped << Skip.new(
+              written,
+              "#{Media.human_size(size.to_i32)} is over the #{Media.human_size(settings.max_media_bytes)} " \
+              "attachment limit ([media] max_bytes)"
+            )
+            next
+          end
+
+          attachment = Media.read(resolved)
+          if attachment.nil?
+            skipped << Skip.new(written, "could not be read")
+            next
+          end
+
+          media << if attachment.image?
+            LLM::ContentBlock.image(attachment.media_type, attachment.data, written)
+          else
+            LLM::ContentBlock.document(attachment.media_type, attachment.data, written)
+          end
+          files << Embedded.new(written, 0, media_type: attachment.media_type, bytes: attachment.bytes)
+          next
+        end
+
         if FileKind.binary?(resolved)
           skipped << Skip.new(written, "looks binary")
           next
@@ -124,7 +188,7 @@ module Smith
         files << Embedded.new(written, lines, truncated)
       end
 
-      Result.new(join(text, attachments), files, skipped)
+      Result.new(join(text, attachments), files, skipped, media)
     end
 
     # Yields every mention exactly as it was written, quotes stripped.

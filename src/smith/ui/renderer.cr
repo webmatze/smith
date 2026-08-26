@@ -121,9 +121,14 @@ module Smith::UI
         app.notice(text, style)
       when Smith::Events::FilesMentioned
         event.files.each do |file|
-          size = file.lines.zero? ? "directory" : "#{file.lines} lines"
-          size += ", truncated" if file.truncated?
-          app.notice("📎 #{file.path} (#{size})", Style.new(fg: Palette::INFO, dim: true))
+          label = if (media_type = file.media_type)
+                    "🖼 #{file.path} (#{media_type}, #{Smith::Media.human_size(file.bytes || 0)})"
+                  else
+                    size = file.lines.zero? ? "directory" : "#{file.lines} lines"
+                    size += ", truncated" if file.truncated?
+                    "📎 #{file.path} (#{size})"
+                  end
+          app.notice(label, Style.new(fg: Palette::INFO, dim: true))
         end
         event.skipped.each do |skip|
           app.notice("⚠ #{skip.path} — #{skip.reason}", Style.new(fg: Palette::WARN))
