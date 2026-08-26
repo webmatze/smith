@@ -126,6 +126,28 @@ describe Smith::MCP::ServerConfig do
       end
     end
 
+    it "stops at a worktree root, so a neighbour's servers are not launched" do
+      outer = File.tempname("smith-mcp-worktree")
+      project = File.join(outer, "worktree")
+
+      begin
+        # An mcp.json names commands smith spawns at startup, and nothing gates
+        # them the way TrustStore gates hooks. Walking past the project root
+        # would start somebody else's processes.
+        FileUtils.mkdir_p(File.join(outer, ".smith"))
+        File.write(File.join(outer, ".smith", "mcp.json"), %({"mcpServers": {"outsider": {"command": "c"}}}))
+
+        FileUtils.mkdir_p(project)
+        File.write(File.join(project, ".git"), "gitdir: #{outer}/.git/worktrees/worktree\n")
+
+        ENV["SMITH_HOME"] = File.join(outer, "nowhere")
+        Smith::MCP::ServerConfig.discover(project, IO::Memory.new).should be_empty
+      ensure
+        ENV.delete("SMITH_HOME")
+        FileUtils.rm_rf(outer)
+      end
+    end
+
     it "yields nothing when no config exists" do
       empty = File.tempname("smith-mcp-empty")
 

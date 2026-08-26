@@ -234,7 +234,7 @@ module Smith
         candidate = File.join(curr, ".smith", CONFIG_FILE_NAME)
         return candidate if File.exists?(candidate) && File.file?(candidate)
 
-        break if Dir.exists?(File.join(curr, ".git"))
+        break if Smith.git_root?(curr)
         parent = File.dirname(curr)
         break if parent == curr
         curr = parent

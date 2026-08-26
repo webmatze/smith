@@ -1212,23 +1212,9 @@ module Smith
     # worse than none (#62). Inside a git repo there is a real answer to point
     # at, so the limit arrives with one instead of only being a limit.
     private def bash_note(lead : String) : String
-      return lead unless git_repo?
+      return lead if Smith.git_root(Dir.current).nil?
 
       "#{lead} `git diff` shows what a command changed since your last commit."
-    end
-
-    # `.git` is a directory in a normal clone and a *file* in a worktree or a
-    # submodule, so this asks whether it exists at all rather than whether it
-    # is a directory.
-    private def git_repo?(start_dir : String = Dir.current) : Bool
-      curr = File.expand_path(start_dir)
-
-      loop do
-        return true if File.exists?(File.join(curr, ".git"))
-        parent = File.dirname(curr)
-        return false if parent == curr
-        curr = parent
-      end
     end
 
     private def list_checkpoints(session_id : String?)
