@@ -1,4 +1,5 @@
 require "file_utils"
+require "../sandbox"
 require "process"
 
 module Smith::Tools
@@ -134,7 +135,14 @@ module Smith::Tools
     property on_start : Proc(BashJob, Nil)?
     property on_exit : Proc(BashJob, Nil)?
 
-    def initialize(@dir : String, @max_jobs : Int32 = 10)
+    def initialize(
+      @dir : String,
+      @max_jobs : Int32 = 10,
+      # Off by default for the same reason Registry defaults to an
+      # AutoApprover: this stays usable as a plain library component, and the
+      # CLI attaches the configured one.
+      @sandbox : Smith::Sandbox::Strategy = Smith::Sandbox::Off.new,
+    )
       @jobs = Hash(String, BashJob).new
       @counter = 0
     end
@@ -163,7 +171,12 @@ module Smith::Tools
       log_path = File.join(@dir, "#{id}.log")
 
       log = File.open(log_path, "w")
-      process = Process.new("/bin/bash", ["-c", command], output: log, error: log)
+
+      # The single place a shell process is created, so it is also the single
+      # place confinement can be applied — background jobs included, without a
+      # second path that could forget it.
+      program, arguments = @sandbox.wrap(command)
+      process = Process.new(program, arguments, output: log, error: log)
 
       job = BashJob.new(id, command, log_path, process)
       @jobs[id] = job

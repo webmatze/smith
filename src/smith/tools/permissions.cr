@@ -136,7 +136,11 @@ module Smith::Tools
     # against the project directory.
     def self.expand_pattern(pattern : String, project_dir : String) : String
       return pattern if pattern.starts_with?("/") || pattern.starts_with?("**")
-      return File.expand_path(pattern) if pattern.starts_with?("~")
+      # `home: true` is not optional here: without it Crystal leaves the `~`
+      # in place and resolves the rest against the *current directory*, so
+      # `deny = ["read_file(~/.ssh/**)"]` would expand to a path inside the
+      # project and quietly match nothing at all.
+      return File.expand_path(pattern, home: true) if pattern.starts_with?("~")
 
       File.join(project_dir, pattern)
     end

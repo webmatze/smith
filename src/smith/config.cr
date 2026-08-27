@@ -6,6 +6,7 @@ require "./mode"
 require "./hooks"
 require "./subagents"
 require "./mentions"
+require "./sandbox"
 require "./media"
 require "./pricing"
 
@@ -104,6 +105,16 @@ module Smith
       getter max_output_bytes : Int32
 
       def initialize(@timeout : Int32, @max_background_jobs : Int32, @max_output_bytes : Int32)
+      end
+    end
+
+    struct SandboxSettings
+      getter? enabled : Bool
+      getter? auto_approve : Bool
+      getter? required : Bool
+      getter policy : Smith::Sandbox::Policy
+
+      def initialize(@enabled : Bool, @auto_approve : Bool, @required : Bool, @policy : Smith::Sandbox::Policy)
       end
     end
 
@@ -534,6 +545,34 @@ module Smith
         timeout: lookup("bash", "timeout").try(&.as_i?) || DEFAULT_BASH_TIMEOUT,
         max_background_jobs: lookup("bash", "max_background_jobs").try(&.as_i?) || DEFAULT_MAX_BACKGROUND_JOBS,
         max_output_bytes: lookup("bash", "max_output_bytes").try(&.as_i?) || DEFAULT_MAX_OUTPUT_BYTES
+      )
+    end
+
+    # Consumed by Sandbox.build via CLI#build_agent. Off unless asked for:
+    # confinement changes what a command can do, and a user who did not ask
+    # for that should not find out from a failing build.
+    def sandbox : SandboxSettings
+      enabled = lookup("sandbox", "enabled").try(&.as_bool?) || false
+      auto_approve = lookup("sandbox", "auto_approve").try(&.as_bool?) || false
+      required = lookup("sandbox", "required").try(&.as_bool?) || false
+      write_defaults = lookup("sandbox", "write_defaults").try(&.as_bool?)
+      network, ports = Smith::Sandbox::Policy.parse_network(lookup("sandbox", "network").try(&.as_s?))
+
+      SandboxSettings.new(
+        enabled: enabled,
+        auto_approve: auto_approve,
+        required: required,
+        policy: Smith::Sandbox::Policy.new(
+          enabled: enabled,
+          auto_approve: auto_approve,
+          required: required,
+          network: network,
+          ports: ports,
+          write: string_list("sandbox", "write"),
+          write_defaults: write_defaults.nil? ? true : write_defaults,
+          deny_read: string_list("sandbox", "deny_read"),
+          unsandboxed: string_list("sandbox", "unsandboxed")
+        )
       )
     end
 

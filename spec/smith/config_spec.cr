@@ -201,6 +201,57 @@ describe Smith::Config do
     end
   end
 
+  it "reads the sandbox section" do
+    with_sandbox({"SMITH_PROVIDER" => nil, "SMITH_MODEL" => nil}) do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [sandbox]
+        enabled = true
+        auto_approve = true
+        network = "ports:443, 8080"
+        write = ["~/scratch"]
+        deny_read = ["~/.ssh"]
+        unsandboxed = ["git push"]
+        TOML
+
+      settings = Smith::Config.load(project).sandbox
+
+      settings.enabled?.should be_true
+      settings.auto_approve?.should be_true
+      settings.required?.should be_false
+      settings.policy.network.should eq(Smith::Sandbox::Network::Ports)
+      settings.policy.ports.should eq([443, 8080])
+      settings.policy.write.should eq(["~/scratch"])
+      settings.policy.deny_read.should eq(["~/.ssh"])
+      settings.policy.unsandboxed.should eq(["git push"])
+      # The defaults stay unless someone says otherwise, or the first path a
+      # user adds is also the moment their build stops working.
+      settings.policy.write_defaults?.should be_true
+    end
+  end
+
+  it "is off, and network-permissive, when nothing is configured" do
+    with_sandbox({"SMITH_PROVIDER" => nil, "SMITH_MODEL" => nil}) do |temp_dir, _home|
+      settings = Smith::Config.load(make_project(temp_dir)).sandbox
+
+      settings.enabled?.should be_false
+      # Confinement changes what a command can do; nobody should meet it
+      # without having asked for it.
+      settings.policy.network.should eq(Smith::Sandbox::Network::Allow)
+    end
+  end
+
+  it "lets the write defaults be dropped on purpose" do
+    with_sandbox({"SMITH_PROVIDER" => nil, "SMITH_MODEL" => nil}) do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [sandbox]
+        enabled = true
+        write_defaults = false
+        TOML
+
+      Smith::Config.load(project).sandbox.policy.write_defaults?.should be_false
+    end
+  end
+
   it "warns and keeps running when a config file is malformed" do
     with_sandbox({"SMITH_PROVIDER" => nil, "SMITH_MODEL" => nil}) do |temp_dir, home_dir|
       File.write(File.join(home_dir, "config.toml"), "[defaults\nthis is not valid toml")
