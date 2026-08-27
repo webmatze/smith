@@ -11,6 +11,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 ## ✨ Features
 
 - **🚀 Policy-Free Core Agent Loop (`Smith::Agent`)**: Complete decoupling of conversation transcript, LLM provider calls, tool execution, and UI surfaces.
+- **🧰 Bash Sandbox (macOS)**: `bash` confined to your project via `sandbox-exec` — writes outside it fail, reads can be denied per path, and confined commands can skip the approval prompt entirely
 - **⚡ Fiber-Based Parallel Tool Execution (`Smith::Tools`)**: Concurrent execution of parallel-safe tools (`read_file`, `grep`, `glob`) via Crystal Fibers (`spawn` & `Channel`).
 - **🤖 Subagent Supervision (`Smith::Subagents`)**: The parent agent can delegate subtasks to autonomous child subagents running in isolated fibers in `work` (full capabilities) or `inspect` (read-only) mode, bounded by a nesting depth and a spawn budget shared across every level.
 - **📡 Provider-Neutral LLM Layer (`Smith::LLM`)**: Ships with **OpenRouter**, **Ollama** (local models), **Anthropic** (Messages API), and **OpenAI** (Chat Completions) support with exponential backoff retry logic. Default models: `qwen/qwen3.8-max` (OpenRouter) / `gemma4:latest` (Ollama) / `claude-sonnet-5` (Anthropic) / `gpt-5.6-luna` (OpenAI).
@@ -182,7 +183,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[mcp]` is smith's side of the MCP arrangement; the servers are configured in `mcp.json` — see [MCP](#mcp). `[web]` controls fetching and search — see [Web Tools](#web-tools). `[bash]` tunes the command timeout and background jobs — see [Background Commands](#background-commands). `[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode). `[media] max_bytes` caps an attached image or PDF — see [Images & PDFs](#images--pdfs).
+`[mcp]` is smith's side of the MCP arrangement; the servers are configured in `mcp.json` — see [MCP](#mcp). `[web]` controls fetching and search — see [Web Tools](#web-tools). `[bash]` tunes the command timeout and background jobs — see [Background Commands](#background-commands). `[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode). `[media] max_bytes` caps an attached image or PDF — see [Images & PDFs](#images--pdfs). `[sandbox]` confines `bash` on macOS — see [Bash Sandbox](#bash-sandbox-macos).
 
 ### Streaming
 
@@ -551,6 +552,56 @@ Only that rule is remembered, and a deny rule still outranks it.
 #### The old allowlist
 
 `allowlist = [...]` keeps working, mapped to `allow = ["bash(<entry>)"]`, with a deprecation notice on stderr.
+
+### Bash Sandbox (macOS)
+
+Permission rules describe what is allowed. They do not *enforce* it — a command that gets past the gate has your full rights. And a gate that asks about everything is how people end up leaving `--yes` on, which gives up the gate and everything behind it.
+
+A sandbox inverts that. `bash` runs where it cannot write outside your project, so most commands no longer need a question:
+
+```toml
+[sandbox]
+enabled      = true
+auto_approve = true               # confined commands skip the prompt
+network      = "allow"            # allow | deny | "ports:443,80"
+write        = ["~/scratch"]      # in addition to the defaults
+deny_read    = ["~/.ssh", "~/.aws"]
+unsandboxed  = ["git push"]       # runs with full rights — and is still asked about
+```
+
+```text
+$ echo two > ~/notes.txt
+/bin/bash: /Users/you/notes.txt: Operation not permitted
+```
+
+`smith sandbox` prints what is actually in force — the writable paths, the unreadable ones, the network mode. A sandbox nobody can inspect is a claim.
+
+**Off unless you ask.** Confinement changes what a command can do, and nobody should meet that without having switched it on.
+
+**What is covered.** `bash`, including background jobs — the wrapper sits at the single place a shell process is created. `write_file` and `edit_file` are **not** covered: they run inside smith's own process, which no profile here applies to. They keep going through the approval gate as before.
+
+**Reading stays open**, except for the paths in `deny_read`. Denying reads wholesale breaks every compiler on the machine, and reading is not what a runaway command does damage with.
+
+**Writing is confined** to the project plus the caches without which the toolchain fails: `$TMPDIR`, `/private/tmp`, `/private/var/tmp`, `~/.cache`, `~/Library/Caches`, `~/.npm`, `~/.cargo`, `~/.local/share`, `~/.local/state`. `write` adds to that list; `write_defaults = false` replaces it. The defaults are not decoration — without `~/.cache` a Crystal build reports *"you've found a bug in the Crystal compiler"*, and without `$TMPDIR` clang cannot link.
+
+**Network is a switch, not an allowlist.** `deny` also stops `git fetch`, `git push` and every package manager, which is why `allow` is the default. `"ports:443"` works. **Hostnames do not** — the profile language matches addresses and ports, and a profile naming a host does not compile. smith says so rather than offering a setting that quietly means something else.
+
+**`auto_approve` only frees confined commands.** A command listed in `unsandboxed` runs with full rights and therefore still goes through the gate — the opposite of what the name might suggest. A `deny` rule outranks the sandbox in every case, and in headless mode `auto_approve` is what turns "refuse everything" into "run the confined ones".
+
+#### macOS only, and honestly so
+
+The sandbox is built on `sandbox-exec`. Apple documents it as deprecated and keeps shipping it; measured on macOS 26.5.2 it costs about 5 ms per command and prints nothing of its own. There is no Linux implementation yet.
+
+Asked for and unavailable is never silent:
+
+```text
+⚠️  Sandbox requested, but smith only has a sandbox for macOS — bash runs with your full rights.
+   [sandbox] required = true refuses bash instead of running it unprotected.
+```
+
+With `required = true`, `bash`, `bash_output` and `bash_kill` are withdrawn instead — a tool that can only fail wastes turns.
+
+One consequence worth knowing: **a sandbox cannot be nested.** Inside one, `sandbox-exec` fails with `sandbox_apply: Operation not permitted`. smith's own suite runs fine under the sandbox; the four specs that exercise the kernel stand down when they detect they are already confined.
 
 ### Custom Agents
 
@@ -1123,6 +1174,8 @@ That is deliberately the `--yes` case: an unattended run is the one with nobody 
 
 Snapshotting a git tree before each shell call was measured and rejected: it restores the contents of *tracked* files, but a file `bash` deleted without git knowing it does not come back, and one `bash` created stays behind. What it would uniquely add — undoing uncommitted work a command mangled — is narrow enough not to be worth a rewind that holds two different promises at once.
 
+The [sandbox](#bash-sandbox-macos) narrows the gap from the other side: what a command was never able to write does not need taking back. smith says so where it states the limit, when one is on.
+
 #### Changes made outside smith
 
 Before restoring, smith compares each file against what it left there. If something else changed it since, the rewind **stops and changes nothing**:
@@ -1220,6 +1273,7 @@ src/
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── media.cr             # Magic-byte detection & base64 for image and PDF attachments
+    ├── sandbox.cr           # bash confinement: SBPL profile generation & strategy selection
     ├── mentions.cr          # @path expansion: file embedding, budgets & path guard
     ├── pricing.cr           # Token counts to dollars, per provider/model
     ├── agents.cr            # Custom agent definitions in .smith/agents/<name>.md
@@ -1261,6 +1315,7 @@ src/
     │   ├── registry.cr      # Tool registry, approval gate & Fiber parallel execution scheduler
     │   ├── approval.cr      # Approver strategies (prompt/auto/deny/plan/rule) & bash allowlist matching
     │   ├── permissions.cr   # allow/ask/deny rules, path normalisation & pattern matching
+    │   ├── sandbox_approver.cr # lets a confined bash command past the gate
     │   ├── bash.cr          # Shell command execution tool, with auto-backgrounding
     │   ├── bash_jobs.cr     # Background job registry, logs and lifecycle
     │   ├── bash_output.cr   # bash_output & bash_kill tools

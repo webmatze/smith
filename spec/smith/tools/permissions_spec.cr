@@ -332,3 +332,15 @@ describe "a project reached through a symlink" do
     end
   end
 end
+
+describe "a rule naming a path in the home directory" do
+  it "expands ~ against the home directory, not the current one" do
+    # Crystal leaves a leading `~` in place unless told otherwise, so this
+    # rule used to expand to a path *inside the project* and match nothing —
+    # a deny the user had every reason to believe in.
+    expanded = Smith::Tools::Rule.expand_pattern("~/.ssh/**", Dir.current)
+
+    expanded.should start_with(Path.home.to_s)
+    expanded.should_not contain("~")
+  end
+end

@@ -17,6 +17,8 @@ require "./chat_commands"
 require "./checkpoints"
 require "./hooks"
 require "./trust"
+require "./sandbox"
+require "./tools/sandbox_approver"
 require "./mcp"
 require "./ui"
 
@@ -43,6 +45,7 @@ module Smith
     @continue : Bool = false
     @max_budget_usd : Float64? = nil
     @trust_hooks : Bool = false
+    @sandbox : Sandbox::Strategy? = nil
     @hooks : Hooks::Runner? = nil
     @session_id : String? = nil
     @hook_context : String? = nil
@@ -270,6 +273,8 @@ module Smith
         run_rewind(@args[1]?)
       when "mcp"
         run_mcp(@args[1]?, @args[2]?)
+      when "sandbox"
+        show_sandbox
       else
         prompt = @args.join(" ")
         if prompt.empty?
@@ -280,7 +285,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp sandbox]
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -445,11 +450,39 @@ module Smith
                 presentation.approver(approval.allowlist, rules)
               end
 
+      # Inside RuleApprover, in the same seat PromptApprover holds, so the
+      # order of authority is unchanged: deny refuses first, allow permits
+      # first, and only an unruled command is decided by the sandbox.
+      if @config.sandbox.auto_approve? && sandbox.active?
+        inner = Tools::SandboxApprover.new(sandbox, inner)
+      end
+
       # Wrapped even when there are no rules, so the composition is the same
       # everywhere; an empty RuleSet decides Unset and costs a hash lookup.
       # Wrapping is also what makes deny survive --yes: the flag only replaces
       # the inner approver.
       Tools::RuleApprover.new(rules, inner)
+    end
+
+    # Built once: the profile and the path list are the same for every command
+    # of a run, and rebuilding them per call would be work for nothing.
+    private def sandbox : Sandbox::Strategy
+      @sandbox ||= Sandbox.build(@config.sandbox.policy, Dir.current)
+    end
+
+    # Said once, at the start, and never implied. A sandbox that was asked for
+    # and is not there must not look like one that is: the whole value of the
+    # feature is that the user can stop reading every command, and that is only
+    # safe if "on" is trustworthy.
+    private def warn_about_sandbox : Nil
+      settings = @config.sandbox
+      return unless settings.enabled?
+
+      strategy = sandbox
+      return if strategy.active?
+
+      STDERR.puts "⚠️  Sandbox #{strategy.describe}."
+      STDERR.puts "   [sandbox] required = true refuses bash instead of running it unprotected." unless settings.required?
     end
 
     # Every entry point opens or resumes a session and assigns this before it
@@ -590,7 +623,7 @@ module Smith
       approver = (@real_approver ||= build_approver)
       bash = @config.bash
       jobs = (@bash_jobs ||= begin
-        created = Tools::BashJobs.new(bash_jobs_dir, max_jobs: bash.max_background_jobs)
+        created = Tools::BashJobs.new(bash_jobs_dir, max_jobs: bash.max_background_jobs, sandbox: sandbox)
         created.on_start = ->(job : Tools::BashJob) do
           renderer.handle(Events::BashJobStarted.new(job.id, job.command))
         end
@@ -615,6 +648,19 @@ module Smith
       )
       registry.hooks = hooks
       registry.checkpoints = @checkpoints
+
+      warn_about_sandbox
+
+      # `required` means what it says: a shell that cannot be confined is not
+      # offered at all. Withdrawn rather than left to refuse every call, for
+      # the same reason a dead MCP server's tools are withdrawn — a tool that
+      # can only fail wastes turns.
+      if @config.sandbox.enabled? && @config.sandbox.required? && !sandbox.active?
+        registry.unregister("bash")
+        registry.unregister("bash_output")
+        registry.unregister("bash_kill")
+        STDERR.puts "   bash is withdrawn because [sandbox] required = true."
+      end
 
       # Before the --agent narrowing below, so a definition can list MCP tools
       # among the ones it wants — and after the built-ins, so a server can
@@ -1217,9 +1263,54 @@ module Smith
     # worse than none (#62). Inside a git repo there is a real answer to point
     # at, so the limit arrives with one instead of only being a limit.
     private def bash_note(lead : String) : String
+      # A confined command could not have written outside the sandbox's paths,
+      # so the gap this sentence warns about is smaller when one is on — but
+      # it is still a gap, because inside those paths bash was free.
+      lead += " With [sandbox] on, it could only write inside the sandbox's paths." if sandbox.active?
+
       return lead if Smith.git_root(Dir.current).nil?
 
       "#{lead} `git diff` shows what a command changed since your last commit."
+    end
+
+    # What is actually in force, printable. A sandbox nobody can inspect is a
+    # claim, and the value of this feature is that the claim can be relied on.
+    private def show_sandbox
+      settings = @config.sandbox
+      strategy = sandbox
+
+      puts "🧰 Sandbox: #{strategy.describe}"
+
+      unless settings.enabled?
+        puts "   Set [sandbox] enabled = true to confine bash."
+        return
+      end
+
+      if strategy.is_a?(Sandbox::MacOS)
+        puts
+        puts "   Writable:"
+        strategy.write_paths.each { |path| puts "     #{path}" }
+
+        unless strategy.deny_read.empty?
+          puts
+          puts "   Unreadable:"
+          strategy.deny_read.each { |path| puts "     #{path}" }
+        end
+
+        unless settings.policy.unsandboxed.empty?
+          puts
+          puts "   Runs unconfined ([sandbox] unsandboxed):"
+          settings.policy.unsandboxed.each { |entry| puts "     #{entry}" }
+        end
+
+        puts
+        puts "   Everything else is readable; nothing else is writable."
+        puts "   Approval is skipped for confined commands ([sandbox] auto_approve)." if settings.auto_approve?
+        puts "   Hostnames cannot be filtered — SBPL matches addresses and ports only." if strategy.policy.network.ports?
+      end
+
+      puts
+      puts "   write_file and edit_file are not covered: they run inside smith, not in the sandbox."
     end
 
     private def list_checkpoints(session_id : String?)
