@@ -1,0 +1,95 @@
+# Cuts a release whenever a version tag is pushed. The tag has to match
+# Smith::VERSION, so a release can never ship code that identifies itself
+# differently. Specs and formatting run in CI on every PR; a tag is only ever
+# pushed from a merged branch, so this workflow builds rather than re-tests.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  guard:
+    name: tag matches Smith::VERSION
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compare the tag against src/smith/version.cr
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          if ! grep -q "VERSION = \"$expected\"" src/smith/version.cr; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Smith::VERSION in src/smith/version.cr"
+            exit 1
+          fi
+
+  build:
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: macos-latest # arm64
+            target: darwin-arm64
+          - os: macos-15-intel # x86_64, native — no cross-compilation
+            target: darwin-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
+      - name: Install dependencies
+        run: shards install
+
+      - name: Build the release binary
+        run: mkdir -p bin && crystal build src/smith.cr --release -o bin/smith
+
+      - name: Ad-hoc sign the binary (macOS)
+        if: runner.os == 'macOS'
+        run: codesign -s - --force bin/smith
+
+      - name: Pack the archive
+        run: |
+          cd bin
+          tar -czf smith-${{ github.ref_name }}-${{ matrix.target }}.tar.gz smith
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: smith-${{ github.ref_name }}-${{ matrix.target }}
+          path: bin/smith-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Extract this version's entry from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            /^## \[/ { if (found) exit; if (index($0, "[" ver "]")) found=1; else exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          [ -s release_notes.md ] || echo "See CHANGELOG.md." > release_notes.md
+
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: smith-${{ github.ref_name }}-*
+          path: dist
+
+      - name: Attach them to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: dist/*/*.tar.gz

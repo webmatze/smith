@@ -38,10 +38,29 @@ It is inspired by and built according to the policy-free agent loop principles o
 
 ## 🛠️ Prerequisites & Installation
 
-### Prerequisites
+### Prebuilt binaries
+
+Every [release](https://github.com/webmatze/smith/releases) carries signed release binaries, built in CI when a version tag is pushed:
+
+| Asset | Platform |
+|---|---|
+| `smith-vX.Y.Z-linux-x86_64.tar.gz` | Linux, x86_64 |
+| `smith-vX.Y.Z-darwin-arm64.tar.gz` | macOS, Apple Silicon |
+| `smith-vX.Y.Z-darwin-x86_64.tar.gz` | macOS, Intel |
+
+```bash
+tar -xzf smith-vX.Y.Z-linux-x86_64.tar.gz
+install -m 755 smith ~/.local/bin/smith
+```
+
+On macOS the binaries are ad-hoc signed, so Gatekeeper will not recognise the developer; on first launch allow it explicitly (right-click → Open, or `xattr -d com.apple.quarantine ~/.local/bin/smith`).
+
+### Building from source
+
+#### Prerequisites
 - [mise](https://mise.jdx.dev/) or [Crystal](https://crystal-lang.org/) (>= 1.21.0) installed.
 
-### Setup & Build
+#### Setup & Build
 
 ```bash
 # 1. Install Crystal via mise (if using mise)
