@@ -1,5 +1,6 @@
 require "./protocol"
 require "./client"
+require "./http_transport"
 require "./server_config"
 
 module Smith::MCP
@@ -24,7 +25,7 @@ module Smith::MCP
     property on_lost : Proc(ServerHandle, Nil)?
 
     @client : Client?
-    @transport : StdioTransport?
+    @transport : Transport?
     @restarted = false
 
     def initialize(
@@ -75,7 +76,7 @@ module Smith::MCP
     end
 
     private def connect : Nil
-      transport = StdioTransport.spawn_server(@spec.command, @spec.args, @spec.env)
+      transport = build_transport
       @transport = transport
 
       client = Client.new(@name, transport, @timeout, @startup_timeout)
@@ -89,6 +90,16 @@ module Smith::MCP
       @client = client
       @tools = client.tools
       @error = nil
+    end
+
+    # stdio spawns a subprocess; http connects to a url. Everything after this
+    # — handshake, tools/list, restart-once — is the same for both.
+    private def build_transport : Transport
+      if url = @spec.url
+        HttpTransport.new(URI.parse(url), @spec.headers, @timeout)
+      else
+        StdioTransport.spawn_server(@spec.command.not_nil!, @spec.args, @spec.env)
+      end
     end
 
     # One restart, then the tools go away. The retried call is the one the
@@ -139,9 +150,11 @@ module Smith::MCP
     end
 
     private def failure_message(ex : Exception) : String
+      what = @spec.description
+
       base = case ex
-             when File::NotFoundError then "command not found: #{@spec.command}"
-             when TimeoutError        then "no response to the MCP handshake — is #{@spec.command} an MCP server?"
+             when File::NotFoundError then "command not found: #{what}"
+             when TimeoutError        then "no response to the MCP handshake — is #{what} an MCP server?"
              else                          ex.message || ex.class.name
              end
 

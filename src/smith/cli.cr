@@ -1479,7 +1479,7 @@ module Smith
           handle.name,
           handle.running? ? "ready" : "failed",
           handle.tools.size.to_s,
-          handle.spec.command_line
+          handle.spec.description
       end
 
       puts "--------------------------------------------------------------------------------"

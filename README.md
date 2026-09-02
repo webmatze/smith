@@ -22,7 +22,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **↩️ Auto-Continue at the output limit**: A response cut off mid-sentence is continued automatically; a tool call cut off mid-JSON is discarded rather than half-executed.
 - **🖼️ Image & PDF Input**: `@screenshot.png` attaches the image itself rather than its bytes as text; `read_file` on one hands the model the picture instead of a refusal, and so does an MCP server that answers with an image — format decided from the magic bytes, not the extension, capped and refused rather than silently scaled. PDFs go to Anthropic natively; elsewhere the model is told to extract the text with a real tool.
 - **🌐 Web Tools (`Smith::Web`)**: `web_fetch` turns a page into markdown, `web_search` sits behind a provider adapter. Both mark their output as untrusted, and fetching is guarded against SSRF **after** DNS resolution.
-- **🔌 MCP Client (`Smith::MCP`)**: stdio servers from `mcp.json` are started with the session and their tools registered as `mcp__<server>__<tool>` — through the same approval gate as everything else, with their output marked untrusted. Concurrent calls are matched by request id, a crashed server is restarted once, and nothing is left behind as an orphan.
+- **🔌 MCP Client (`Smith::MCP`)**: stdio and Streamable-HTTP servers from `mcp.json` are started with the session and their tools registered as `mcp__<server>__<tool>` — through the same approval gate as everything else, with their output marked untrusted. Concurrent calls are matched by request id, a crashed server is restarted once, and nothing is left behind as an orphan.
 - **⏱️ Background Commands (`Smith::Tools::BashJobs`)**: Dev servers and log tails run in the background, and a foreground command that outruns its timeout is moved there rather than killed — so its output is never thrown away.
 - **⏪ Checkpoints & Rewind (`Smith::Checkpoints`)**: Every `write_file` and `edit_file` is snapshotted first, content-addressed, so a run can be taken back — files and transcript — without having committed anything.
 - **🎭 Custom Agents (`Smith::Agents`)**: Specialists defined in `.smith/agents/<name>.md` — own system prompt, tools, model and provider. Delegate to one via `agent_type`, or run the main thread as one with `--agent`.
@@ -1057,7 +1057,7 @@ There is deliberately **no scraping of Google/Bing/DDG HTML**: it breaks their t
 
 An [MCP](https://modelcontextprotocol.io) client, so smith can use tools it never has to build: databases, ticket systems, cloud APIs, browser automation, whatever a company runs internally. One protocol instead of one tool at a time.
 
-This is **stage 1**: stdio transport only. No Streamable HTTP, no OAuth, no resources or prompts — tools.
+Transports: **stdio** (a subprocess smith spawns) and **Streamable HTTP** (a URL smith talks to, JSON body and SSE answers alike). Authentication is a bearer token from the environment; OAuth is deliberately out — no resources, no prompts, tools.
 
 #### Configuring servers
 
@@ -1070,12 +1070,21 @@ Servers go in `.smith/mcp.json` (project) or `~/.smith/mcp.json` (global), delib
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"],
       "env": { "FOO": "bar" }
+    },
+    "everything": {
+      "type": "http",
+      "url": "http://127.0.0.1:8808/mcp",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
     }
   }
 }
 ```
 
-Global first, then project — a project entry of the same name replaces the global one. Entries with `"disabled": true`, or with a transport other than stdio, are skipped with a word about why.
+An entry with a `url` is an HTTP server — `type: "http"` may say so, and `sse` is accepted as an alias; everything else is a subprocess. `${VARIABLE}` in a header value is looked up in smith's environment at startup, so a token does not have to stand literally in the file; an unset one warns rather than being sent as `${...}`.
+
+Global first, then project — a project entry of the same name replaces the global one. Entries with `"disabled": true`, or with a transport smith does not speak, are skipped with a word about why.
+
+HTTP servers get the same lifecycle as stdio ones: the session id the server assigns is carried on every later request, a server that goes down mid-call is reconnected once, and the `[mcp] timeout` applies per call. A server whose credentials are refused fails with exactly that said — the session starts without it, as with a command that does not launch.
 
 #### Naming
 
@@ -1368,9 +1377,10 @@ src/
     │   ├── anthropic.cr     # Anthropic Messages API client adapter
     │   └── openai.cr        # OpenAI Chat Completions client adapter
     ├── mcp/
-    │   ├── protocol.cr      # JSON-RPC 2.0 framing, transport & stdio subprocess
+    │   ├── protocol.cr      # JSON-RPC 2.0 framing, transport interface & stdio subprocess
+    │   ├── http_transport.cr # Streamable HTTP: POST, JSON & SSE answers, session id
     │   ├── client.cr        # Handshake, tools/list, tools/call & the reader fiber
-    │   ├── server_config.cr # mcp.json discovery & parsing
+    │   ├── server_config.cr # mcp.json discovery & parsing, both transports
     │   └── manager.cr       # Server lifecycle, restart-once & tool naming
     ├── web/
     │   ├── guard.cr         # SSRF guard: scheme, DNS resolution & address ranges
