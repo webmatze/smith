@@ -34,6 +34,10 @@ module Smith
     # Lines that are already laid out — a table, a breakdown — and must be
     # shown as they are.
     abstract def say_block(lines : Array(String)) : Nil
+
+    # `/clear` — the fullscreen UI wipes the screen, plain output has no
+    # screen to wipe and is a no-op.
+    abstract def clear_screen : Nil
   end
 
   # The line-based presentation, wrapped around whichever renderer the run
@@ -84,6 +88,10 @@ module Smith
 
     def say_block(lines : Array(String)) : Nil
       lines.each { |line| @renderer.prompt_io.puts line }
+    end
+
+    # Plain output has no screen; the context itself is cleared by the caller.
+    def clear_screen : Nil
     end
   end
 end

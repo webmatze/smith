@@ -151,6 +151,12 @@ module Smith::UI
       @cursor = @buffer.size
     end
 
+    # Replaces the whole buffer, cursor to the end — what the autocomplete
+    # popup does when it completes a command.
+    def set_text(text : String) : Nil
+      replace(text)
+    end
+
     # Columns the text occupies up to (excluding) the cursor.
     def columns_before_cursor : Int32
       Style.display_width(@buffer[0...@cursor].join)

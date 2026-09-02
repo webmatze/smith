@@ -993,7 +993,7 @@ module Smith
         puts "   Running as agent: #{definition.name}"
       end
       puts "   Mode: plan (research only — /normal to leave)" if plan_session.plan_mode?
-      puts "   Type 'exit' or 'quit' to end session.\n\n"
+      puts "   Type /help for commands, 'exit' to quit.\n\n"
 
       # Resuming without the plan would leave the model to reconstruct it from
       # a transcript that compaction may already have shortened.
@@ -1015,7 +1015,17 @@ module Smith
         # Before expand_prompt on purpose: the skill catalog claims any /name
         # that matches a skill, so a skill called "plan" would shadow /plan.
         if invocation = ChatCommands.parse(trimmed)
-          run_chat_command(invocation, session_data, agent)
+          outcome = run_chat_command(invocation, session_data, agent)
+          break if outcome.quit
+
+          # A switched session prints its own header and carries on —
+          # activate_session re-points the interrupt handler at it.
+          if target = outcome.resume
+            persist(session_data, agent)
+            provider, agent = activate_session(target, provider)
+            session_data = target
+            puts "\n🔄 Resumed session '#{target.reference}' (#{target.id})."
+          end
           next
         end
 
@@ -1040,6 +1050,7 @@ module Smith
       agent = build_agent(provider, session_data)
 
       app = tui_app
+      app.completions = chat_completions
       app.model_name = agent.model
       app.mode = plan_session.mode
 
@@ -1053,7 +1064,9 @@ module Smith
 
       install_interrupt_handler(session_data, agent)
 
-      # The two interrupt stages, driven from the app's key loop.
+      # The two interrupt stages, driven from the app's key loop. The closures
+      # capture the local session_data/agent, which /resume reassigns below —
+      # so they always act on the session the loop is currently in.
       app.on_interrupt { agent.stop! }
       app.on_abort do
         # Second press: leave right away; the interrupt handler saves.
@@ -1075,7 +1088,27 @@ module Smith
             # /name that matches a skill, so a skill called "plan" would
             # shadow /plan.
             if invocation = ChatCommands.parse(trimmed)
-              run_chat_command(invocation, session_data, agent)
+              outcome = run_chat_command(invocation, session_data, agent)
+
+              if outcome.quit
+                app.quit
+              elsif target = outcome.resume
+                # The old session stays saved; the new one takes over the
+                # screen — cleared, bannered and replayed like a fresh start.
+                # clear! goes first so whatever the switch emits (the target's
+                # todo panel among it) lands on the wiped screen.
+                persist(session_data, agent)
+                app.clear!
+                provider, agent = activate_session(target, provider)
+                session_data = target
+
+                app.model_name = agent.model
+                app.usage_text = ""
+                app.cost_text = ""
+                tui_banner(session_data, agent)
+                replay_tui_history(app, session_data)
+                app.notice("🔄 Resumed session '#{target.reference}'.")
+              end
               # Slash commands produce notice blocks, not a turn — but the
               # prompt must come back all the same.
               app.turn_finished
@@ -1144,22 +1177,58 @@ module Smith
       end
     end
 
-    private def run_chat_command(invocation : ChatCommands::Invocation, session_data : Session::Data, agent : Agent) : Nil
+    # What a chat command decided about the loop itself. Most commands do
+    # their thing and leave the loop alone; `/quit` ends it, and `/resume`
+    # hands back the session the loop should switch to.
+    private record CommandOutcome, quit : Bool = false, resume : Session::Data? = nil
+
+    private def run_chat_command(invocation : ChatCommands::Invocation, session_data : Session::Data, agent : Agent) : CommandOutcome
       command = invocation.command
 
       if command.rewind?
         rewind_from_chat(session_data)
-        return
+        return CommandOutcome.new
       end
 
       if command.context?
         print_context(session_data, agent.messages, agent)
-        return
+        return CommandOutcome.new
       end
 
       if command.rename?
         rename_from_chat(session_data, invocation.argument.not_nil!)
-        return
+        return CommandOutcome.new
+      end
+
+      if command.help?
+        print_chat_help
+        return CommandOutcome.new
+      end
+
+      if command.clear?
+        # Order matters in the TUI: the screen wipe drops every block, so the
+        # confirmation has to arrive after it to survive.
+        agent.clear!
+        # A replace on an already empty list would still announce "Todos
+        # cleared" — for a clear that cleared nothing.
+        @todos.replace(Array(TodoList::Item).new) unless @todos.empty?
+        presentation.clear_screen
+        chat_puts("🧹 Context cleared.")
+        return CommandOutcome.new
+      end
+
+      if command.sessions?
+        print_sessions_list
+        return CommandOutcome.new
+      end
+
+      if command.resume?
+        target = resolve_resume_target(session_data, invocation.argument.not_nil!)
+        return CommandOutcome.new(resume: target)
+      end
+
+      if command.quit?
+        return CommandOutcome.new(quit: true)
       end
 
       plan = plan_session
@@ -1167,16 +1236,125 @@ module Smith
 
       if plan.mode == target
         chat_puts("Already in #{target.to_s.downcase} mode.")
-        return
+        return CommandOutcome.new
       end
 
       plan.mode = target
+      CommandOutcome.new
     end
 
     # Text printed by chat commands: lines in the plain loop, notice blocks in
     # the fullscreen one.
     private def chat_puts(text : String) : Nil
       presentation.say(text)
+    end
+
+    # What the popup offers at the prompt: the built-ins, then the skills —
+    # both are invoked with a leading slash, and the list is where a human
+    # sees that built-ins win over skills of the same name.
+    private def chat_completions : Array(UI::Completion)
+      entries = ChatCommands.definitions.map do |d|
+        UI::Completion.new(name: d.verb, description: d.description, takes_args: d.requires_argument)
+      end
+
+      @skills_catalog.skills.values
+        .sort_by(&.name)
+        .each do |skill|
+          entries << UI::Completion.new(name: "/#{skill.name}", description: skill.description, takes_args: true, builtin: false)
+        end
+
+      entries
+    end
+
+    private def print_chat_help : Nil
+      lines = Array(String).new
+      lines << "Chat commands:"
+      ChatCommands.definitions.each do |d|
+        verb = d.argument ? "#{d.verb} #{d.argument}" : d.verb
+        lines << "  %-20s %s" % [verb, d.description]
+      end
+
+      unless @skills_catalog.skills.empty?
+        lines << ""
+        lines << "Skills:"
+        @skills_catalog.skills.values
+          .sort_by(&.name)
+          .each { |skill| lines << "  %-20s %s" % ["/#{skill.name}", skill.description] }
+      end
+
+      lines << ""
+      lines << "Built-in commands take precedence over skills of the same name."
+      presentation.say_block(lines)
+    end
+
+    # The in-chat version of `smith sessions`: the same rows, the most recent
+    # few of them, so a session to /resume can be picked without leaving the
+    # prompt.
+    private def print_sessions_list : Nil
+      entries = @session_store.list
+      if entries.empty?
+        chat_puts("No saved sessions under #{@session_store.sessions_dir}.")
+        return
+      end
+
+      lines = Array(String).new
+      lines << "📜 Saved sessions (#{entries.size} total, most recent first):"
+      lines << "  " + "-" * 90
+      lines << "  %-28s %-24s %-18s %s" % ["SESSION ID", "NAME", "UPDATED", "FIRST PROMPT"]
+      lines << "  " + "-" * 90
+      lines.concat(session_rows(entries.first(15)))
+      lines << "  " + "-" * 90
+      lines << "Switch with /resume <name or id>; 'smith sessions' shows all of them."
+      presentation.say_block(lines)
+    end
+
+    private def session_rows(entries : Array(Session::IndexEntry)) : Array(String)
+      entries.map do |e|
+        time_str = e.updated_at.to_s("%Y-%m-%d %H:%M")
+        "  %-28s %-24s %-18s %s" % [e.id, e.name || "-", time_str, e.first_prompt]
+      end
+    end
+
+    # `/resume <ref>` from inside a session. nil means "stay where you are":
+    # the reference resolved to nothing, or to the session already open.
+    private def resolve_resume_target(session_data : Session::Data, reference : String) : Session::Data?
+      target = begin
+        @session_store.resolve(reference)
+      rescue ex : ArgumentError
+        chat_puts("❌ #{ex.message}")
+        return nil
+      end
+
+      if target.id == session_data.id
+        chat_puts("Already in session '#{target.reference}'.")
+        return nil
+      end
+
+      target
+    end
+
+    # Everything that has to move when the loop switches sessions mid-run:
+    # the session id, the checkpoint store, the hooks runner's session id,
+    # the model/provider pair and the agent itself.
+    private def activate_session(target : Session::Data, provider : LLM::Provider) : {LLM::Provider, Agent}
+      @session_id = target.id
+      hooks.session_id = target.id
+      setup_checkpoints(target)
+
+      # The resumed session decides model and provider, the same way
+      # `smith resume` does — a -m from the original start does not follow.
+      # Both are set before the provider is rebuilt: build_provider reads @model.
+      @model = target.model
+      @provider_name = target.provider
+      provider = build_provider(target.provider) unless provider.name.downcase == target.provider.downcase
+      agent = build_agent(provider, target)
+      @todos.replace(target.todos)
+
+      # The trap's closure captured the session it was installed for — it
+      # must persist the new one when ^C lands after a /resume.
+      install_interrupt_handler(target, agent)
+
+      {provider, agent}
     end
 
     # The chat equivalent of `smith rewind`: undo everything back to the

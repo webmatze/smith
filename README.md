@@ -32,6 +32,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
+- **💬 Chat Commands & Autocomplete (`Smith::ChatCommands`)**: Slash commands (`/help`, `/clear`, `/sessions`, `/resume`, `/rename`, `/rewind`, `/context`, `/plan`, `/normal`, `/quit`) resolved before skill expansion, with a popup that filters and completes them — arrow keys select, Tab fills, Enter runs.
 - **⚡ Native Performance**: Compiles to a lightweight native binary; the test suite runs in well under a second.
 
 ---
@@ -964,6 +965,26 @@ Use `--no-tui` to fall back to the plain line renderer, or `--tui` to ask for th
 
 Pressing **Ctrl+C** in headless mode — including mid-response — saves the session and exits with code 130, printing the `smith resume` command to pick it back up. Nothing in flight is lost.
 
+#### Slash commands and autocomplete
+
+Typing `/` in the prompt opens an **autocomplete popup** listing the built-in commands and your skills. It filters as you type, `↑`/`↓` moves the selection, **Tab** completes the selected command, **Enter** runs it (or finishes the command word if it still needs an argument), and **Esc** closes the popup without clearing what you typed.
+
+The built-in commands, resolved before skill expansion (a skill of the same name cannot shadow them):
+
+| Command             | What it does                                                          |
+| ------------------- | --------------------------------------------------------------------- |
+| `/help`             | Show the command and skill list                                       |
+| `/plan` / `/normal` | Switch plan mode on / off                                             |
+| `/clear`            | Clear the context and the screen                                      |
+| `/context`          | Show where the context window goes                                    |
+| `/rewind`           | Undo this session back to its start                                   |
+| `/sessions`         | List saved sessions                                                   |
+| `/resume <session>` | Switch to another session without leaving the loop                    |
+| `/rename <name>`    | Rename the current session                                            |
+| `/quit`             | End the session (same as `exit` or `quit`)                            |
+
+`/clear` wipes the conversation (and, in the fullscreen UI, the screen) but leaves the on-disk transcript alone — it is append-only. `/resume` saves the session you were in first, then clears the screen and resumes the target; the interrupt handlers and the todo list follow the switch.
+
 ### Headless Mode
 
 Run a single prompt in headless mode and exit:
@@ -1356,7 +1377,7 @@ src/
     ├── todos.cr             # Todo list state, validation & change callback
     ├── mode.cr              # Normal / plan mode enum
     ├── plan.cr              # Plan session state & approval gates (prompt/auto/halting)
-    ├── chat_commands.cr     # Built-in /plan and /normal, resolved before skills
+    ├── chat_commands.cr     # Built-in slash-command table (/help, /clear, /resume…), resolved before skills
     ├── hooks.cr             # Hook definitions & subprocess runner (both response protocols)
     ├── trust.cr             # Trust store & prompt for project-defined hooks
     ├── session.cr           # Session persistence store (~/.smith/sessions/<id>/) & transcript trimming
@@ -1412,6 +1433,7 @@ src/
         ├── markdown.cr      # Lightweight markdown → styled lines (no dependency)
         ├── view_model.cr    # Blocks (user, assistant, tool, todo, notice) & spinner
         ├── input_editor.cr  # Single-line editor with history & kill-ring keys
+        ├── completions.cr   # Slash-command autocomplete popup (filter, selection, window)
         ├── app.cr           # Fullscreen controller: key loop, draw loop & modals
         ├── renderer.cr      # TuiRenderer — the third Output::Renderer, event → blocks
         ├── gates.cr         # TuiApprover & TuiPlanGate — modals replacing plain prompts

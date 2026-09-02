@@ -45,5 +45,9 @@ module Smith::UI
     def say_block(lines : Array(String)) : Nil
       @app.notice(lines.map { |text| [Span.new(text, Style.new(fg: Palette::INFO))] of Span })
     end
+
+    def clear_screen : Nil
+      @app.clear!
+    end
   end
 end

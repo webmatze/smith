@@ -59,3 +59,55 @@ describe "the session commands" do
     Smith::ChatCommands.parse("/rename").should be_nil
   end
 end
+
+describe "the context and session-switch commands" do
+  it "recognises /help, /clear, /sessions and /quit" do
+    Smith::ChatCommands.parse("/help").try(&.command).should eq(Smith::ChatCommand::Help)
+    Smith::ChatCommands.parse("/clear").try(&.command).should eq(Smith::ChatCommand::Clear)
+    Smith::ChatCommands.parse("/sessions").try(&.command).should eq(Smith::ChatCommand::Sessions)
+    Smith::ChatCommands.parse("  /QUIT ").try(&.command).should eq(Smith::ChatCommand::Quit)
+  end
+
+  it "leaves their bare forms to the skill catalog when they carry arguments" do
+    Smith::ChatCommands.parse("/help me").should be_nil
+    Smith::ChatCommands.parse("/clear all").should be_nil
+    Smith::ChatCommands.parse("/sessions list").should be_nil
+    Smith::ChatCommands.parse("/quit now").should be_nil
+  end
+
+  it "carries the target along with /resume" do
+    invocation = Smith::ChatCommands.parse("/resume my-session").not_nil!
+
+    invocation.command.should eq(Smith::ChatCommand::Resume)
+    invocation.argument.should eq("my-session")
+  end
+
+  it "ignores /resume without a target" do
+    Smith::ChatCommands.parse("/resume").should be_nil
+  end
+end
+
+describe "the command table" do
+  it "exposes every built-in exactly once" do
+    verbs = Smith::ChatCommands.definitions.map(&.verb)
+    verbs.size.should eq(verbs.uniq.size)
+
+    expected = ["/plan", "/normal", "/clear", "/context", "/rewind", "/sessions", "/resume", "/rename", "/help", "/quit"]
+    verbs.sort.should eq(expected.sort)
+  end
+
+  it "flags exactly which commands require an argument" do
+    args = Smith::ChatCommands.definitions
+      .select(&.requires_argument)
+      .map(&.verb)
+
+    args.sort.should eq(["/rename", "/resume"])
+  end
+
+  it "gives every definition a description the UI can show" do
+    Smith::ChatCommands.definitions.each do |d|
+      d.description.should_not be_empty
+      d.verb.starts_with?('/').should be_true
+    end
+  end
+end

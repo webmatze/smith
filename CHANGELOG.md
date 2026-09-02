@@ -2,6 +2,12 @@
 
 All notable changes to smith. The format follows [Keep a Changelog](https://keepachangelog.com/), and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Chat commands with autocomplete**: new built-ins `/help`, `/clear`, `/sessions`, `/resume <session>` and `/quit` join `/plan`, `/normal`, `/rewind`, `/context` and `/rename`. In the fullscreen UI, typing `/` opens a popup that filters built-ins and skills as you type — `↑`/`↓` select, `Tab` completes, `Enter` runs, `Esc` dismisses. `/resume` switches sessions inside the running loop; `/clear` wipes the context and the screen.
+
 ## [0.3.0] — 2026-09-01
 
 ### Added

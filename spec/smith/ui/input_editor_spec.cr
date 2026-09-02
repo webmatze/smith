@@ -142,6 +142,19 @@ describe Smith::UI::InputEditor do
     end
   end
 
+  describe "set_text" do
+    it "replaces the buffer and parks the cursor at the end" do
+      editor = InputEditor.new
+      type_into(editor, chars("half"))
+      editor.set_text("/resume ")
+      editor.text.should eq("/resume ")
+
+      # Typing continues where completion left off.
+      type_into(editor, chars("target") + [Key.enter])
+      editor.history.should eq(["/resume target"])
+    end
+  end
+
   describe "columns_before_cursor" do
     it "counts display columns for wide characters" do
       editor = InputEditor.new

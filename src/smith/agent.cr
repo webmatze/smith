@@ -81,6 +81,15 @@ module Smith
       @stop_requested = true
     end
 
+    # `/clear`: the conversation starts over. The calibration ratio goes back
+    # to neutral with it — it was measured against a history that no longer
+    # exists. The transcript log keeps its copy: it is append-only on purpose.
+    def clear! : Nil
+      @messages.clear
+      @context_ratio = 1.0
+      @transcript_logged = 0
+    end
+
     private def emit(event : Events::Event)
       @listeners.each(&.call(event))
     end

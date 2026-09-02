@@ -45,6 +45,15 @@ describe Smith::PlainPresentation do
     presentation = Smith::PlainPresentation.new(Smith::Output::HumanRenderer.new(IO::Memory.new))
     presentation.notice_io.should eq(STDERR)
   end
+
+  it "treats clear_screen as a no-op — plain output has no screen to wipe" do
+    stream = IO::Memory.new
+    presentation = Smith::PlainPresentation.new(Smith::Output::HumanRenderer.new(stream))
+
+    presentation.clear_screen
+
+    stream.to_s.should be_empty
+  end
 end
 
 describe Smith::UI::TuiPresentation do
@@ -72,5 +81,16 @@ describe Smith::UI::TuiPresentation do
     # surroundings, so there is nothing to indent it away from.
     Smith::UI::LineUtil.plain(app.blocks[0].lines(80)[0]).should eq("stopping 1 job")
     app.blocks[1].lines(80).map { |l| Smith::UI::LineUtil.plain(l) }.should eq(["Total", "─────"])
+  end
+
+  it "clears the app's blocks on clear_screen" do
+    app = app_with
+    presentation = Smith::UI::TuiPresentation.new(app)
+    presentation.say("something")
+    app.blocks.size.should eq(1)
+
+    presentation.clear_screen
+
+    app.blocks.should be_empty
   end
 end

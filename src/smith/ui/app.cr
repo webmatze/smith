@@ -2,6 +2,7 @@ require "./terminal"
 require "./style"
 require "./view_model"
 require "./input_editor"
+require "./completions"
 require "../todos"
 require "../mode"
 require "../plan"
@@ -46,6 +47,24 @@ module Smith::UI
     @modal_blocks : Array(Block) = [] of Block
     @modal_prompt : StyledLine = LineUtil::EMPTY
 
+    # The slash-command autocomplete popup. `completions` is what the CLI
+    # offers (built-ins plus skills); the palette is the popup's live state.
+    @completions : Array(Completion) = Array(Completion).new
+    @palette : CommandPalette? = nil
+    @popup_open : Bool = false
+
+    getter? popup_open : Bool
+
+    # What the popup shows for the current query — used by the key handler
+    # and the specs alike.
+    def popup_matches : Array(Completion)
+      @palette.try(&.matches) || Array(Completion).new
+    end
+
+    def popup_current : Completion?
+      popup_open? ? @palette.try(&.current) : nil
+    end
+
     @on_interrupt : Proc(Nil)? = nil
     @on_abort : Proc(Nil)? = nil
 
@@ -55,6 +74,10 @@ module Smith::UI
     RESIZE_SETTLE_TICKS = 3
 
     @resize_quiet = 0
+
+    # Set by clear! from the turn fiber; the main loop performs the actual
+    # screen wipe, since it is the only fiber that owns the terminal.
+    @clear_screen_pending = false
 
     # Status bar contents, updated by whoever drives the run.
     property model_name : String = ""
@@ -67,6 +90,13 @@ module Smith::UI
       @editor = InputEditor.new(history)
       @blocks = Array(Block).new
       @state = State::Idle
+    end
+
+    # What the popup offers: built-in chat commands plus the skills catalog.
+    # Setting it replaces the list; the palette is rebuilt lazily.
+    def completions=(list : Array(Completion)) : Nil
+      @completions = list
+      @palette = nil
     end
 
     def on_interrupt(&block : -> Nil)
@@ -93,6 +123,18 @@ module Smith::UI
 
     def notice(lines : Array(StyledLine)) : Nil
       add_block(NoticeBlock.new(lines), finalize: true)
+    end
+
+    # `/clear`: everything the screen shows is session history the user asked
+    # to forget — so the block list goes too. The actual screen wipe is left
+    # to the main loop (@clear_screen_pending): it owns the terminal, and
+    # slash commands run on the turn fiber.
+    def clear! : Nil
+      @blocks = Array(Block).new
+      @flushed = 0
+      @printed = 0
+      @clear_screen_pending = true
+      @dirty = true
     end
 
     # Every finished block, in order, moves into the scrollback — printed once
@@ -319,6 +361,14 @@ module Smith::UI
           end
 
           flush_blocks!
+
+          # `/clear` ran on the turn fiber; the wipe itself is terminal IO
+          # and belongs here, the only fiber that owns it.
+          if @clear_screen_pending
+            @clear_screen_pending = false
+            redraw_all!
+          end
+
           draw! if needs_draw?
         end
       ensure
@@ -342,38 +392,119 @@ module Smith::UI
     private def handle_idle_key(key : Key, on_submit : String -> Nil) : Bool
       case key.kind
       in Key::Kind::Escape
-        @editor.reset unless @editor.empty?
+        # The popup owns the first Escape: dismissing it is not clearing
+        # what was typed. The next one clears the editor, as before.
+        if popup_open?
+          close_popup
+        else
+          @editor.reset unless @editor.empty?
+        end
       in Key::Kind::Eof
         return true
       in Key::Kind::Ctrl
         case key.char
         when 'c'
           return true if @editor.empty?
+          close_popup
           @editor.reset
         when 'd'
           return true if @editor.empty?
         end
+      in Key::Kind::Up, Key::Kind::Down
+        # The popup, while it is up, owns the arrow keys: selecting a
+        # command is not walking the history.
+        if popup_open? && (palette = @palette)
+          key.kind.up? ? palette.move_up : palette.move_down
+          @dirty = true
+        else
+          @editor.handle(key)
+          @dirty = true
+        end
       in Key::Kind::Enter
+        if current = popup_selection
+          if current.takes_args
+            # Complete the command word, then let the human type the
+            # argument — submitting a half-typed `/resume` does nothing.
+            @editor.set_text("#{current.name} ")
+            refresh_popup
+            @dirty = true
+            return false
+          end
+          @editor.set_text(current.name)
+        end
         # Through the editor, not beside it: submitting is what files the
         # prompt into the history that Up and Down walk. The editor resets
         # itself either way, so a stray run of spaces does not linger.
         text = @editor.handle(key) || ""
+        close_popup
         return false if text.strip.empty?
 
         add_block(UserBlock.new(text), finalize: true)
         @state = State::Turn
         @interrupts = 0
         on_submit.call(text)
-      in Key::Kind::Char, Key::Kind::Paste, Key::Kind::Newline, Key::Kind::Backspace,
-         Key::Kind::Delete, Key::Kind::Left, Key::Kind::Right, Key::Kind::Up, Key::Kind::Down,
+      in Key::Kind::Char
+        if popup_open? && key.char == '\t'
+          complete_from_popup
+        else
+          @editor.handle(key)
+          refresh_popup
+          @dirty = true
+        end
+      in Key::Kind::Paste, Key::Kind::Newline, Key::Kind::Backspace,
+         Key::Kind::Delete, Key::Kind::Left, Key::Kind::Right,
          Key::Kind::Home, Key::Kind::End
         @editor.handle(key)
+        refresh_popup
         @dirty = true
       in Key::Kind::Tick, Key::Kind::Resized, Key::Kind::Unknown
         # Nothing to do. Resized never reaches here — the run loop answers it
         # above the state machine — but the case has to name it.
       end
       false
+    end
+
+    # --- the slash-command popup ------------------------------------------------
+
+    # Tab: fill the editor with the selection. A command that takes an
+    # argument gets a trailing space so typing the argument starts at once;
+    # either way the popup goes down — the word it completed is done.
+    private def complete_from_popup : Nil
+      return unless current = popup_selection
+
+      @editor.set_text(current.takes_args ? "#{current.name} " : current.name)
+      refresh_popup
+      @dirty = true
+    end
+
+    # The selected entry, but only while the popup is actually up — a stale
+    # palette from a previous popup must not decide an Enter.
+    private def popup_selection : Completion?
+      popup_open? ? @palette.try(&.current) : nil
+    end
+
+    # Recomputes what matches the editor text. The popup comes up on a bare
+    # `/`, follows every keystroke and goes away the moment the text stops
+    # being a command word in progress.
+    private def refresh_popup : Nil
+      query = CommandPalette.query_for(@editor.text)
+      if query.nil?
+        close_popup
+        return
+      end
+
+      palette = @palette ||= CommandPalette.new(@completions)
+      palette.update(query)
+      was_open = @popup_open
+      @popup_open = palette.open?
+      @dirty = true if was_open != @popup_open
+    end
+
+    private def close_popup : Nil
+      if @popup_open
+        @popup_open = false
+        @dirty = true
+      end
     end
 
     # First interrupt asks the agent to stop; a second one within two seconds
@@ -484,6 +615,13 @@ module Smith::UI
 
       segments << Segment.new([LineUtil::EMPTY], false) unless segments.empty?
 
+      # The autocomplete popup sits right above the prompt it belongs to.
+      # Droppable like the blocks above it: on a small screen the prompt
+      # itself is worth more than the list offering to fill it.
+      if popup_open?
+        segments << Segment.new(popup_lines(width), false)
+      end
+
       tail = Array(StyledLine).new
       tail << status_line(width)
       # A turn in flight shows nothing under the status bar, and in ModalText
@@ -492,6 +630,28 @@ module Smith::UI
       segments << Segment.new(tail, true)
 
       clamp_height(segments, height)
+    end
+
+    private def popup_lines(width : Int32) : Array(StyledLine)
+      palette = @palette
+      return Array(StyledLine).new if palette.nil?
+
+      selected_index = palette.selected
+      top = palette.top
+
+      palette.visible.map_with_index do |completion, i|
+        index = top + i
+        style = index == selected_index ? Style.new(invert: true) : Style.new(dim: true)
+        marker = index == selected_index ? "❯" : " "
+
+        line = StyledLine.new
+        line << Span.new("#{marker} ", Style.new(fg: Palette::ACCENT))
+        line << Span.new(completion.name, Style.new(bold: true).merge(style))
+        line << Span.new(" · ", Style.new(fg: Palette::BORDER))
+        line << Span.new(completion.description, Style.new(dim: true).merge(style))
+
+        LineUtil.truncate(line, width)
+      end
     end
 
     # The live region is redrawn in place, and that only works while it fits

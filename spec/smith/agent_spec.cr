@@ -349,3 +349,18 @@ describe "a request that cannot be brought under the ceiling" do
     provider.calls.should eq(0)
   end
 end
+
+describe "clearing the agent's context" do
+  it "drops the history and resets the calibration ratio" do
+    provider = TextOnlyProvider.new
+    agent = Smith::Agent.new(provider: provider, registry: Smith::Tools::Registry.new)
+    agent.send("hello")
+
+    agent.messages.size.should be > 0
+
+    agent.clear!
+
+    agent.messages.should be_empty
+    agent.context_ratio.should eq(1.0)
+  end
+end

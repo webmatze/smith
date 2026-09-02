@@ -465,3 +465,145 @@ describe Smith::UI::TuiPlanGate do
     verdict.feedback.should eq("split step two")
   end
 end
+
+describe "the slash-command popup" do
+  completions = ->(app : App) do
+    app.completions = [
+      Completion.new(name: "/plan", description: "plan mode"),
+      Completion.new(name: "/clear", description: "clear context"),
+      Completion.new(name: "/resume", description: "switch session", takes_args: true),
+      Completion.new(name: "/test", description: "a skill", takes_args: true, builtin: false),
+    ]
+  end
+
+  it "comes up on a bare slash and follows the typing" do
+    app = app_with(["/", :tick, :tick])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    app.popup_open?.should be_true
+    app.popup_matches.size.should eq(4)
+  end
+
+  it "filters by what is typed and closes when nothing matches" do
+    app = app_with(["/cle", :tick, "rzzz", :tick])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    # `/clearzzz` matches nothing, so the popup went away.
+    app.popup_open?.should be_false
+  end
+
+  it "navigates with the arrow keys and shows the rows it has" do
+    # Sorted built-ins first: /clear, /plan, /resume, then the /test skill.
+    app = app_with(["/", :tick, "\e[B", "\e[B", :tick])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    app.popup_current.try(&.name).should eq("/resume")
+  end
+
+  it "draws the popup rows into the terminal stream" do
+    app = app_with(["/", "\x03", "\x03"])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    stream = app.terminal.io.as(IO::Memory).to_s
+    stream.should contain("/clear")
+    stream.should contain("/plan")
+    stream.should contain("❯")
+  end
+
+  it "lets the arrow keys walk the history once the popup is down" do
+    app = app_with(["first\r", :tick, "\e[A", :tick])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    app.editor.text.should eq("first")
+  end
+
+  it "completes a bare command on Tab and submits it on Enter" do
+    app = app_with(["/cl", "\t", "\r"])
+    completions.call(app)
+    seen = [] of String
+
+    app.run { |text| seen << text; app.turn_finished }
+
+    seen.should eq(["/clear"])
+    app.popup_open?.should be_false
+  end
+
+  it "adds a trailing space on Tab for commands that take an argument" do
+    app = app_with(["/re", "\t", :tick, "x\r"])
+    completions.call(app)
+    seen = [] of String
+
+    app.run { |text| seen << text; app.turn_finished }
+
+    seen.should eq(["/resume x"])
+  end
+
+  it "keeps typing after Enter completes a command that takes an argument" do
+    app = app_with(["/re", "\r", :tick, "target\r"])
+    completions.call(app)
+    seen = [] of String
+
+    app.run { |text| seen << text; app.turn_finished }
+
+    seen.should eq(["/resume target"])
+  end
+
+  it "dismisses the popup with Escape and keeps the typed text" do
+    app = app_with(["/cl", "\e", :tick, :tick])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    app.popup_open?.should be_false
+    app.editor.text.should eq("/cl")
+  end
+
+  it "leaves history untouched while the popup owns the arrows" do
+    app = app_with(["saved\r", :tick, "/", "\e[B", :tick, :tick])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    app.editor.history.should eq(["saved"])
+    app.editor.text.should eq("/")
+  end
+
+  it "offers skills alongside built-ins, built-ins first" do
+    app = app_with(["/", :tick, :tick])
+    completions.call(app)
+
+    app.run { |_| app.turn_finished }
+
+    names = app.popup_matches.map(&.name)
+    names.index("/test").should be_a(Int32)
+    names.index { |n| n.starts_with?("/p") }.should_not be_nil
+    # The skill sorts after the built-ins that share its prefix space.
+    names.index("/test").should_not eq(0)
+  end
+end
+
+describe "clearing the screen" do
+  it "drops every block so the next draw starts over" do
+    app = app_with(["x\r", :tick])
+
+    app.run do |_|
+      spawn do
+        app.notice("gone")
+        app.clear!
+        app.turn_finished
+      end
+    end
+
+    app.blocks.should be_empty
+  end
+end

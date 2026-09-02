@@ -79,6 +79,10 @@ module Smith::Hooks
     # Fired for every hook that actually ran, so the renderers can show it.
     property on_fire : Proc(Event, String, Bool, Nil)?
 
+    # A /resume inside the chat loop switches sessions mid-run; the runner is
+    # built once and reused, so the id must follow the switch.
+    property session_id : String
+
     def initialize(
       @definitions : Array(Definition) = Array(Definition).new,
       @session_id : String = "",
