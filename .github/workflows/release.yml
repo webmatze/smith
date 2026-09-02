@@ -77,7 +77,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           awk -v ver="$version" '
-            /^## \[/ { if (found) exit; if (index($0, "[" ver "]")) found=1; else exit }
+            /^## \[/ { if (found) exit; found = index($0, "[" ver "]") > 0; next }
             found { print }
           ' CHANGELOG.md > release_notes.md
           [ -s release_notes.md ] || echo "See CHANGELOG.md." > release_notes.md
