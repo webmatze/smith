@@ -64,6 +64,8 @@ module Smith
     DEFAULT_MAX_CHECKPOINTS     = 100
     DEFAULT_RETENTION_DAYS      =  30
 
+    DEFAULT_SESSION_RETENTION_DAYS = 90
+
     struct HTTPSettings
       getter connect_timeout : Int32
       getter read_timeout : Int32
@@ -124,6 +126,21 @@ module Smith
       getter retention_days : Int32
 
       def initialize(@enabled : Bool, @max_per_session : Int32, @retention_days : Int32)
+      end
+
+      def retention : Time::Span
+        @retention_days.days
+      end
+    end
+
+    # Session hygiene at startup (#82): entries last touched longer ago than
+    # this are dropped when a run starts — as `Checkpoints::Store.open` prunes
+    # checkpoints. Longer than checkpoint retention on purpose: checkpoints are
+    # a way back, sessions are the record itself.
+    struct SessionSettings
+      getter retention_days : Int32
+
+      def initialize(@retention_days : Int32)
       end
 
       def retention : Time::Span
@@ -573,6 +590,15 @@ module Smith
           deny_read: string_list("sandbox", "deny_read"),
           unsandboxed: string_list("sandbox", "unsandboxed")
         )
+      )
+    end
+
+    # Consumed by CLI#setup_checkpoints, next to the checkpoint prune: a
+    # session older than this (last update) is dropped when a run starts.
+    # The newest session survives regardless (#82).
+    def sessions : SessionSettings
+      SessionSettings.new(
+        retention_days: lookup("sessions", "retention_days").try(&.as_i?) || DEFAULT_SESSION_RETENTION_DAYS
       )
     end
 

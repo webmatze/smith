@@ -56,6 +56,8 @@ module Smith
     @files_only : Bool = false
     @dry_run : Bool = false
     @force : Bool = false
+    @older_than : String? = nil
+    @keep_last : Int32 = 0
     @mode : Mode? = nil
     @plan : PlanSession? = nil
     @real_approver : Tools::Approver? = nil
@@ -111,6 +113,8 @@ module Smith
           str.puts "  resume [<session>]         Resume a session by name or id (default: the latest)"
           str.puts "  continue [<prompt>]        Continue the latest session; same as -c"
           str.puts "  sessions, list             List all saved local chat sessions"
+          str.puts "  sessions delete <ref>…     Delete sessions (name or id), files and all"
+          str.puts "  sessions prune             Drop sessions older than --older-than (30d), keeping --keep-last"
           str.puts "  rename <session> <name>    Give a session a name you can resume by"
           str.puts "  fork <session>             Copy a session so it can be taken two ways"
           str.puts "  context [<session>]        Show where the context window is going"
@@ -144,12 +148,25 @@ module Smith
           @files_only = true
         end
 
-        opts.on("--dry-run", "rewind: show what would change, change nothing") do
+        opts.on("--dry-run", "rewind / sessions: show what would change, change nothing") do
           @dry_run = true
         end
 
         opts.on("--force", "rewind: overwrite files changed outside smith since the snapshot") do
           @force = true
+        end
+
+        opts.on("--older-than SPAN", "sessions prune: drop sessions last updated longer ago (e.g. 30d, 12h, 15m; default 30d)") do |value|
+          @older_than = value
+        end
+
+        opts.on("--keep-last N", "sessions prune: keep the N most recent regardless of age") do |value|
+          count = value.to_i?
+          if count.nil? || count < 0
+            STDERR.puts "❌ Error: --keep-last expects a non-negative number, got #{value.inspect}."
+            exit(1)
+          end
+          @keep_last = count
         end
 
         opts.on("--agent NAME", "Run the main thread as the agent defined in .smith/agents/NAME.md") do |name|
@@ -260,7 +277,15 @@ module Smith
         # the tests"` works the same way `smith -c` does.
         run_resume(nil, @args[1..-1]?.try(&.join(" ")))
       when "sessions", "list"
-        list_sessions
+        # `smith sessions` lists; the subcommands do the hygiene (#82).
+        case @args[1]?
+        when "delete"
+          delete_sessions(@args[2..-1]?)
+        when "prune"
+          prune_sessions
+        else
+          list_sessions
+        end
       when "rename"
         rename_session(@args[1]?, @args[2..-1]?.try(&.join(" ")))
       when "fork"
@@ -1248,6 +1273,10 @@ module Smith
     private def setup_checkpoints(session_data : Session::Data) : Nil
       settings = @config.checkpoints
 
+      # Session hygiene rides the same chokepoint (#82): the session being
+      # started is protected explicitly, so a resume cannot expire itself.
+      @session_store.prune(older_than: @config.sessions.retention, protect: session_data.id)
+
       @checkpoints = Checkpoints::Store.open(
         @session_store.session_dir(session_data.id),
         enabled: settings.enabled?,
@@ -1606,6 +1635,72 @@ module Smith
 
     private def format_tokens(count : Int32) : String
       count.to_s.reverse.gsub(/(\d{3})(?=\d)/, "\\1.").reverse
+    end
+
+    # `smith sessions delete <ref>…` — removes a session completely: index
+    # entry, directory with checkpoints and logs, legacy file if one exists.
+    # One bad reference must not stop the rest from going; --dry-run lists
+    # what would be removed without removing it.
+    private def delete_sessions(references : Array(String)?) : Nil
+      if references.nil? || references.empty?
+        STDERR.puts "Error: 'smith sessions delete' needs at least one session (name or id)."
+        STDERR.puts "Example: smith sessions delete my-refactor"
+        exit(1)
+      end
+
+      doomed = Array(String).new
+      errors = Array(String).new
+
+      references.each do |reference|
+        entry = if @dry_run
+                  @session_store.resolve_entry(reference)
+                else
+                  @session_store.delete(reference)
+                end
+        doomed << (entry.try { |e| "#{e.name || e.id} (#{e.id})" } || reference)
+      rescue ex : ArgumentError
+        errors << ex.message.not_nil!
+      end
+
+      verb = @dry_run ? "Would delete" : "Deleted"
+      doomed.each { |label| puts "🗑️  #{verb} #{label}" }
+      errors.each { |message| STDERR.puts "❌ #{message}" }
+
+      exit(1) unless errors.empty?
+    end
+
+    # `smith sessions prune` — drops every session last updated before the
+    # cutoff, but never the newest one and never the --keep-last most recent.
+    private def prune_sessions : Nil
+      input = @older_than || "30d"
+
+      older_than = begin
+        Session::Retention.parse(input)
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
+
+      doomed = @session_store.prune(older_than: older_than, keep_last: @keep_last, dry_run: @dry_run)
+
+      if doomed.empty?
+        puts "Nothing to prune — no session is older than #{input}."
+        puts "   The newest session is never pruned."
+        return
+      end
+
+      if @dry_run
+        puts "🔍 Dry run — nothing was deleted. #{doomed.size} session(s) would go:"
+      else
+        puts "🧹 Pruned #{doomed.size} session(s) older than #{input}:"
+      end
+
+      doomed.each do |entry|
+        printf "   %-28s %-24s updated %s\n", entry.id, entry.name || "-", entry.updated_at.to_s("%Y-%m-%d %H:%M")
+      end
+
+      remaining = @session_store.list.size
+      puts "   #{remaining} session(s) #{(@dry_run ? "would remain" : "left")}; the newest one is never pruned."
     end
 
     private def list_sessions

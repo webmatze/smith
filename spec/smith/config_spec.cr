@@ -818,3 +818,24 @@ describe "a context budget that cannot work" do
     end
   end
 end
+
+describe "session settings" do
+  it "defaults to a 90-day retention" do
+    with_sandbox do |temp_dir, _home|
+      Smith::Config.load(make_project(temp_dir)).sessions.retention_days.should eq(90)
+    end
+  end
+
+  it "can be tuned" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [sessions]
+        retention_days = 7
+        TOML
+
+      settings = Smith::Config.load(project).sessions
+      settings.retention_days.should eq(7)
+      settings.retention.should eq(7.days)
+    end
+  end
+end

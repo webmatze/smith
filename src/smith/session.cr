@@ -183,6 +183,25 @@ module Smith::Session
     end
   end
 
+  # Parses the `--older-than` span of `sessions prune`: "30d", "12h", "15m".
+  # A bare number means days, because that is the unit retention is measured
+  # in. Anything else is a typo the user should see, not guess at.
+  module Retention
+    def self.parse(input : String) : Time::Span
+      match = input.strip.match(/\A(\d+(?:\.\d+)?)\s*([dhm])?\z/i)
+      raise ArgumentError.new("Cannot parse '#{input}' as a duration — try e.g. 30d, 12h or 15m.") if match.nil?
+
+      amount = match[1].to_f
+      unit = (match[2]? || "d").downcase
+
+      case unit
+      when "d" then amount.days
+      when "h" then amount.hours
+      else          amount.minutes
+      end
+    end
+  end
+
   class Store
     getter base_dir : String
     getter sessions_dir : String
@@ -333,12 +352,16 @@ module Smith::Session
     # A reference is whatever the user typed: an id or a name. An id wins,
     # since it is unambiguous by construction.
     def resolve(reference : String) : Data
+      load(resolve_id(reference))
+    end
+
+    # Resolution without loading: works on the index and the filesystem, so a
+    # session whose file is gone (or half-written) can still be named.
+    private def resolve_id(reference : String) : String
       wanted = reference.strip
       entries = list
 
-      if entries.any? { |e| e.id == wanted } || session_file?(wanted)
-        return load(wanted)
-      end
+      return wanted if entries.any? { |e| e.id == wanted } || session_file?(wanted)
 
       matches = entries.select { |e| e.name == wanted }
 
@@ -346,7 +369,7 @@ module Smith::Session
       when 0
         raise ArgumentError.new("Session '#{wanted}' not found. Run 'smith sessions' to see what there is.")
       when 1
-        load(matches.first.id)
+        matches.first.id
       else
         # Only reachable if session files were edited by hand, but picking one
         # silently would resume the wrong conversation.
@@ -392,6 +415,65 @@ module Smith::Session
       copy
     end
 
+    # Removes a session completely: index entry, directory (checkpoints, bash
+    # logs, media blobs), and any legacy flat file. Resolved the same way
+    # `resume` resolves, so a name works as well as an id — but against the
+    # index rather than the loaded transcript, so a half-written session can
+    # still be cleaned up. Returns the index entry when there was one.
+    def delete(reference : String) : IndexEntry?
+      entry = resolve_entry(reference)
+      remove(entry.try(&.id) || reference)
+      entry
+    end
+
+    # Resolution that stops at the index entry — what delete and its dry-run
+    # share. Raises like resolve does when the reference names nothing.
+    def resolve_entry(reference : String) : IndexEntry?
+      id = resolve_id(reference)
+      list.find { |e| e.id == id }
+    end
+
+    # What `prune` would remove: every entry whose `updated_at` is older than
+    # the cutoff, except — always — the newest session, and additionally the
+    # newest `keep_last` when given. `protect` shields one more id, which is
+    # how a resume keeps the session it asked for from expiring mid-start.
+    # Returned oldest first.
+    def prune_candidates(older_than : Time::Span, keep_last : Int32 = 0, protect : String? = nil) : Array(IndexEntry)
+      entries = list
+      return Array(IndexEntry).new if entries.size <= 1
+
+      cutoff = Time.local - older_than
+      doomed = entries.select { |e| e.updated_at < cutoff }
+
+      # Math.max keeps the newest session alive even with keep_last = 0:
+      # pruning everything you have is rarely what was asked for.
+      shielded = entries.first(Math.max(keep_last, 1)).map(&.id).to_set
+      shielded.add(protect) if protect
+
+      doomed.reject { |e| shielded.includes?(e.id) }.reverse
+    end
+
+    # Deletes what prune_candidates selects and returns it; with `dry_run`
+    # nothing is touched and the return value is what would go.
+    def prune(older_than : Time::Span, keep_last : Int32 = 0, protect : String? = nil, dry_run : Bool = false) : Array(IndexEntry)
+      doomed = prune_candidates(older_than, keep_last, protect)
+      doomed.each { |entry| remove(entry.id) } unless dry_run
+      doomed
+    end
+
+    private def remove(id : String) : Nil
+      # Index first: interrupted before the files go, what is left is an
+      # invisible orphan directory; the other way round the index would keep
+      # naming a session that is no longer there.
+      write_index(list.reject { |e| e.id == id })
+
+      dir = session_dir(id)
+      FileUtils.rm_rf(dir) if Dir.exists?(dir)
+
+      legacy = legacy_path(id)
+      File.delete(legacy) if File.exists?(legacy)
+    end
+
     private def session_file?(id : String) : Bool
       File.exists?(File.join(session_dir(id), "session.json")) || File.exists?(legacy_path(id))
     end
@@ -429,6 +511,10 @@ module Smith::Session
         entries.unshift(new_entry)
       end
 
+      write_index(entries)
+    end
+
+    private def write_index(entries : Array(IndexEntry)) : Nil
       AtomicFile.write(@index_path, entries.to_json)
     end
   end
