@@ -38,7 +38,7 @@ module Smith::UI
         end
 
         if stripped.empty?
-          lines << LineUtil::EMPTY
+          lines << LineUtil::EMPTY_LINE
           next
         end
 

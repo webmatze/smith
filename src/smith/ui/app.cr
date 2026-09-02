@@ -45,7 +45,7 @@ module Smith::UI
     @modal_chars : Array(Char) = [] of Char
     @modal_title : String = ""
     @modal_blocks : Array(Block) = [] of Block
-    @modal_prompt : StyledLine = LineUtil::EMPTY
+    @modal_prompt : StyledLine = LineUtil::EMPTY_LINE
 
     # The slash-command autocomplete popup. `completions` is what the CLI
     # offers (built-ins plus skills); the palette is the popup's live state.
@@ -167,7 +167,7 @@ module Smith::UI
       answer = channel.receive
       @char_channel = nil
       clear_modal
-      @modal_prompt = LineUtil::EMPTY
+      @modal_prompt = LineUtil::EMPTY_LINE
       @state = State::Turn
       @dirty = true
       answer
@@ -187,7 +187,7 @@ module Smith::UI
       answer = channel.receive
       @text_channel = nil
       clear_modal
-      @modal_prompt = LineUtil::EMPTY
+      @modal_prompt = LineUtil::EMPTY_LINE
       @state = State::Turn
       @dirty = true
       answer
@@ -586,10 +586,10 @@ module Smith::UI
       if @flushed < @blocks.size
         lines = Array(StyledLine).new
         (@flushed...@blocks.size).each_with_index do |i, n|
-          lines << LineUtil::EMPTY if n > 0
+          lines << LineUtil::EMPTY_LINE if n > 0
           lines.concat(@blocks[i].lines(width))
         end
-        lines << LineUtil::EMPTY if modal_open?
+        lines << LineUtil::EMPTY_LINE if modal_open?
         segments << Segment.new(lines, false)
       end
 
@@ -600,7 +600,7 @@ module Smith::UI
 
         body = Array(StyledLine).new
         @modal_blocks.each_with_index do |block, i|
-          body << LineUtil::EMPTY if i > 0
+          body << LineUtil::EMPTY_LINE if i > 0
           body.concat(block.lines(width))
         end
         segments << Segment.new(body, false) unless body.empty?
@@ -608,12 +608,12 @@ module Smith::UI
         unless @modal_prompt.empty?
           # The blank above is a separator, not content: on a screen too small
           # for everything it goes before the line it separates.
-          segments << Segment.new([LineUtil::EMPTY], false)
+          segments << Segment.new([LineUtil::EMPTY_LINE], false)
           segments << Segment.new([@modal_prompt + modal_editor_line(width)], true)
         end
       end
 
-      segments << Segment.new([LineUtil::EMPTY], false) unless segments.empty?
+      segments << Segment.new([LineUtil::EMPTY_LINE], false) unless segments.empty?
 
       # The autocomplete popup sits right above the prompt it belongs to.
       # Droppable like the blocks above it: on a small screen the prompt
@@ -641,7 +641,7 @@ module Smith::UI
 
       palette.visible.map_with_index do |completion, i|
         index = top + i
-        style = index == selected_index ? Style.new(invert: true) : Style.new(dim: true)
+        style = index == selected_index ? Style.new(reverse: true) : Style.new(dim: true)
         marker = index == selected_index ? "❯" : " "
 
         line = StyledLine.new
@@ -712,7 +712,7 @@ module Smith::UI
     end
 
     private def modal_editor_line(width : Int32) : StyledLine
-      return LineUtil::EMPTY unless @state.modal_text?
+      return LineUtil::EMPTY_LINE unless @state.modal_text?
       editor_spans(width)
     end
 
@@ -738,7 +738,7 @@ module Smith::UI
       String.build do |io|
         col = 0
         text.each_char do |ch|
-          w = Style.char_width(ch)
+          w = LineUtil.grapheme_width(ch.to_s)
           io << ch if col + w > from && col < from + length
           col += w
           break if col >= from + length
@@ -796,7 +796,7 @@ module Smith::UI
              end
 
       used = LineUtil.width(parts)
-      hint_width = Style.display_width(hint)
+      hint_width = LineUtil.width(hint)
       if !hint.empty? && used + hint_width + 4 <= width
         parts << Span.new(" " * (width - used - hint_width))
         parts << Span.new(hint, Style.new(fg: Palette::BORDER))

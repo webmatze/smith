@@ -1,169 +1,68 @@
+require "anvil"
 require "./terminal"
-require "./style"
 
 module Smith::UI
-  # The prompt's single line of input. One line on purpose: everything the
-  # agent takes is one prompt, and multi-line editing buys little here while
-  # complicating the layout. History is what makes it comfortable.
+  # The prompt's line editor.
+  #
+  # The editing itself — grapheme-aware cursor movement, history with a saved
+  # draft, the readline-style Ctrl keys, horizontal scrolling — lives in
+  # `Anvil::Widgets::InputEditor`. What is left here is the translation from
+  # smith's own `Key` to the event type anvil speaks.
+  #
+  # That translation is temporary: once the key loop itself comes from anvil,
+  # smith's `Key` disappears and this class with it.
   class InputEditor
-    getter history : Array(String)
+    getter inner : Anvil::Widgets::InputEditor
 
-    @buffer : Array(Char) = Array(Char).new
-    @cursor : Int32 = 0
-    @history_index : Int32? = nil
-    @draft : String = ""
-
-    def initialize(@history : Array(String) = Array(String).new, @max_history : Int32 = 500)
+    def initialize(history : Array(String) = Array(String).new, max_history : Int32 = 500)
+      @inner = Anvil::Widgets::InputEditor.new(history, max_history)
     end
 
-    def text : String
-      @buffer.join
-    end
+    delegate text, empty?, reset, set_text, columns_before_cursor, display_width,
+      history, cursor, view, to: @inner
 
-    def empty? : Bool
-      @buffer.empty?
-    end
-
-    def reset : Nil
-      @buffer = Array(Char).new
-      @cursor = 0
-      @history_index = nil
-      @draft = ""
-    end
-
-    # Handles one key. Returns the submitted text when Enter was pressed,
-    # nil otherwise.
     def handle(key : Key) : String?
-      case key.kind
-      in Key::Kind::Char
-        insert(key.char.not_nil!.to_s)
-      in Key::Kind::Paste
-        # Pasted newlines would break the one-line layout; flatten them.
-        insert(key.text.not_nil!.gsub(/\s*\n\s*/, " "))
-      in Key::Kind::Backspace
-        if @cursor > 0
-          @buffer.delete_at(@cursor - 1)
-          @cursor -= 1
-        end
-      in Key::Kind::Delete
-        @buffer.delete_at(@cursor) if @cursor < @buffer.size
-      in Key::Kind::Left
-        @cursor -= 1 if @cursor > 0
-      in Key::Kind::Right
-        @cursor += 1 if @cursor < @buffer.size
-      in Key::Kind::Home
-        @cursor = 0
-      in Key::Kind::End
-        @cursor = @buffer.size
-      in Key::Kind::Up
-        history_previous
-      in Key::Kind::Down
-        history_next
-      in Key::Kind::Ctrl
-        handle_ctrl(key.char)
-      in Key::Kind::Enter
-        return submit
-      in Key::Kind::Newline, Key::Kind::Escape, Key::Kind::Tick,
-         Key::Kind::Resized, Key::Kind::Eof, Key::Kind::Unknown
-        # Not editing keys — the app loop deals with them.
+      # A paste arrives here as one key carrying the whole payload, where
+      # anvil expects the terminal's start/end brackets around the characters.
+      # Handing it straight to the editor keeps both models happy.
+      if key.kind.paste?
+        @inner.insert_text(key.text || "")
+        return nil
       end
-      nil
+
+      event = to_event(key)
+      event ? @inner.handle(event) : nil
     end
 
-    private def handle_ctrl(char : Char?) : Nil
-      case char
-      when 'a' then @cursor = 0
-      when 'e' then @cursor = @buffer.size
-      when 'b' then @cursor -= 1 if @cursor > 0
-      when 'f' then @cursor += 1 if @cursor < @buffer.size
-      when 'u' # kill to start
-        @buffer = @buffer[@cursor..]
-        @cursor = 0
-      when 'k' # kill to end
-        @buffer = @buffer[0...@cursor]
-      when 'w' # kill word back
-        i = @cursor
-        while i > 0 && @buffer[i - 1] == ' '
-          i -= 1
-        end
-        while i > 0 && @buffer[i - 1] != ' '
-          i -= 1
-        end
-        @buffer = @buffer[0...i] + @buffer[@cursor..]
-        @cursor = i
+    # nil for everything the editor has no business with — Escape, Tick,
+    # Resized, Eof — which the app loop handles instead.
+    private def to_event(key : Key) : Termisu::Event::Key?
+      kind = key.kind
+      case kind
+      when .char?
+        char = key.char
+        return nil unless char
+        Termisu::Event::Key.new(Termisu::Input::Key.from_char(char), char: char)
+      when .ctrl?
+        char = key.char
+        return nil unless char
+        Termisu::Event::Key.new(Termisu::Input::Key.from_char(char),
+          Termisu::Input::Modifier::Ctrl)
+      when .enter?     then special(Termisu::Input::Key::Enter)
+      when .backspace? then special(Termisu::Input::Key::Backspace)
+      when .delete?    then special(Termisu::Input::Key::Delete)
+      when .left?      then special(Termisu::Input::Key::Left)
+      when .right?     then special(Termisu::Input::Key::Right)
+      when .home?      then special(Termisu::Input::Key::Home)
+      when .end?       then special(Termisu::Input::Key::End)
+      when .up?        then special(Termisu::Input::Key::Up)
+      when .down?      then special(Termisu::Input::Key::Down)
+      else                  nil
       end
     end
 
-    private def insert(text : String) : Nil
-      chars = text.chars
-      @buffer = @buffer[0...@cursor] + chars + @buffer[@cursor..]
-      @cursor += chars.size
-    end
-
-    private def submit : String
-      submitted = text
-      reset
-      unless submitted.strip.empty?
-        @history.pop? if @history.last? == submitted
-        @history << submitted
-        @history.shift if @history.size > @max_history
-      end
-      submitted
-    end
-
-    private def history_previous : Nil
-      return if @history.empty?
-
-      index = @history_index
-      if index.nil?
-        @draft = text
-        @history_index = @history.size - 1
-      elsif index > 0
-        @history_index = index - 1
-      else
-        return
-      end
-      load_history
-    end
-
-    private def history_next : Nil
-      index = @history_index
-      return if index.nil?
-
-      if index >= @history.size - 1
-        @history_index = nil
-        replace(@draft)
-        @draft = ""
-      else
-        @history_index = index + 1
-        load_history
-      end
-    end
-
-    private def load_history : Nil
-      if entry = @history_index.try { |i| @history[i]? }
-        replace(entry)
-      end
-    end
-
-    private def replace(text : String) : Nil
-      @buffer = text.chars
-      @cursor = @buffer.size
-    end
-
-    # Replaces the whole buffer, cursor to the end — what the autocomplete
-    # popup does when it completes a command.
-    def set_text(text : String) : Nil
-      replace(text)
-    end
-
-    # Columns the text occupies up to (excluding) the cursor.
-    def columns_before_cursor : Int32
-      Style.display_width(@buffer[0...@cursor].join)
-    end
-
-    def display_width : Int32
-      Style.display_width(text)
+    private def special(key : Termisu::Input::Key) : Termisu::Event::Key
+      Termisu::Event::Key.new(key)
     end
   end
 end

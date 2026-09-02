@@ -43,7 +43,7 @@ module Smith::UI
     def lines(width : Int32) : Array(StyledLine)
       prefix = [Span.new("❯ ", Style.new(fg: Palette::USER, bold: true))]
       wrapped = LineUtil.wrap(Markdown.inline(@text), width - 2)
-      wrapped = [LineUtil::EMPTY] if wrapped.empty?
+      wrapped = [LineUtil::EMPTY_LINE] if wrapped.empty?
 
       wrapped.each_with_index.map do |line, i|
         (i.zero? ? prefix : [Span.new("  ")]) + line
@@ -64,7 +64,7 @@ module Smith::UI
 
     def lines(width : Int32) : Array(StyledLine)
       out = Markdown.render(@buffer, width)
-      out = [LineUtil::EMPTY] if out.empty?
+      out = [LineUtil::EMPTY_LINE] if out.empty?
 
       # A visible cursor at the stream's edge, so waiting on the first token
       # does not look like a hang.

@@ -10,11 +10,11 @@ end
 describe Smith::UI::Style do
   describe "#merge" do
     it "lets the overlay win wherever it is set" do
-      base = Style.new(fg: 10, bold: true)
-      overlay = Style.new(fg: 20)
+      base = Style.new(fg: Color.ansi256(10), bold: true)
+      overlay = Style.new(fg: Color.ansi256(20))
 
       merged = base.merge(overlay)
-      merged.fg.should eq(20)
+      merged.fg.should eq(Color.ansi256(20))
       merged.bold?.should be_true
     end
 
@@ -32,7 +32,7 @@ describe Smith::UI::Style do
   describe "#plain?" do
     it "is true only when nothing is set" do
       Style::NONE.plain?.should be_true
-      Style.new(fg: 1).plain?.should be_false
+      Style.new(fg: Color.ansi256(1)).plain?.should be_false
       Style.new(bold: true).plain?.should be_false
     end
   end
@@ -43,7 +43,7 @@ describe Smith::UI::Style do
     end
 
     it "combines flags and colour in one sequence" do
-      ansi = Style.new(fg: 42, bold: true).ansi
+      ansi = Style.new(fg: Color.ansi256(42), bold: true).ansi
       ansi.should contain("1")
       ansi.should contain("38;5;42")
       ansi.should start_with("\e[")
@@ -53,24 +53,24 @@ describe Smith::UI::Style do
 
   describe ".display_width" do
     it "counts ASCII as one column each" do
-      Style.display_width("hello").should eq(5)
+      LineUtil.width("hello").should eq(5)
     end
 
     it "counts CJK and most emoji as two columns" do
-      Style.display_width("你").should eq(2)
-      Style.display_width("😀").should eq(2)
+      LineUtil.width("你").should eq(2)
+      LineUtil.width("😀").should eq(2)
     end
 
     it "treats zero-width characters as width 0" do
       # U+200B zero-width space.
-      Style.display_width("a\u200Bb").should eq(2)
+      LineUtil.width("a\u200Bb").should eq(2)
     end
   end
 
   describe ".char_width" do
     it "classifies individual characters" do
-      Style.char_width('a').should eq(1)
-      Style.char_width('好').should eq(2)
+      LineUtil.grapheme_width('a'.to_s).should eq(1)
+      LineUtil.grapheme_width('好'.to_s).should eq(2)
     end
   end
 end
@@ -158,7 +158,7 @@ describe Smith::UI::LineUtil do
 
     it "resets between differently styled spans" do
       a = Span.new("a", Style.new(bold: true))
-      b = Span.new("b", Style.new(fg: 5))
+      b = Span.new("b", Style.new(fg: Color.ansi256(5)))
       result = LineUtil.to_ansi([a, b])
       count = result.scan("\e[").size
       count.should be >= 3

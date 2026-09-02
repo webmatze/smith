@@ -112,10 +112,10 @@ describe Smith::UI::Markdown do
     end
 
     it "layers inline styles on top of a base style" do
-      base = Style.new(fg: 5)
+      base = Style.new(fg: Color.ansi256(5))
       spans = Markdown.inline("**b**", base)
       bold = spans.find { |s| s.style.bold? }
-      bold.not_nil!.style.fg.should eq(5)
+      bold.not_nil!.style.fg.should eq(Color.ansi256(5))
     end
   end
 end

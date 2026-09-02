@@ -6,6 +6,10 @@ targets:
     main: src/smith.cr
 
 dependencies:
+  # Noch ein Pfad-Verweis: anvil liegt bisher nur lokal. Vor einer
+  # Veröffentlichung von smith muss das ein github-Verweis werden.
+  anvil:
+    path: ../crystal_tui
   toml:
     github: crystal-community/toml.cr
     version: ~> 0.8.1
