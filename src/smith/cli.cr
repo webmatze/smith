@@ -370,10 +370,7 @@ module Smith
     end
 
     private def tui_app : UI::App
-      @tui_app ||= UI::App.new(UI::Terminal.new(
-        STDOUT, STDIN,
-        color: STDOUT.tty? && ENV["NO_COLOR"]?.nil?
-      ))
+      @tui_app ||= UI::App.terminal
     end
 
     private def build_provider(provider_name : String = effective_provider_name) : LLM::Provider

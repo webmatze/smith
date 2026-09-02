@@ -71,7 +71,16 @@ class Screen
     when 'B' then @row = {@row + n, @height - 1}.min
     when 'G' then @col = {n - 1, @width - 1}.min
     when 'H' then @row = 0; @col = 0
-    when 'J' then @grid.each_index { |r| @grid[r] = Array(Char).new(@width, ' ') }
+    when 'J'
+      # ESC[0J löscht ab dem Cursor bis zum Bildschirmende, ESC[2J alles.
+      # Der Unterschied ist wesentlich: die Live-Region wird mit 0J
+      # abgeräumt, und das darf den Scrollback darüber nicht anrühren.
+      if params.includes?("2")
+        @grid.each_index { |r| @grid[r] = Array(Char).new(@width, ' ') }
+      else
+        (@col...@width).each { |x| @grid[@row][x] = ' ' }
+        ((@row + 1)...@height).each { |r| @grid[r] = Array(Char).new(@width, ' ') }
+      end
     when 'K'
       if params.includes?("2")
         @grid[@row] = Array(Char).new(@width, ' ')
