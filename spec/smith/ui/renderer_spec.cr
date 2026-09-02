@@ -94,8 +94,6 @@ describe Smith::UI::TuiRenderer do
     renderer.handle(Smith::Events::ToolStart.new("t1", "bash", tool_args))
     renderer.handle(Smith::Events::ToolFinished.new("t1", "bash", "ok", false))
 
-    # Finalization happens on the next flush, so ask for it.
-    app.flush_blocks!
     app.blocks.size.should eq(1)
   end
 

@@ -2,9 +2,7 @@ require "anvil"
 require "./style"
 require "./view_model"
 require "./completions"
-require "../todos"
 require "../mode"
-require "../plan"
 
 module Smith::UI
   # The fullscreen controller.
@@ -77,10 +75,9 @@ module Smith::UI
 
     # --- content -------------------------------------------------------------
 
-    # `finalize` is kept for the callers that used it; a block reaches the
-    # scrollback once it reports itself finalized, which is what the flag
-    # always meant.
-    def add_block(block : Anvil::View::Block, finalize : Bool = false) : Anvil::View::Block
+    # A block reaches the scrollback once it reports itself finalized — which
+    # is what the old `finalize:` flag always meant, so the flag is gone.
+    def add_block(block : Anvil::View::Block) : Anvil::View::Block
       @anvil.add_block(block)
     end
 
@@ -96,12 +93,6 @@ module Smith::UI
 
     def clear! : Nil
       @anvil.clear!
-    end
-
-    # A seam the renderer still calls: committing finished blocks is part of
-    # drawing now, so this only has to ask for a frame.
-    def flush_blocks! : Nil
-      mark_dirty
     end
 
     def completions=(list : Array(Completion)) : Nil

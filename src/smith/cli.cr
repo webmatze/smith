@@ -1166,10 +1166,10 @@ module Smith
         next if text.strip.empty?
 
         if msg.role.user?
-          app.add_block(UI::UserBlock.new(text), finalize: true)
+          app.add_block(UI::UserBlock.new(text))
         else
           block = UI::AssistantBlock.new(text, live: false)
-          app.add_block(block, finalize: true)
+          app.add_block(block)
         end
       end
     end

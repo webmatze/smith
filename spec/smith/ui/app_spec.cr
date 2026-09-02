@@ -50,7 +50,7 @@ describe Smith::UI::App do
 
       app.run do |text|
         if text == "hi"
-          app.add_block(AssistantBlock.new("hello!", live: false), finalize: true)
+          app.add_block(AssistantBlock.new("hello!", live: false))
           app.turn_finished
         else
           app.quit
