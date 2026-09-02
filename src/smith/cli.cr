@@ -1617,12 +1617,14 @@ module Smith
 
       puts "📜 Saved Smith Sessions (#{@session_store.sessions_dir}):"
       puts "--------------------------------------------------------------------------------"
-      printf "%-28s %-24s %-18s %-6s %s\n", "SESSION ID", "NAME", "UPDATED", "MSGS", "FIRST PROMPT"
+      printf "%-28s %-24s %-18s %-6s %-8s %s\n", "SESSION ID", "NAME", "UPDATED", "MSGS", "COST", "FIRST PROMPT"
       puts "--------------------------------------------------------------------------------"
 
       entries.each do |e|
         time_str = e.updated_at.to_s("%Y-%m-%d %H:%M")
-        printf "%-28s %-24s %-18s %-6d %s\n", e.id, e.name || "-", time_str, e.message_count, e.first_prompt
+        # `n/a` when no rate is known — never a guess (see Pricing).
+        cost_str = Pricing.format(e.cost(@config.pricing))
+        printf "%-28s %-24s %-18s %-6d %-8s %s\n", e.id, e.name || "-", time_str, e.message_count, cost_str, e.first_prompt
       end
 
       puts "--------------------------------------------------------------------------------"

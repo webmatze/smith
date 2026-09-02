@@ -333,3 +333,71 @@ describe "resolving a checkpoint against the transcript" do
     Smith::Session::Transcript.index_after(after, kept.id).should eq(2)
   end
 end
+
+private def usage(prompt = 0, completion = 0)
+  Smith::LLM::Usage.new(prompt, completion, prompt + completion)
+end
+
+describe "the cost column in the session index" do
+  it "carries usage and model into the index so a cost can be stated" do
+    with_store do |store|
+      session = store.create(model: "claude-sonnet-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.user("price me")
+      session.usage = session.usage + usage(prompt: 1_000_000, completion: 1_000_000)
+      store.save(session)
+
+      entry = store.list.find { |e| e.id == session.id }.not_nil!
+      entry.cost.should_not be_nil
+      entry.cost.not_nil!.should be_close(18.0, 0.001)
+    end
+  end
+
+  it "says nothing rather than guessing at an unknown model" do
+    with_store do |store|
+      session = store.create(model: "some-unreleased-model", provider: "openai")
+      session.messages << Smith::LLM::Message.user("price me")
+      session.usage = session.usage + usage(prompt: 1_000_000)
+      store.save(session)
+
+      entry = store.list.find { |e| e.id == session.id }.not_nil!
+      entry.cost.should be_nil
+    end
+  end
+
+  it "honours pricing overrides from config" do
+    with_store do |store|
+      session = store.create(model: "claude-sonnet-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.user("price me")
+      session.usage = session.usage + usage(prompt: 1_000_000, completion: 1_000_000)
+      store.save(session)
+
+      overrides = {"anthropic/claude-sonnet-5" => Smith::Pricing::Rates.new(input: 1.0, output: 2.0)}
+      entry = store.list.find { |e| e.id == session.id }.not_nil!
+
+      entry.cost(overrides).not_nil!.should be_close(3.0, 0.001)
+    end
+  end
+
+  it "prices a session with no usage yet as zero, not unknown" do
+    with_store do |store|
+      session = store.create(model: "claude-sonnet-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.user("not run yet")
+      store.save(session)
+
+      entry = store.list.find { |e| e.id == session.id }.not_nil!
+      entry.cost.should eq(0.0)
+    end
+  end
+
+  it "keeps loading index entries written before costs existed" do
+    legacy = %([{"id":"session-old","created_at":"2026-01-01T00:00:00Z",) +
+             %("updated_at":"2026-01-01T00:00:00Z","first_prompt":"from before",) +
+             %("message_count":3}])
+
+    entries = Array(Smith::Session::IndexEntry).from_json(legacy)
+    entries.size.should eq(1)
+    entries.first.provider.should be_nil
+    entries.first.usage.should be_nil
+    entries.first.cost.should be_nil
+  end
+end

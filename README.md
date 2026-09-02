@@ -242,11 +242,22 @@ smith -c                           # same session, interactive
 Sessions get a name from their first prompt (`fix-the-linux-test`), and the name is what you resume by:
 
 ```bash
-smith sessions                     # ID, name, first prompt
+smith sessions                     # ID, name, cost, first prompt
 smith rename <session> my-refactor # or /rename my-refactor in chat
 smith resume my-refactor           # name or id, whichever you remember
 smith fork my-refactor             # a copy, to take the same start two ways
 ```
+
+`smith sessions` also totals what each session spent in a COST column, using the same rates the live counter uses — including any `[pricing]` overrides:
+
+```
+SESSION ID                   NAME                     UPDATED            MSGS   COST     FIRST PROMPT
+--------------------------------------------------------------------------------
+session-1756740123-a1b2c3    fix-the-linux-test       2026-09-01 14:22   12     $0.0310  why does this test fail on Linux?
+session-1756653701-d4e5f6    migrate-the-test-suite   2026-08-31 09:11   44     $1.87    migrate the test suite
+```
+
+An unknown model shows `n/a`, never a guess — the same rule as the live cost counter — and sessions saved before usage was recorded show `n/a` as well rather than breaking the list.
 
 A derived name that would collide gets a counter (`fix-the-tests-2`); renaming onto a name another session already holds is refused rather than silently allowed. Sessions saved before names existed keep loading — they simply have none, and `smith resume <id>` still works.
 
