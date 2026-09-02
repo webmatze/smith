@@ -1,4 +1,5 @@
 require "./mcp/protocol"
 require "./mcp/client"
+require "./mcp/http_transport"
 require "./mcp/server_config"
 require "./mcp/manager"

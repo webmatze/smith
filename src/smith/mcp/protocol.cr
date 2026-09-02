@@ -123,6 +123,19 @@ module Smith::MCP
     abstract def receive : String?
 
     abstract def close : Nil
+
+    # Why the stream died, when the transport knows more than "EOF". stdio has
+    # nothing to add; an HTTP transport can say which status or which network
+    # error it was. Read once, when the pending callers are abandoned.
+    def failure_hint : String?
+      nil
+    end
+
+    # A subprocess's own stderr, kept so a failed handshake can say what the
+    # process actually complained about. Only stdio has one.
+    def stderr_tail : Array(String)
+      Array(String).new
+    end
   end
 
   # A child process speaking JSON-RPC over its stdin/stdout.

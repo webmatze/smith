@@ -33,7 +33,8 @@ describe Smith::MCP::ServerConfig do
       spec = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"x": {"command": "run-me"}}}), "mcp.json", IO::Memory.new).first
       spec.args.should be_empty
       spec.env.should be_empty
-      spec.command_line.should eq("run-me")
+      spec.description.should eq("run-me")
+      spec.stdio?.should be_true
     end
 
     it "stringifies non-string env values, which real configs contain" do
@@ -58,12 +59,71 @@ describe Smith::MCP::ServerConfig do
       warnings.should contain("no \"command\"")
     end
 
-    it "skips a transport stage 1 does not speak, saying which" do
+    it "skips a transport smith does not speak, saying which" do
       specs = [] of Smith::MCP::ServerSpec
-      warnings = capture { |io| specs = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"remote": {"type": "http", "url": "https://example.com"}}}), "mcp.json", io) }
+      warnings = capture { |io| specs = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"remote": {"type": "websocket", "url": "ws://example.com"}}}), "mcp.json", io) }
 
       specs.should be_empty
-      warnings.should contain("stdio only")
+      warnings.should contain("websocket transport is not supported")
+    end
+
+    describe "Streamable-HTTP entries" do
+      it "reads a url entry without a type, the shape several clients write" do
+        spec = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"remote": {"url": "http://127.0.0.1:9000/mcp"}}}), "mcp.json", IO::Memory.new).first
+
+        spec.http?.should be_true
+        spec.url.should eq("http://127.0.0.1:9000/mcp")
+        spec.headers.should be_empty
+        spec.description.should eq("http://127.0.0.1:9000/mcp")
+      end
+
+      it "reads an explicit type http, and keeps sse entries as http too" do
+        specs = Smith::MCP::ServerConfig.parse(%({"mcpServers": {
+          "a": {"type": "http", "url": "http://example.com/mcp"},
+          "b": {"type": "sse", "url": "http://example.com/sse"}
+        }}), "mcp.json", IO::Memory.new)
+
+        specs.map(&.url).should eq(["http://example.com/mcp", "http://example.com/sse"])
+        specs.each(&.http?.should be_true)
+      end
+
+      it "expands environment variables in header values" do
+        ENV["SMITH_MCP_TEST_TOKEN"] = "secret-42"
+
+        begin
+          spec = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"r": {"url": "http://example.com/mcp", "headers": {"Authorization": "Bearer ${SMITH_MCP_TEST_TOKEN}"}}}}), "mcp.json", IO::Memory.new).first
+          spec.headers.should eq({"Authorization" => "Bearer secret-42"})
+        ensure
+          ENV.delete("SMITH_MCP_TEST_TOKEN")
+        end
+      end
+
+      it "warns about an unset header variable rather than sending the literal ${...}" do
+        specs = [] of Smith::MCP::ServerSpec
+        warnings = capture do |io|
+          specs = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"r": {"url": "http://example.com/mcp", "headers": {"Authorization": "Bearer ${SMITH_MCP_MISSING_TOKEN}"}}}}), "mcp.json", io)
+        end
+
+        specs.first.headers["Authorization"].should eq("Bearer ")
+        warnings.should contain("SMITH_MCP_MISSING_TOKEN")
+        warnings.should contain("not set")
+      end
+
+      it "skips an http entry without a url" do
+        specs = [] of Smith::MCP::ServerSpec
+        warnings = capture { |io| specs = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"broken": {"type": "http"}}}), "mcp.json", io) }
+
+        specs.should be_empty
+        warnings.should contain(%(no "url"))
+      end
+
+      it "skips a url that is not http(s)" do
+        specs = [] of Smith::MCP::ServerSpec
+        warnings = capture { |io| specs = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"odd": {"url": "file:///etc/passwd"}}}), "mcp.json", io) }
+
+        specs.should be_empty
+        warnings.should contain("not an http(s) url")
+      end
     end
 
     it "honours disabled" do

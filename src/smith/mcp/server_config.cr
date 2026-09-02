@@ -1,26 +1,49 @@
 require "json"
+require "uri"
 require "../paths"
 
 module Smith::MCP
-  # One stdio server as `mcp.json` describes it.
+  # One MCP server as `mcp.json` describes it. Two shapes:
+  #
+  # - **stdio**: a subprocess smith spawns (`command`, `args`, `env`)
+  # - **Streamable HTTP**: a URL smith talks to (`url`, `headers`)
+  #
+  # `url` decides which: an entry with a url is an HTTP server, everything
+  # else is a subprocess.
   struct ServerSpec
     getter name : String
-    getter command : String
+    getter command : String?
     getter args : Array(String)
     getter env : Hash(String, String)
+    getter url : String?
+    getter headers : Hash(String, String)
     getter source : String
 
     def initialize(
       @name : String,
-      @command : String,
+      @command : String? = nil,
       @args : Array(String) = Array(String).new,
       @env : Hash(String, String) = Hash(String, String).new,
+      @url : String? = nil,
+      @headers : Hash(String, String) = Hash(String, String).new,
       @source : String = "",
     )
     end
 
-    def command_line : String
-      ([@command] + @args).join(" ")
+    def http? : Bool
+      !@url.nil?
+    end
+
+    def stdio? : Bool
+      !http?
+    end
+
+    # What smith starts or connects to — the line for `smith mcp list`.
+    def description : String
+      url = @url
+      return url unless url.nil?
+
+      ([@command || "?"] + @args).join(" ")
     end
   end
 
@@ -117,11 +140,19 @@ module Smith::MCP
       return nil if fields.nil?
       return nil if fields["disabled"]?.try(&.as_bool?)
 
-      # Stage 1 is stdio only. A remote server is skipped with a word about
-      # why, which beats a start failure nobody can interpret.
       transport = (fields["type"]? || fields["transport"]?).try(&.as_s?)
-      if transport && transport != "stdio"
-        warn_io.puts "⚠️  Skipping MCP server '#{name}' in #{source}: #{transport} transport is not supported yet (stdio only)."
+      url = fields["url"]?.try(&.as_s?)
+
+      case transport
+      when Nil, "stdio"
+        # An entry that has a url but no type is the HTTP shape several
+        # clients write without saying "http" — the command branch below
+        # stays the explicit one.
+        return build_http(name, url, fields, source, warn_io) if transport.nil? && !url.nil?
+      when "http", "sse", "streamable-http"
+        return build_http(name, url, fields, source, warn_io)
+      else
+        warn_io.puts "⚠️  Skipping MCP server '#{name}' in #{source}: #{transport} transport is not supported (stdio and http)."
         return nil
       end
 
@@ -138,6 +169,52 @@ module Smith::MCP
         env: string_map(fields["env"]?),
         source: source
       )
+    end
+
+    private def self.build_http(name : String, url : String?, fields : Hash(String, JSON::Any), source : String, warn_io : IO) : ServerSpec?
+      if url.nil? || url.strip.empty?
+        warn_io.puts "⚠️  Skipping MCP server '#{name}' in #{source}: no \"url\"."
+        return nil
+      end
+
+      uri = URI.parse(url)
+      unless uri.scheme.in?("http", "https")
+        warn_io.puts "⚠️  Skipping MCP server '#{name}' in #{source}: '#{url}' is not an http(s) url."
+        return nil
+      end
+
+      ServerSpec.new(
+        name: name,
+        url: url,
+        headers: expand_headers(fields["headers"]?, name, warn_io),
+        source: source
+      )
+    end
+
+    # Header values may reference environment variables — `"Bearer ${TOKEN}"`
+    # is the intended way to hand over a secret without writing it into the
+    # file. An unset variable is named at startup rather than sent as `${TOKEN}`.
+    private def self.expand_headers(value : JSON::Any?, server : String, warn_io : IO) : Hash(String, String)
+      result = Hash(String, String).new
+      table = value.try(&.as_h?)
+      return result if table.nil?
+
+      table.each do |key, entry|
+        text = entry.as_s?
+        next if text.nil?
+
+        result[key] = text.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/) do |match|
+          found = ENV[$1]?
+          if found.nil?
+            warn_io.puts "⚠️  MCP server '#{server}': header '#{key}' references #{match}, which is not set in the environment — sending it empty."
+            ""
+          else
+            found
+          end
+        end
+      end
+
+      result
     end
 
     private def self.string_map(value : JSON::Any?) : Hash(String, String)

@@ -326,7 +326,9 @@ module Smith::MCP
     end
 
     # End of stream: every caller still waiting has to be told, or it would sit
-    # there until its own timeout for a server that is already gone.
+    # there until its own timeout for a server that is already gone. The
+    # transport's hint — an HTTP status, a refused connection — is the reason,
+    # when there is one.
     private def abandon_pending : Nil
       waiting = @lock.synchronize do
         entries = @pending.values
@@ -334,11 +336,12 @@ module Smith::MCP
         entries
       end
 
+      reason = @transport.failure_hint || "MCP server '#{@name}' closed the connection"
       dead = Message.new(
         id: nil,
         method: nil,
         result: nil,
-        error: RpcError.new(0, "MCP server '#{@name}' closed the connection")
+        error: RpcError.new(0, reason)
       )
 
       waiting.each { |channel| channel.send(dead) }
