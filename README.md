@@ -188,6 +188,9 @@ enabled         = true           # snapshot files before write_file / edit_file
 max_per_session = 100
 retention_days  = 30
 
+[sessions]
+retention_days  = 90             # startup prune; the newest session always survives
+
 [mcp]
 enabled = true                   # the servers themselves live in mcp.json
 timeout = 60                     # seconds per MCP tool call
@@ -202,7 +205,7 @@ Relevant environment variables: `SMITH_PROVIDER`, `SMITH_MODEL`, `SMITH_MODE`, `
 
 `[http]` applies to all four providers. An elapsed `read_timeout` is **not** retried, so it is genuinely the longest smith will wait on a single call — connection errors and 429/5xx responses still go through the exponential-backoff retry handler.
 
-`[mcp]` is smith's side of the MCP arrangement; the servers are configured in `mcp.json` — see [MCP](#mcp). `[web]` controls fetching and search — see [Web Tools](#web-tools). `[bash]` tunes the command timeout and background jobs — see [Background Commands](#background-commands). `[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode). `[media] max_bytes` caps an attached image or PDF — see [Images & PDFs](#images--pdfs). `[sandbox]` confines `bash` on macOS — see [Bash Sandbox](#bash-sandbox-macos).
+`[mcp]` is smith's side of the MCP arrangement; the servers are configured in `mcp.json` — see [MCP](#mcp). `[web]` controls fetching and search — see [Web Tools](#web-tools). `[bash]` tunes the command timeout and background jobs — see [Background Commands](#background-commands). `[checkpoints]` controls the file snapshots — see [Checkpoints & Rewind](#checkpoints--rewind). `[sessions] retention_days` prunes old sessions at startup — see [Sessions](#sessions). `[subagents]` bounds delegation — see [Subagent Limits](#subagent-limits). `[providers.<name>] cache` toggles prompt caching — see [Prompt Caching](#prompt-caching). `[approval] allow`/`ask`/`deny` are the permission rules — see [Permission Rules](#permission-rules). `[hooks]` defines the extension points — see [Hooks](#hooks), and read the trust section before using them. `[approval]` gates the mutating tools — see [Approval Mode](#approval-mode) below. `[context]` caps how large the transcript may grow — see [Context Compaction](#context-compaction). `[defaults] stream` toggles streaming — see [Streaming](#streaming). `[defaults] mode` starts smith in plan mode — see [Plan Mode](#plan-mode). `[media] max_bytes` caps an attached image or PDF — see [Images & PDFs](#images--pdfs). `[sandbox]` confines `bash` on macOS — see [Bash Sandbox](#bash-sandbox-macos).
 
 ### Streaming
 
@@ -262,6 +265,20 @@ An unknown model shows `n/a`, never a guess — the same rule as the live cost c
 A derived name that would collide gets a counter (`fix-the-tests-2`); renaming onto a name another session already holds is refused rather than silently allowed. Sessions saved before names existed keep loading — they simply have none, and `smith resume <id>` still works.
 
 `smith fork` copies the transcript under a new id and records where it came from. Useful when a conversation reaches a fork in the road: keep the original, try the other way in the copy. Checkpoints stay with the session that made them.
+
+Sessions grow without limit — each one is a directory holding the transcript, checkpoints, bash logs and attached media — until you say otherwise:
+
+```bash
+smith sessions delete my-refactor          # file, directory and index entry, gone
+smith sessions delete my-refactor other-2  # several at once
+smith sessions prune --dry-run             # what would go, nothing deleted yet
+smith sessions prune --older-than 30d      # drop everything last updated before the cutoff
+smith sessions prune --older-than 7d --keep-last 10   # and keep the 10 most recent anyway
+```
+
+`--older-than` takes `d`, `h` or `m` (`30d` by default), and a bare number reads as days. Two guarantees: the **newest session is never pruned** — even if it is older than the cutoff — and `--dry-run` changes nothing, only listing what would go.
+
+On top of that, smith quietly prunes at startup, the same way checkpoints are pruned: `[sessions] retention_days` in `config.toml` (90 by default) drops anything last touched longer ago, always leaving the newest one. The session being resumed is protected, so a resume never expires itself.
 
 ### Context
 

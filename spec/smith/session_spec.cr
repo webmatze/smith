@@ -401,3 +401,214 @@ describe "the cost column in the session index" do
     entries.first.cost.should be_nil
   end
 end
+
+# Rewrites the index entry for `id` with a backdated updated_at, so prune has
+# something old to look at — save() always stamps Time.local.
+private def backdate(store, id : String, to : Time)
+  entries = store.list.map do |e|
+    if e.id == id
+      Smith::Session::IndexEntry.new(
+        id: e.id, created_at: to, updated_at: to,
+        first_prompt: e.first_prompt, message_count: e.message_count,
+        name: e.name, parent_id: e.parent_id,
+        provider: e.provider, model: e.model, usage: e.usage
+      )
+    else
+      e
+    end
+  end
+  File.write(store.index_path, entries.to_json)
+end
+
+describe "deleting a session" do
+  it "removes the file, the directory and the index entry" do
+    with_store do |store|
+      session = session_with(store, "delete me")
+      dir = store.session_dir(session.id)
+
+      store.delete(session.id)
+
+      store.list.should be_empty
+      Dir.exists?(dir).should be_false
+      File.exists?(File.join(dir, "session.json")).should be_false
+    end
+  end
+
+  it "accepts a name as well as an id" do
+    with_store do |store|
+      session = session_with(store, "delete me by name")
+      store.rename(session.id, "short-lived")
+
+      store.delete("short-lived")
+
+      store.list.should be_empty
+      Dir.exists?(store.session_dir(session.id)).should be_false
+    end
+  end
+
+  it "leaves the other sessions alone" do
+    with_store do |store|
+      doomed = session_with(store, "delete me")
+      keeper = session_with(store, "keep me")
+
+      store.delete(doomed.id)
+
+      store.list.map(&.id).should eq([keeper.id])
+      Dir.exists?(store.session_dir(keeper.id)).should be_true
+    end
+  end
+
+  it "also removes a session still lying in the old flat layout" do
+    with_store do |store|
+      legacy = Smith::Session::Data.new(id: "session-legacy", cwd: "/tmp", model: "m", provider: "openrouter")
+      legacy.messages << Smith::LLM::Message.user("from the old layout")
+      File.write(File.join(store.sessions_dir, "session-legacy.json"), legacy.to_json)
+
+      store.delete("session-legacy")
+
+      File.exists?(File.join(store.sessions_dir, "session-legacy.json")).should be_false
+      store.list.should be_empty
+    end
+  end
+
+  it "resolve_entry names a session without touching it" do
+    with_store do |store|
+      session = session_with(store, "delete me later")
+
+      entry = store.resolve_entry(session.id)
+
+      entry.not_nil!.id.should eq(session.id)
+      store.list.size.should eq(1)
+      Dir.exists?(store.session_dir(session.id)).should be_true
+    end
+  end
+
+  it "reports an unknown reference rather than deleting nothing" do
+    with_store do |store|
+      expect_raises(ArgumentError, /not found/) { store.delete("no-such-session") }
+    end
+  end
+
+  it "finds nothing to delete on an empty store" do
+    with_store do |store|
+      expect_raises(ArgumentError, /not found/) { store.delete("anything") }
+    end
+  end
+end
+
+describe "pruning sessions" do
+  it "drops everything older than the cutoff" do
+    with_store do |store|
+      old = session_with(store, "old work")
+      fresh = session_with(store, "fresh work")
+      backdate(store, old.id, Time.local - 40.days)
+
+      doomed = store.prune(older_than: 30.days)
+
+      doomed.map(&.id).should eq([old.id])
+      store.list.map(&.id).should eq([fresh.id])
+      Dir.exists?(store.session_dir(old.id)).should be_false
+    end
+  end
+
+  it "never deletes the newest session, even past the cutoff" do
+    with_store do |store|
+      older = session_with(store, "older work")
+      newest = session_with(store, "newest work")
+      backdate(store, older.id, Time.local - 90.days)
+      backdate(store, newest.id, Time.local - 80.days)
+
+      doomed = store.prune(older_than: 30.days)
+
+      doomed.map(&.id).should eq([older.id])
+      store.list.map(&.id).should eq([newest.id])
+    end
+  end
+
+  it "keeps a single stale session rather than emptying the store" do
+    with_store do |store|
+      session = session_with(store, "the only one")
+      backdate(store, session.id, Time.local - 90.days)
+
+      store.prune(older_than: 30.days).should be_empty
+      store.list.size.should eq(1)
+    end
+  end
+
+  it "honours keep_last regardless of age" do
+    with_store do |store|
+      first = session_with(store, "one")
+      second = session_with(store, "two")
+      third = session_with(store, "three")
+      backdate(store, first.id, Time.local - 60.days)
+      backdate(store, second.id, Time.local - 50.days)
+      backdate(store, third.id, Time.local - 40.days)
+
+      doomed = store.prune(older_than: 30.days, keep_last: 2)
+
+      doomed.map(&.id).should eq([first.id])
+      store.list.map(&.id).should eq([third.id, second.id])
+    end
+  end
+
+  it "leaves everything alone when nothing is old enough" do
+    with_store do |store|
+      session_with(store, "recent work")
+
+      store.prune(older_than: 30.days).should be_empty
+      store.list.size.should eq(1)
+    end
+  end
+
+  it "changes nothing on a dry run but names what would go" do
+    with_store do |store|
+      old = session_with(store, "old work")
+      session_with(store, "fresh work")
+      backdate(store, old.id, Time.local - 40.days)
+
+      doomed = store.prune(older_than: 30.days, dry_run: true)
+
+      doomed.map(&.id).should eq([old.id])
+      store.list.size.should eq(2)
+      Dir.exists?(store.session_dir(old.id)).should be_true
+    end
+  end
+
+  it "finds nothing to prune on an empty store" do
+    with_store do |store|
+      store.prune(older_than: 30.days).should be_empty
+      store.list.should be_empty
+    end
+  end
+
+  it "protects the session that is being resumed" do
+    with_store do |store|
+      resuming = session_with(store, "resuming this")
+      other = session_with(store, "other work")
+      backdate(store, resuming.id, Time.local - 40.days)
+      backdate(store, other.id, Time.local - 5.days)
+
+      doomed = store.prune(older_than: 30.days, protect: resuming.id)
+
+      doomed.map(&.id).should be_empty
+      store.list.size.should eq(2)
+    end
+  end
+end
+
+describe Smith::Session::Retention do
+  it "parses days, hours and minutes" do
+    Smith::Session::Retention.parse("30d").should eq(30.days)
+    Smith::Session::Retention.parse("12h").should eq(12.hours)
+    Smith::Session::Retention.parse("15m").should eq(15.minutes)
+  end
+
+  it "reads a bare number as days" do
+    Smith::Session::Retention.parse("7").should eq(7.days)
+  end
+
+  it "rejects garbage with a helpful message" do
+    expect_raises(ArgumentError, /Cannot parse/) { Smith::Session::Retention.parse("soon") }
+    expect_raises(ArgumentError, /Cannot parse/) { Smith::Session::Retention.parse("") }
+  end
+end
