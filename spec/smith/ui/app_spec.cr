@@ -35,7 +35,7 @@ private def modal_frame_lines(script : Array, width = 80, height = 24) : Array(S
   app.run do |_|
     spawn do
       app.modal("Approval required", body, [{'y', "allow once"}], ['y'])
-      frame = app.terminal.io.as(IO::Memory).to_s
+      frame = app.io.as(IO::Memory).to_s
       app.turn_finished
     end
   end
@@ -50,7 +50,7 @@ describe Smith::UI::App do
 
       app.run do |text|
         if text == "hi"
-          app.add_block(AssistantBlock.new("hello!", live: false), finalize: true)
+          app.add_block(AssistantBlock.new("hello!", live: false))
           app.turn_finished
         else
           app.quit
@@ -114,23 +114,34 @@ describe Smith::UI::App do
       # The screen reflows under the live region: the rows the in-place
       # redraw would walk back over are no longer the rows it drew, so only
       # a redraw from scratch is sound afterwards.
-      app = app_with([:tick, :tick, :tick, "\x03"])
-      app.terminal.mark_resized!
+      app = app_with([:resize, :tick, :tick, :tick, "\x03"])
 
       app.run { |_| }
 
-      app.terminal.io.as(IO::Memory).to_s.should contain("\e[2J")
+      app.io.as(IO::Memory).to_s.should contain("\e[2J")
+    end
+
+    it "re-emits the transcript after a resize instead of losing it" do
+      # The wipe alone would leave nothing but the live region on screen:
+      # everything already committed to the scrollback has to be written
+      # again, or the session looks like it lost its history.
+      app = app_with([:resize, :tick, :tick, :tick, "\x03"])
+      app.notice("stays visible")
+
+      app.run { |_| }
+
+      screen = Screen.replay(app.io.as(IO::Memory).to_s)
+      screen.screen_lines.any?(&.includes?("stays visible")).should be_true
     end
 
     it "waits out a drag instead of redrawing on every step of it" do
       # Dragging a window delivers a stream of SIGWINCHs. Only the quiet
       # after them is worth a redraw.
-      app = app_with([:tick, "\x03"])
-      app.terminal.mark_resized!
+      app = app_with([:resize, :tick, "\x03"])
 
       app.run { |_| }
 
-      app.terminal.io.as(IO::Memory).to_s.should_not contain("\e[2J")
+      app.io.as(IO::Memory).to_s.should_not contain("\e[2J")
     end
 
     it "draws the status bar into the terminal output" do
@@ -138,7 +149,7 @@ describe Smith::UI::App do
       app.model_name = "claude-test"
       app.run { |_| }
 
-      output = app.terminal.io.as(IO::Memory).to_s
+      output = app.io.as(IO::Memory).to_s
       output.should contain("claude-test")
       output.should contain("normal")
     end
@@ -168,7 +179,7 @@ describe Smith::UI::App do
 
       app.run { |_| spawn { sleep(1.second); app.turn_finished } }
 
-      output = app.terminal.io.as(IO::Memory).to_s
+      output = app.io.as(IO::Memory).to_s
       output.should contain("stopping")
     end
 
@@ -181,7 +192,7 @@ describe Smith::UI::App do
 
       app.run { |_| spawn { sleep(1.second); app.turn_finished } }
 
-      app.terminal.io.as(IO::Memory).to_s.should contain("\e[2J")
+      app.io.as(IO::Memory).to_s.should contain("\e[2J")
     end
 
     it "ignores other keys while a turn runs" do
@@ -257,7 +268,7 @@ describe Smith::UI::App do
           app.modal("Approval required", body, [{'y', "allow once"}], ['y'])
           # Everything written while the modal was up — the next draw takes
           # the region back down, and teardown wipes it entirely.
-          frame = app.terminal.io.as(IO::Memory).to_s
+          frame = app.io.as(IO::Memory).to_s
           tool.status = ToolBlock::Status::Done
           app.turn_finished
         end
@@ -266,7 +277,7 @@ describe Smith::UI::App do
       # Clamped, not reprinted: redrawn in place, so no copy of the panel was
       # ever pushed off the top.
       Screen.replay(frame).scrollback.count(&.includes?("Approval required")).should eq(0)
-      screen = Screen.replay(app.terminal.io.as(IO::Memory).to_s)
+      screen = Screen.replay(app.io.as(IO::Memory).to_s)
       screen.all_lines.count(&.includes?("sleep 30")).should eq(1)
     end
 
@@ -308,17 +319,24 @@ describe Smith::UI::App do
       app = app_with(["go\r", :tick, "y"])
       body = [LineUtil.line("rm -rf /")]
 
+      # The stream is captured while the modal is still up: the next draw
+      # takes the live region down, and teardown wipes it for good.
+      captured = ""
       app.run do |_|
         spawn do
           app.modal("Danger", body, [{'y', "yes"}], ['y'])
+          captured = app.io.as(IO::Memory).to_s
           app.turn_finished
         end
       end
 
-      output = app.terminal.io.as(IO::Memory).to_s
-      output.should contain("Danger")
-      output.should contain("rm -rf /")
-      output.should contain("[y] yes")
+      # On the rendered screen, not on the byte stream: the cell renderer puts
+      # positioning and style sequences between two spans, so "[y] yes" no
+      # longer appears there in one piece.
+      screen = Screen.replay(captured).all_lines.join("\n")
+      screen.should contain("Danger")
+      screen.should contain("rm -rf /")
+      screen.should contain("[y] yes")
     end
   end
 
@@ -512,7 +530,7 @@ describe "the slash-command popup" do
 
     app.run { |_| app.turn_finished }
 
-    stream = app.terminal.io.as(IO::Memory).to_s
+    stream = app.io.as(IO::Memory).to_s
     stream.should contain("/clear")
     stream.should contain("/plan")
     stream.should contain("❯")

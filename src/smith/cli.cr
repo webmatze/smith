@@ -370,10 +370,7 @@ module Smith
     end
 
     private def tui_app : UI::App
-      @tui_app ||= UI::App.new(UI::Terminal.new(
-        STDOUT, STDIN,
-        color: STDOUT.tty? && ENV["NO_COLOR"]?.nil?
-      ))
+      @tui_app ||= UI::App.terminal
     end
 
     private def build_provider(provider_name : String = effective_provider_name) : LLM::Provider
@@ -1169,10 +1166,10 @@ module Smith
         next if text.strip.empty?
 
         if msg.role.user?
-          app.add_block(UI::UserBlock.new(text), finalize: true)
+          app.add_block(UI::UserBlock.new(text))
         else
           block = UI::AssistantBlock.new(text, live: false)
-          app.add_block(block, finalize: true)
+          app.add_block(block)
         end
       end
     end

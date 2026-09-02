@@ -1,8 +1,6 @@
 require "./ui/style"
-require "./ui/terminal"
 require "./ui/markdown"
 require "./ui/view_model"
-require "./ui/input_editor"
 require "./ui/app"
 require "./ui/renderer"
 require "./ui/gates"

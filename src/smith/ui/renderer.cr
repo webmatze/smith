@@ -92,7 +92,7 @@ module Smith::UI
         if event.items.empty?
           app.notice("☰ Todos cleared", Style.new(fg: Palette::INFO))
         else
-          app.add_block(TodosBlock.new(event.items), finalize: true)
+          app.add_block(TodosBlock.new(event.items))
         end
       when Smith::Events::BashJobStarted
         app.notice("⏱ background job #{event.id} started: #{event.command}", Style.new(fg: Palette::INFO))

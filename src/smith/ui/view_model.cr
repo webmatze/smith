@@ -1,4 +1,5 @@
 require "json"
+require "anvil"
 require "./style"
 require "./markdown"
 require "../todos"
@@ -10,16 +11,10 @@ module Smith::UI
   # `lines` must be free of IO — blocks are mutated by the turn fiber and read
   # by the draw fiber, and the only thing keeping that safe is that neither
   # side yields mid-operation.
-  abstract class Block
-    abstract def lines(width : Int32) : Array(StyledLine)
-
-    # Whether the block has stopped changing, and can therefore be printed
-    # into the scrollback once and never redrawn. Most blocks arrive finished;
-    # the streaming ones say when they are done.
-    def finalized? : Bool
-      true
-    end
-  end
+  # The base is anvil's: the library owns the lifecycle (a block that says it
+  # is finalized gets committed to the scrollback once and never redrawn),
+  # while the concrete blocks below stay smith's own.
+  alias Block = Anvil::View::Block
 
   # How long a block has been running, in the shortest form that stays
   # readable. Shared by everything that shows an elapsed time.
@@ -43,7 +38,7 @@ module Smith::UI
     def lines(width : Int32) : Array(StyledLine)
       prefix = [Span.new("❯ ", Style.new(fg: Palette::USER, bold: true))]
       wrapped = LineUtil.wrap(Markdown.inline(@text), width - 2)
-      wrapped = [LineUtil::EMPTY] if wrapped.empty?
+      wrapped = [LineUtil::EMPTY_LINE] if wrapped.empty?
 
       wrapped.each_with_index.map do |line, i|
         (i.zero? ? prefix : [Span.new("  ")]) + line
@@ -64,7 +59,7 @@ module Smith::UI
 
     def lines(width : Int32) : Array(StyledLine)
       out = Markdown.render(@buffer, width)
-      out = [LineUtil::EMPTY] if out.empty?
+      out = [LineUtil::EMPTY_LINE] if out.empty?
 
       # A visible cursor at the stream's edge, so waiting on the first token
       # does not look like a hang.

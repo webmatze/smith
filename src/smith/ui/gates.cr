@@ -50,7 +50,7 @@ module Smith::UI
       # screen with whatever is still running above it, and a call whose
       # arguments run to hundreds of lines must not push the question itself
       # out of view.
-      width, _ = @app.terminal.size
+      width, _ = @app.surface.size
       wrapped = LineUtil.wrap([Span.new(summarize(call))], {width - 8, 20}.max)
       if wrapped.size > SUMMARY_LINES
         dropped = wrapped.size - SUMMARY_LINES

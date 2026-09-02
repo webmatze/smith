@@ -6,6 +6,9 @@ targets:
     main: src/smith.cr
 
 dependencies:
+  anvil:
+    github: webmatze/anvil
+    version: ~> 0.1.0
   toml:
     github: crystal-community/toml.cr
     version: ~> 0.8.1

@@ -1,5 +1,13 @@
 version: 2.0
 shards:
+  anvil:
+    git: https://github.com/webmatze/anvil.git
+    version: 0.1.0
+
+  termisu:
+    git: https://github.com/omarluq/termisu.git
+    version: 0.6.2
+
   toml:
     git: https://github.com/crystal-community/toml.cr.git
     version: 0.8.1
