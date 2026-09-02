@@ -84,8 +84,8 @@ module Smith::UI
       @anvil.add_block(block)
     end
 
-    # smiths eigener Notice-Block, nicht der generische der Library: er
-    # bringt die Darstellung mit, auf die sich der Renderer verlässt.
+    # smith's own notice block, not the library's generic one: it brings the
+    # rendering the renderer relies on.
     def notice(text : String, style : Style = Style.new(fg: Palette::INFO)) : Nil
       add_block(NoticeBlock.text(text, style))
     end

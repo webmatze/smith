@@ -319,8 +319,8 @@ describe Smith::UI::App do
       app = app_with(["go\r", :tick, "y"])
       body = [LineUtil.line("rm -rf /")]
 
-      # Der Strom wird abgegriffen, solange das Modal steht: der nächste Zug
-      # räumt die Live-Region ab, und das Aufräumen löscht sie ganz.
+      # The stream is captured while the modal is still up: the next draw
+      # takes the live region down, and teardown wipes it for good.
       captured = ""
       app.run do |_|
         spawn do
@@ -330,9 +330,9 @@ describe Smith::UI::App do
         end
       end
 
-      # Auf dem gerenderten Bild, nicht auf dem Bytestrom: der Zellrenderer
-      # setzt zwischen zwei Spans Positionierungs- und Stilsequenzen, also
-      # steht "[y] yes" dort nicht mehr am Stück.
+      # On the rendered screen, not on the byte stream: the cell renderer puts
+      # positioning and style sequences between two spans, so "[y] yes" no
+      # longer appears there in one piece.
       screen = Screen.replay(captured).all_lines.join("\n")
       screen.should contain("Danger")
       screen.should contain("rm -rf /")

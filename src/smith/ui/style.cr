@@ -1,17 +1,17 @@
 require "anvil"
 
 module Smith::UI
-  # Die Text-Schicht kommt aus anvil. Hier stehen nur noch die Namen, unter
-  # denen smith sie kennt, und die Palette.
+  # The text layer comes from anvil. What is left here are the names smith
+  # knows it by, plus the palette.
   #
-  # `Style`, `Span`, `StyledLine` und die Zeilenhelfer (Breiten, Umbruch,
-  # Kürzung, ANSI-Ausgabe) sind dort dieselben — mit zwei Unterschieden, die
-  # smith übernommen hat: Farben sind `Anvil::Text::Color` statt roher
-  # 256er-Indizes, und das Attribut heißt `reverse` statt `invert`.
+  # `Style`, `Span`, `StyledLine` and the line helpers (widths, wrapping,
+  # truncation, ANSI output) are the same there — with two differences smith
+  # has taken on: colors are `Anvil::Text::Color` rather than raw 256-colour
+  # indices, and the attribute is called `reverse` rather than `invert`.
   #
-  # Breiten rechnet anvil über Grapheme-Cluster und termisus Unicode-Tabellen
-  # statt über die frühere Näherung hier; das ist bei Emoji mit
-  # Variation Selector und kombinierenden Zeichen genauer.
+  # anvil computes widths over grapheme clusters and termisu's Unicode tables
+  # instead of the approximation that used to live here, which is more
+  # accurate for emoji with variation selectors and for combining marks.
   alias Style = Anvil::Text::Style
   alias Span = Anvil::Text::Span
   alias StyledLine = Anvil::Text::StyledLine
@@ -19,15 +19,15 @@ module Smith::UI
 
   alias LineUtil = Anvil::Text
 
-  # Die Palette der Oberfläche — 256-Farben, die jedes Terminal versteht, dem
-  # smith realistisch begegnet.
+  # The palette used across the UI — 256-colour codes, which every terminal
+  # smith realistically meets understands.
   module Palette
-    USER      = Color.ansi256(39)  # blau
-    SUCCESS   = Color.ansi256(71)  # grün
-    ERROR     = Color.ansi256(167) # rot
+    USER      = Color.ansi256(39)  # blue
+    SUCCESS   = Color.ansi256(71)  # green
+    ERROR     = Color.ansi256(167) # red
     WARN      = Color.ansi256(179)
-    INFO      = Color.ansi256(245) # grau
-    ACCENT    = Color.ansi256(75)  # hellblau
+    INFO      = Color.ansi256(245) # grey
+    ACCENT    = Color.ansi256(75)  # light blue
     THINKING  = Color.ansi256(245)
     BORDER    = Color.ansi256(240)
     CODE      = Color.ansi256(114)
