@@ -3,6 +3,7 @@ require "./llm"
 require "./tools"
 require "./agent"
 require "./session"
+require "./stats"
 require "./transcript_log"
 require "./project_ctx"
 require "./skills"
@@ -115,6 +116,7 @@ module Smith
           str.puts "  sessions, list             List all saved local chat sessions"
           str.puts "  sessions delete <ref>…     Delete sessions (name or id), files and all"
           str.puts "  sessions prune             Drop sessions older than --older-than (30d), keeping --keep-last"
+          str.puts "  stats                      Total cost and tokens across all saved sessions"
           str.puts "  rename <session> <name>    Give a session a name you can resume by"
           str.puts "  fork <session>             Copy a session so it can be taken two ways"
           str.puts "  context [<session>]        Show where the context window is going"
@@ -286,6 +288,8 @@ module Smith
         else
           list_sessions
         end
+      when "stats"
+        show_stats
       when "rename"
         rename_session(@args[1]?, @args[2..-1]?.try(&.join(" ")))
       when "fork"
@@ -310,7 +314,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp sandbox]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp sandbox stats]
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -1724,6 +1728,31 @@ module Smith
 
       puts "--------------------------------------------------------------------------------"
       puts "To resume a session, run: smith resume <name or id>"
+    end
+
+    # `smith stats` — totals across every saved session, built from the
+    # index alone. Read-only by construction: nothing here writes (#85).
+    private def show_stats
+      entries = @session_store.list
+      if entries.empty?
+        puts "No sessions found under #{@session_store.sessions_dir}"
+        puts "Start a chat (`smith chat`) or a headless run, and the totals land here."
+        return
+      end
+
+      agg = Stats.aggregate(entries, @config.pricing)
+
+      puts "📊 Smith usage across #{agg.sessions} session(s):"
+      puts "--------------------------------------------------------------------------------"
+      puts "  Total cost:        #{Pricing.format(agg.cost)}"
+      puts "  Total tokens:      #{agg.total_tokens} (#{agg.prompt_tokens} prompt + #{agg.completion_tokens} completion + #{agg.cached_tokens} cache)"
+      puts "  Sessions w/ usage: #{agg.with_usage} of #{agg.sessions}"
+      puts
+      printf "  %-40s %8s %12s %10s\n", "PROVIDER/MODEL", "SESSIONS", "TOKENS", "COST"
+      puts "  " + ("-" * 74)
+      agg.by_model.each do |m|
+        printf "  %-40s %8d %12d %10s\n", m.label, m.sessions, m.tokens, Pricing.format(m.cost)
+      end
     end
   end
 end

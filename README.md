@@ -280,6 +280,25 @@ smith sessions prune --older-than 7d --keep-last 10   # and keep the 10 most rec
 
 On top of that, smith quietly prunes at startup, the same way checkpoints are pruned: `[sessions] retention_days` in `config.toml` (90 by default) drops anything last touched longer ago, always leaving the newest one. The session being resumed is protected, so a resume never expires itself.
 
+`smith stats` aggregates what `smith sessions` shows per row across everything ever saved — total cost, total tokens split into prompt, completion and cache, and a per-model breakdown:
+
+```bash
+smith stats
+
+📊 Smith usage across 25 session(s):
+--------------------------------------------------------------------------------
+  Total cost:        $1.90
+  Total tokens:      5365181 (5235294 prompt + 129887 completion + 0 cache)
+  Sessions w/ usage: 2 of 25
+
+  PROVIDER/MODEL                           SESSIONS       TOKENS       COST
+  --------------------------------------------------------------------------
+  anthropic/claude-opus-4-8                       1      1245113     $1.87
+  openrouter/qwen/qwen3.8-max                     1      4120068        n/a
+```
+
+The same pricing rule as the COST column: a model whose rate is unknown adds to the token totals but shows `n/a` for cost — never a guess — and if nothing has a known rate the grand total is `n/a` too. `[pricing]` overrides apply. The command only reads the index; it never touches a session.
+
 ### Context
 
 Compaction decides silently; `smith context` shows what it is deciding about:
