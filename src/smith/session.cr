@@ -4,6 +4,7 @@ require "digest/sha256"
 require "./atomic_file"
 require "./paths"
 require "./llm/types"
+require "./pricing"
 require "./todos"
 
 module Smith::Session
@@ -20,6 +21,12 @@ module Smith::Session
     getter name : String? = nil
     getter parent_id : String? = nil
 
+    # Index files written before costs were listed have none of these; the
+    # row shows `n/a` rather than guessing or breaking the list.
+    getter provider : String? = nil
+    getter model : String? = nil
+    getter usage : Smith::LLM::Usage? = nil
+
     def initialize(
       @id : String,
       @created_at : Time,
@@ -28,12 +35,27 @@ module Smith::Session
       @message_count : Int32,
       @name : String? = nil,
       @parent_id : String? = nil,
+      @provider : String? = nil,
+      @model : String? = nil,
+      @usage : Smith::LLM::Usage? = nil,
     )
     end
 
     # What to type to get this session back.
     def reference : String
       @name || @id
+    end
+
+    # What the tokens came to, per the pricing table and any `[pricing]`
+    # overrides. nil when the rate is unknown or the entry predates usage
+    # tracking — a wrong cost figure is worse than no cost figure.
+    def cost(overrides : Smith::Pricing::Overrides? = nil) : Float64?
+      provider = @provider
+      model = @model
+      usage = @usage
+      return nil if provider.nil? || model.nil? || usage.nil?
+
+      Smith::Pricing.estimate(usage, provider, model, overrides)
     end
   end
 
@@ -116,7 +138,10 @@ module Smith::Session
         first_prompt: first_prompt,
         message_count: @messages.size,
         name: @name,
-        parent_id: @parent_id
+        parent_id: @parent_id,
+        provider: @provider,
+        model: @model,
+        usage: @usage
       )
     end
 
