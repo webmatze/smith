@@ -4,9 +4,19 @@ All notable changes to smith. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-02
+
 ### Added
 
 - **Chat commands with autocomplete**: new built-ins `/help`, `/clear`, `/sessions`, `/resume <session>` and `/quit` join `/plan`, `/normal`, `/rewind`, `/context` and `/rename`. In the fullscreen UI, typing `/` opens a popup that filters built-ins and skills as you type — `↑`/`↓` select, `Tab` completes, `Enter` runs, `Esc` dismisses. `/resume` switches sessions inside the running loop; `/clear` wipes the context and the screen.
+- **MCP over HTTP**: entries in `mcp.json` with a `type` of `http`/`sse` or a bare `url` connect via Streamable-HTTP POST instead of spawning a subprocess — JSON and SSE answers alike, the session id the server assigns carried on every later request, bearer tokens from the environment via `${VAR}` header expansion. Everything the stdio path already had applies unchanged: approval gate, untrusted marking, restart-once, per-call timeout (#84).
+- **`smith stats`**: aggregates cost and tokens across all saved sessions from the index alone — a grand total, a prompt/completion/cache split and a per-provider/model breakdown. Unknown rates add tokens but show `n/a`, never a guess; `[pricing]` overrides from config apply (#85).
+- **Session hygiene**: `smith sessions delete <ref>…` removes sessions by name or id — file, directory and index entry — and `smith sessions prune` drops sessions older than `--older-than` (30d default) while keeping `--keep-last` N; both support `--dry-run`. The newest session is never pruned, and `[sessions] retention_days` prunes at startup (#82).
+- **Cost per session**: `smith sessions` shows a `COST` column per row, priced from the index and honouring `[pricing]` overrides; unknown models and entries predating usage tracking show `n/a` (#83).
+
+### Changed
+
+- **The fullscreen UI now sits on anvil**: text, editor and popup layers, the event loop, terminal handling and the live region come from the published [anvil](https://github.com/webmatze/anvil) and termisu libraries — smith keeps the domain: what keys mean while a popup is open, the status line, the event-stream-to-blocks renderer and the gates. `src/smith/ui` shrank from 2 699 to 1 392 lines.
 
 ## [0.3.0] — 2026-09-01
 
