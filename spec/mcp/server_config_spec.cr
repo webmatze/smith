@@ -222,3 +222,58 @@ describe Smith::MCP::ServerConfig do
     end
   end
 end
+
+describe Smith::MCP::ServerSpec do
+  describe "#safe_description" do
+    it "counts a stdio server's arguments instead of repeating them" do
+      spec = Smith::MCP::ServerSpec.new(name: "s", command: "npx", args: ["--api-key", "SECRET"])
+
+      # `--api-key X` is an ordinary way to configure a server, and both
+      # `smith mcp list` and `smith doctor` end up in bug reports.
+      spec.safe_description.should eq("npx (2 arguments)")
+      spec.safe_description.should_not contain("SECRET")
+      # The unsanitised form stays as it was — the session banner and the
+      # error path still name the whole command.
+      spec.description.should eq("npx --api-key SECRET")
+    end
+
+    it "leaves a command with no arguments as it is" do
+      Smith::MCP::ServerSpec.new(name: "s", command: "/usr/bin/server").safe_description
+        .should eq("/usr/bin/server")
+    end
+
+    it "cuts a url back to scheme, host and port" do
+      spec = Smith::MCP::ServerSpec.new(name: "s", url: "https://user:pw@example.com:8443/p/SECRET?t=T#F")
+
+      spec.safe_description.should eq("https://example.com:8443")
+    end
+  end
+
+  describe ".safe_url" do
+    it "keeps only what identifies the host" do
+      Smith::MCP::ServerSpec.safe_url("http://127.0.0.1:11434/api?k=v").should eq("http://127.0.0.1:11434")
+      Smith::MCP::ServerSpec.safe_url("https://example.com/mcp").should eq("https://example.com")
+    end
+
+    it "says so rather than guessing when there is no host to keep" do
+      Smith::MCP::ServerSpec.safe_url("not a url at all").should eq("(url)")
+    end
+  end
+
+  describe ".scrub_urls" do
+    it "rewrites a url inside a message smith did not compose" do
+      Smith::MCP::ServerSpec.scrub_urls("could not reach https://u:p@h:1/x?t=SECRET: refused")
+        .should eq("could not reach https://h:1: refused")
+    end
+
+    it "hands back the punctuation that ended the sentence" do
+      # A url runs up to whitespace, so a naive match swallows the colon and
+      # the message loses its shape.
+      Smith::MCP::ServerSpec.scrub_urls("at http://h/p, then").should eq("at http://h, then")
+    end
+
+    it "leaves a message with no url in it alone" do
+      Smith::MCP::ServerSpec.scrub_urls("command not found: /usr/bin/x").should eq("command not found: /usr/bin/x")
+    end
+  end
+end

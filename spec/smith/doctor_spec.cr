@@ -59,6 +59,7 @@ private def runner(workdir : String, **overrides) : Smith::Doctor::Runner
     ollama_probe:  ->(_host : String) { Smith::Doctor::OllamaProbe.new(error: "stubbed") },
     mcp_probe:     -> { Smith::Doctor::McpProbe.new },
     sandbox_probe: -> { Smith::Sandbox::Probe.new(Smith::Sandbox::Availability::Usable, "stubbed") },
+    catalog_notes: [] of String,
   }
 
   Smith::Doctor::Runner.new(**defaults.merge(overrides))
@@ -228,6 +229,23 @@ describe ".mcp_check" do
     check.status.should eq(Smith::Doctor::Status::Ok)
     check.details.should eq(["switched off ([mcp] enabled = false)"])
   end
+
+  it "fails a probe that never reached a verdict, and still names the servers" do
+    # The trap this closes: a probe that ran out of time used to render as a
+    # warning with no servers listed at all, so a hung server became a
+    # passing run and disappeared from the report on the way.
+    probe = Smith::Doctor::McpProbe.new(
+      sources: ["/home/.smith/mcp.json"],
+      servers: [Smith::Doctor::McpServerProbe.new("hung", "stdio", "hang.sh", error: "no answer within 5s")],
+      incomplete: "the MCP probe did not finish within 6s"
+    )
+    check = Smith::Doctor.mcp_check(probe)
+
+    check.status.should eq(Smith::Doctor::Status::Fail)
+    check.details.any?(&.includes?("hung")).should be_true
+    check.details.last.should contain("did not finish")
+    check.details.should_not contain("no mcp.json found — no MCP servers configured")
+  end
 end
 
 describe ".web_search_check" do
@@ -312,6 +330,18 @@ describe ".environment_check" do
     check.details.should contain("global instructions: none in /tmp/home")
     check.details.any?(&.starts_with?("project instructions: none")).should be_true
   end
+
+  it "warns about a catalog entry that did not load, rather than only counting" do
+    # "agents: 2" reads as healthy when a third was skipped, which is the one
+    # thing a count cannot say.
+    check = Smith::Doctor.environment_check(
+      "/tmp/home", false, nil, [] of String, 1, 1,
+      ["⚠️  Agent 'bare' (/a/bare.md): no description in the frontmatter."]
+    )
+
+    check.status.should eq(Smith::Doctor::Status::Warn)
+    check.details.last.should contain("bare.md")
+  end
 end
 
 describe ".render" do
@@ -324,7 +354,9 @@ describe ".render" do
 
     output.should contain("❌ Provider — fail")
     output.should contain("   openrouter: missing")
-    output.should contain("⚠️  Config — warn")
+    # One space after every marker, warnings included: this is a column, not
+    # the standalone stderr lines the rest of smith writes with two.
+    output.should contain("⚠️ Config — warn")
     output.should contain("0 ok, 1 warn, 1 fail")
     output.should contain("A warning does not change the exit code")
   end
@@ -380,6 +412,16 @@ describe Smith::Doctor::Runner do
       )
       report = runner(workdir, mcp_probe: -> { broken }).run
 
+      report.exit_code.should eq(1)
+      check_for(report, "MCP").status.should eq(Smith::Doctor::Status::Fail)
+    end
+  end
+
+  it "fails rather than passes when the MCP probe raises" do
+    in_home do |_home, workdir|
+      report = runner(workdir, mcp_probe: -> { raise "boom"; Smith::Doctor::McpProbe.new }).run
+
+      # A probe that could not run is not a probe that found nothing wrong.
       report.exit_code.should eq(1)
       check_for(report, "MCP").status.should eq(Smith::Doctor::Status::Fail)
     end
@@ -471,7 +513,7 @@ describe ".probe_mcp" do
       probe = Smith::Doctor.probe_mcp(Smith::Config.load(workdir), workdir)
 
       probe.servers.first.kind.should eq("http")
-      probe.servers.first.target.should eq("http://127.0.0.1:1/mcp")
+      probe.servers.first.target.should eq("http://127.0.0.1:1")
       probe.servers.first.target.should_not contain("super-secret")
 
       # The failure message quotes the url it tried, so it has to be trimmed

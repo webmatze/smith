@@ -18,6 +18,17 @@ module Smith::MCP
 
     getter tools : Array(ToolDefinition)
     getter error : String?
+
+    # The same failure without the server's own stderr and without whatever
+    # stands in its argument list or its url beyond the host.
+    #
+    # A stdio server inherits smith's environment, so what it prints is not
+    # smith's to repeat where the output is meant to be pasted into a bug
+    # report. `error` keeps both for `smith mcp list`, where "why will this
+    # not start" is the whole question and the server's own complaint is the
+    # answer; `smith doctor` reads this one.
+    getter error_summary : String?
+
     getter? lost : Bool
 
     # Wired by whoever registered the tools, so they can be withdrawn when the
@@ -33,6 +44,7 @@ module Smith::MCP
       @name : String,
       @timeout : Time::Span = Client::DEFAULT_TIMEOUT,
       @startup_timeout : Time::Span = Client::STARTUP_TIMEOUT,
+      @grace : Time::Span = StdioTransport::GRACE,
     )
       @tools = Array(ToolDefinition).new
       @lost = false
@@ -48,7 +60,8 @@ module Smith::MCP
       connect
       true
     rescue ex : Exception
-      @error = failure_message(ex)
+      @error = failure_message(ex, @spec.description, with_stderr: true)
+      @error_summary = failure_message(ex, @spec.safe_description, with_stderr: false)
       stop_client
       false
     end
@@ -98,7 +111,7 @@ module Smith::MCP
       if url = @spec.url
         HttpTransport.new(URI.parse(url), @spec.headers, @timeout)
       else
-        StdioTransport.spawn_server(@spec.command.not_nil!, @spec.args, @spec.env)
+        StdioTransport.spawn_server(@spec.command.not_nil!, @spec.args, @spec.env, grace: @grace)
       end
     end
 
@@ -117,7 +130,10 @@ module Smith::MCP
       begin
         connect
       rescue ex : Exception
-        lose!("MCP server '#{@name}' could not be restarted: #{failure_message(ex)}")
+        lose!(
+          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.description, with_stderr: true)}",
+          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.safe_description, with_stderr: false)}"
+        )
         raise cause
       end
 
@@ -135,10 +151,14 @@ module Smith::MCP
       end
     end
 
-    private def lose!(reason : String) : Nil
+    # `summary` defaults to `reason` because most of these are composed from
+    # the server's name alone — there is then nothing in them to leave out.
+    # The one that wraps a failure message passes both.
+    private def lose!(reason : String, summary : String = reason) : Nil
       return if @lost
       @lost = true
       @error = reason
+      @error_summary = summary
       stop_client
       @on_lost.try &.call(self)
     end
@@ -149,14 +169,16 @@ module Smith::MCP
       @transport.try &.close
     end
 
-    private def failure_message(ex : Exception) : String
-      what = @spec.description
-
+    private def failure_message(ex : Exception, what : String, with_stderr : Bool) : String
       base = case ex
              when File::NotFoundError then "command not found: #{what}"
              when TimeoutError        then "no response to the MCP handshake — is #{what} an MCP server?"
              else                          ex.message || ex.class.name
              end
+
+      # `ex.message` quotes the url too, so the sanitised form has to be put
+      # back over it rather than only used for the messages built here.
+      return ServerSpec.scrub_urls(base) unless with_stderr
 
       tail = stderr_tail.last(3).map(&.strip).reject(&.empty?)
       tail.empty? ? base : "#{base} (stderr: #{tail.join(" / ")})"
@@ -179,6 +201,7 @@ module Smith::MCP
       specs : Array(ServerSpec),
       timeout : Time::Span = Client::DEFAULT_TIMEOUT,
       startup_timeout : Time::Span = Client::STARTUP_TIMEOUT,
+      grace : Time::Span = StdioTransport::GRACE,
     ) : Manager
       taken = Set(String).new
 
@@ -186,7 +209,7 @@ module Smith::MCP
         # Two servers whose names differ only in characters that get folded
         # away would otherwise export tools under the same prefix.
         name = unique(sanitize(spec.name), taken)
-        ServerHandle.new(spec, name, timeout, startup_timeout)
+        ServerHandle.new(spec, name, timeout, startup_timeout, grace)
       end
 
       new(handles)

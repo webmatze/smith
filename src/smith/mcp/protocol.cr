@@ -153,6 +153,13 @@ module Smith::MCP
 
     getter stderr_tail : Array(String)
 
+    # How long SIGTERM gets before SIGKILL follows. Zero sends both at once,
+    # which is what a caller on a deadline needs: `smith doctor` promises to
+    # be quick, waiting twice over for a server that ignores TERM is how it
+    # would break that promise, and nothing a probe started has state worth
+    # flushing. A session keeps the patient default.
+    getter grace : Time::Span
+
     @status : Process::Status? = nil
     @closed = false
 
@@ -161,6 +168,7 @@ module Smith::MCP
       args : Array(String) = [] of String,
       env : Hash(String, String) = Hash(String, String).new,
       chdir : String? = nil,
+      grace : Time::Span = GRACE,
     ) : StdioTransport
       process = Process.new(
         command,
@@ -173,10 +181,10 @@ module Smith::MCP
         error: Process::Redirect::Pipe
       )
 
-      new(process)
+      new(process, grace)
     end
 
-    def initialize(@process : Process)
+    def initialize(@process : Process, @grace : Time::Span = GRACE)
       @stderr_tail = Array(String).new
       @done = Channel(Nil).new(1)
 
@@ -224,8 +232,8 @@ module Smith::MCP
 
       if alive?
         signal(Signal::TERM)
-        signal(Signal::KILL) unless exited?(GRACE)
-        exited?(GRACE)
+        signal(Signal::KILL) unless exited?(@grace)
+        exited?(@grace)
       end
 
       close_pipe(@process.output)
@@ -234,6 +242,10 @@ module Smith::MCP
 
     private def exited?(span : Time::Span) : Bool
       return true unless alive?
+      # A zero grace is not a zero-length wait but no wait at all: the caller
+      # asked for TERM and KILL together, and SIGKILL cannot be ignored, so
+      # there is nothing left to wait for.
+      return false unless span > Time::Span.zero
 
       select
       when @done.receive

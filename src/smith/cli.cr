@@ -1796,10 +1796,16 @@ module Smith
           handle.name,
           handle.running? ? "ready" : "failed",
           handle.tools.size.to_s,
-          handle.spec.description
+          # An `--api-key` in the argument list and a token in a url are both
+          # ordinary ways to configure a server, and this listing is one of
+          # the things people paste into a bug report.
+          handle.spec.safe_description
       end
 
       puts "--------------------------------------------------------------------------------"
+      # The full error, stderr and all: here the question is why a server will
+      # not start, and its own complaint is the answer. `smith doctor` takes
+      # the summary instead.
       manager.handles.reject(&.running?).each { |handle| puts "   #{handle.name}: #{handle.error}" }
       puts "Inspect one with: smith mcp tools <server>"
     end

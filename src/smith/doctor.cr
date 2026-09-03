@@ -5,6 +5,8 @@ require "./version"
 require "./paths"
 require "./config"
 require "./project_ctx"
+require "./skills"
+require "./agents"
 require "./sandbox"
 require "./mcp"
 
@@ -27,10 +29,14 @@ module Smith
       Warn
       Fail
 
+      # One glyph, no padding. Elsewhere smith writes "⚠️  " with two spaces,
+      # but those are standalone stderr lines; here the marker starts a
+      # column and an extra space would put the warnings out of line with
+      # everything above and below them.
       def marker : String
         case self
         in Ok   then "✅"
-        in Warn then "⚠️ "
+        in Warn then "⚠️"
         in Fail then "❌"
         end
       end
@@ -125,12 +131,58 @@ module Smith
       getter warnings : Array(String)
       getter? enabled : Bool
 
+      # Set when the probe itself did not reach a verdict, as opposed to a
+      # probe that ran and found everything healthy. The two must never
+      # render alike: a diagnostic that could not finish has not passed, and
+      # reporting it as `ok` is the one failure this command cannot afford.
+      getter incomplete : String?
+
       def initialize(
         @sources : Array(String) = Array(String).new,
         @servers : Array(McpServerProbe) = Array(McpServerProbe).new,
         @warnings : Array(String) = Array(String).new,
         @enabled : Bool = true,
+        @incomplete : String? = nil,
       )
+      end
+    end
+
+    # What `mcp.json` says before anything has been started. Reading it is
+    # file I/O and nothing more, so it is done up front and outside every
+    # deadline — which is what lets a report that ran out of time still name
+    # each server it never got an answer from.
+    struct McpPlan
+      getter sources : Array(String)
+      getter specs : Array(MCP::ServerSpec)
+      getter warnings : Array(String)
+      getter? enabled : Bool
+
+      def initialize(
+        @sources : Array(String) = Array(String).new,
+        @specs : Array(MCP::ServerSpec) = Array(MCP::ServerSpec).new,
+        @warnings : Array(String) = Array(String).new,
+        @enabled : Bool = true,
+      )
+      end
+
+      def probes? : Bool
+        @enabled && !@specs.empty?
+      end
+
+      # Everything the plan knows, with one reason standing in for every
+      # handshake that was never made.
+      def unprobed(reason : String) : McpProbe
+        McpProbe.new(
+          sources: @sources,
+          servers: @specs.map { |spec| Doctor.server_probe(spec, error: reason) },
+          warnings: @warnings,
+          enabled: @enabled,
+          incomplete: reason
+        )
+      end
+
+      def to_probe(servers : Array(McpServerProbe)) : McpProbe
+        McpProbe.new(sources: @sources, servers: servers, warnings: @warnings, enabled: @enabled)
       end
     end
 
@@ -241,6 +293,14 @@ module Smith
         end
       end
 
+      # A probe that never came back is not a pass. It fails for the same
+      # reason an unusable sandbox does: the honest answer to "is this
+      # working" is that nobody found out.
+      if reason = probe.incomplete
+        details << reason
+        return Check.new("MCP", Status::Fail, details)
+      end
+
       broken = probe.servers.count { |server| !server.ok? }
       status = if broken > 0
                  Status::Fail
@@ -307,6 +367,7 @@ module Smith
       project_instructions : Array(String),
       skills : Int32,
       agents : Int32,
+      catalog_notes : Array(String) = Array(String).new,
     ) : Check
       details = [
         "version: smith #{Smith::VERSION}",
@@ -323,8 +384,24 @@ module Smith
 
       details << "skills: #{skills}"
       details << "agents: #{agents}"
+      details.concat(catalog_notes)
 
-      Check.new("Environment", Status::Ok, details)
+      # A count on its own hides the interesting case: "agents: 2" reads as
+      # healthy when a third failed to load and was skipped.
+      Check.new("Environment", catalog_notes.empty? ? Status::Ok : Status::Warn, details)
+    end
+
+    # What both catalogs found wrong while loading. The skills catalog keeps
+    # its problems; the agents catalog reports and clears them in its
+    # constructor, which runs before the CLI knows which command was asked
+    # for — so its files are read once more here rather than going unmentioned
+    # in the one command whose job is to mention them.
+    def self.catalog_notes(start_dir : String = Dir.current) : Array(String)
+      collected = IO::Memory.new
+      Agents::Catalog.discover(start_dir, warn_io: collected)
+
+      Skills::Catalog.discover(start_dir).warnings +
+        collected.to_s.lines.map(&.strip).reject(&.empty?)
     end
 
     # --- Rendering ---------------------------------------------------------
@@ -369,26 +446,36 @@ module Smith
     end
 
     def self.probe_ollama(host : String) : OllamaProbe
-      uri = URI.parse("#{host.chomp("/")}/api/tags")
+      uri = tags_uri(host)
       client = HTTP::Client.new(uri)
       client.connect_timeout = OLLAMA_CONNECT_TIMEOUT
       client.read_timeout = OLLAMA_READ_TIMEOUT
-      # Crystal honours this on Windows only. Everywhere else `getaddrinfo`
-      # runs on the thread, so a resolver that hangs blocks every fiber and
-      # the deadline in `Runner#gather` cannot fire either — the one path
-      # through this command that nothing bounds.
       client.dns_timeout = OLLAMA_CONNECT_TIMEOUT
 
       begin
         response = client.get(uri.request_target)
-        return OllamaProbe.new(error: "HTTP #{response.status_code} from #{uri}") unless response.status.success?
+        return OllamaProbe.new(error: "HTTP #{response.status_code} from #{safe_url(uri.to_s)}") unless response.status.success?
 
         OllamaProbe.new(models: parse_models(response.body))
       ensure
         client.close
       end
     rescue ex : Exception
-      OllamaProbe.new(error: "not reachable: #{ex.message.presence || ex.class.name}")
+      OllamaProbe.new(error: "not reachable: #{scrub(ex.message.presence || ex.class.name)}")
+    end
+
+    # `"#{host}/api/tags"` is string concatenation, not a url: a host carrying
+    # a query would put it in the middle of the path, and from there into the
+    # message when the probe fails. Assembled from the parts instead, with
+    # everything a credential is written into left out.
+    private def self.tags_uri(host : String) : URI
+      uri = URI.parse(host)
+      uri.path = "#{uri.path.chomp("/")}/api/tags"
+      uri.query = nil
+      uri.fragment = nil
+      uri.user = nil
+      uri.password = nil
+      uri
     end
 
     private def self.parse_models(body : String) : Array(String)
@@ -398,25 +485,46 @@ module Smith
       Array(String).new
     end
 
-    # A real handshake, the same one a session performs, against a manager of
-    # our own: `CLI#mcp_manager` starts its servers sequentially with the long
-    # session timeouts, and it is the session's manager, not a diagnostic's.
-    def self.probe_mcp(config : Config, start_dir : String = Dir.current) : McpProbe
-      settings = config.mcp
+    # What `mcp.json` says, read without starting anything.
+    def self.plan_mcp(config : Config, start_dir : String = Dir.current) : McpPlan
       sources = [MCP::ServerConfig.global_path, MCP::ServerConfig.project_path(start_dir)]
         .compact
         .select { |path| File.exists?(path) && File.file?(path) }
 
-      return McpProbe.new(sources: sources, enabled: false) unless settings.enabled?
+      return McpPlan.new(sources: sources, enabled: false) unless config.mcp.enabled?
 
       notices = IO::Memory.new
       specs = MCP::ServerConfig.discover(start_dir, warn_io: notices)
-      warnings = notices.to_s.lines.map(&.strip).reject(&.empty?)
+      # These lines quote the config file, so they get the same cut a url
+      # gets anywhere else in the report.
+      warnings = notices.to_s.lines.map { |line| scrub(line.strip) }.reject(&.empty?)
 
-      manager = MCP::Manager.build(specs, timeout: MCP_STARTUP_TIMEOUT, startup_timeout: MCP_STARTUP_TIMEOUT)
+      McpPlan.new(sources: sources, specs: specs, warnings: warnings)
+    end
+
+    # A manager whose servers can be killed the moment a deadline says so.
+    # `CLI#mcp_manager` builds the session's, with the long session timeouts
+    # and the patient shutdown a session wants.
+    def self.build_manager(plan : McpPlan) : MCP::Manager
+      MCP::Manager.build(
+        plan.specs,
+        timeout: MCP_STARTUP_TIMEOUT,
+        startup_timeout: MCP_STARTUP_TIMEOUT,
+        grace: Time::Span.zero
+      )
+    end
+
+    # A real handshake, the same one a session performs. Whoever owns the
+    # manager owns the shutdown; this is the self-contained version for
+    # callers with no deadline of their own.
+    def self.probe_mcp(config : Config, start_dir : String = Dir.current) : McpProbe
+      plan = plan_mcp(config, start_dir)
+      return plan.to_probe(Array(McpServerProbe).new) unless plan.probes?
+
+      manager = build_manager(plan)
 
       begin
-        McpProbe.new(sources: sources, servers: probe_servers(manager), warnings: warnings)
+        plan.to_probe(probe_servers(manager))
       ensure
         # Nothing a probe started may outlive it — the same contract the
         # session keeps for its own servers.
@@ -424,7 +532,7 @@ module Smith
       end
     end
 
-    private def self.probe_servers(manager : MCP::Manager) : Array(McpServerProbe)
+    def self.probe_servers(manager : MCP::Manager) : Array(McpServerProbe)
       handles = manager.handles
       return Array(McpServerProbe).new if handles.empty?
 
@@ -436,12 +544,15 @@ module Smith
         spawn do
           probe = begin
             if handle.start
-              McpServerProbe.new(handle.name, kind(handle.spec), target(handle.spec), handle.tools.size)
+              server_probe(handle.spec, name: handle.name, tools: handle.tools.size)
             else
-              McpServerProbe.new(handle.name, kind(handle.spec), target(handle.spec), error: redact(handle.error || "did not start", handle.spec))
+              # `error_summary`, never `error`: the latter carries the
+              # server's own stderr, and a child inherits smith's
+              # environment. What it chose to print is not smith's to repeat.
+              server_probe(handle.spec, name: handle.name, error: handle.error_summary || "did not start")
             end
           rescue ex : Exception
-            McpServerProbe.new(handle.name, kind(handle.spec), target(handle.spec), error: redact(ex.message.presence || ex.class.name, handle.spec))
+            server_probe(handle.spec, name: handle.name, error: scrub(ex.message.presence || ex.class.name))
           end
 
           inbox.send(probe)
@@ -464,40 +575,40 @@ module Smith
       end
 
       handles.map do |handle|
-        answered[handle.name]? || McpServerProbe.new(
-          handle.name, kind(handle.spec), target(handle.spec),
+        answered[handle.name]? || server_probe(
+          handle.spec,
+          name: handle.name,
           error: "no answer within #{MCP_DEADLINE.total_seconds.round.to_i}s"
         )
       end
+    end
+
+    # One line's worth of a server, built only from what is safe to print.
+    def self.server_probe(
+      spec : MCP::ServerSpec,
+      name : String? = nil,
+      tools : Int32 = 0,
+      error : String? = nil,
+    ) : McpServerProbe
+      McpServerProbe.new(name || spec.name, kind(spec), spec.safe_description, tools, error)
     end
 
     private def self.kind(spec : MCP::ServerSpec) : String
       spec.http? ? "http" : "stdio"
     end
 
-    # `ServerHandle` quotes what it tried to reach when it explains a failure,
-    # and for an http server that is the url out of mcp.json — query string
-    # and whatever is in it included. A diagnostic is the last place that
-    # should be echoed, so the same trimmed url goes in instead.
-    private def self.redact(message : String, spec : MCP::ServerSpec) : String
-      url = spec.url
-      return message if url.nil?
-
-      message.gsub(url, target(spec))
+    # The cut a url gets in the MCP config layer, reused here: scheme, host
+    # and port, nothing a credential has ever been found in. An Ollama or
+    # SearXNG host comes out of config.toml, where a url with a password in
+    # it is exactly as possible as it is in mcp.json.
+    def self.safe_url(url : String) : String
+      MCP::ServerSpec.safe_url(url)
     end
 
-    # What `smith mcp list` shows, minus a url's query string. `env` and
-    # `headers` are never printed at all: headers are expanded from the
-    # environment, which is where the tokens are.
-    private def self.target(spec : MCP::ServerSpec) : String
-      url = spec.url
-      return spec.description if url.nil?
-
-      uri = URI.parse(url)
-      uri.query = nil
-      uri.to_s
-    rescue
-      "(url)"
+    # The same, applied to a message smith did not compose — an exception from
+    # an HTTP client, a warning quoting a config file.
+    def self.scrub(text : String) : String
+      MCP::ServerSpec.scrub_urls(text)
     end
 
     # --- Gathering ---------------------------------------------------------
@@ -523,6 +634,7 @@ module Smith
         @ollama_probe : OllamaProbeFn = ->(host : String) { Doctor.probe_ollama(host) },
         @mcp_probe : McpProbeFn? = nil,
         @sandbox_probe : SandboxProbeFn = -> { Smith::Sandbox.probe },
+        @catalog_notes : Array(String)? = nil,
       )
       end
 
@@ -535,9 +647,9 @@ module Smith
         Report.new([
           Doctor.provider_check(@keys, @provider),
           Doctor.config_check(@config.sources, config_candidates, @provider, @model, @mode),
-          Doctor.ollama_check(@config.ollama_host, ollama, @provider == "ollama", ollama_configured?),
+          Doctor.ollama_check(Doctor.safe_url(@config.ollama_host), ollama, @provider == "ollama", ollama_configured?),
           Doctor.mcp_check(mcp),
-          Doctor.web_search_check(web.search_provider, @keys, web.searxng_host),
+          Doctor.web_search_check(web.search_provider, @keys, Doctor.safe_url(web.searxng_host)),
           Doctor.sandbox_check(
             sandbox_settings.enabled?,
             sandbox_settings.required?,
@@ -550,7 +662,8 @@ module Smith
             ProjectContext.global_file,
             ProjectContext.project_files(@start_dir),
             @skills,
-            @agents
+            @agents,
+            @catalog_notes || Doctor.catalog_notes(@start_dir)
           ),
         ])
       end
@@ -559,24 +672,22 @@ module Smith
       # that is still stuck when it expires is abandoned rather than waited
       # for: the answer it would give is "did not answer", which is the answer
       # already recorded.
+      #
+      # The MCP manager is built *here* rather than inside its fiber, and shut
+      # down in the `ensure` below. A fiber that has been abandoned cannot be
+      # relied on to clean up after itself, and the servers it started are
+      # subprocesses — leaving them behind is how a diagnostic ends up worse
+      # than useless.
       private def gather : {OllamaProbe, McpProbe, Sandbox::Probe}
         inbox = Channel(OllamaProbe | McpProbe | Sandbox::Probe).new(3)
         host = @config.ollama_host
-        mcp_probe = @mcp_probe || -> { Doctor.probe_mcp(@config, @start_dir) }
+        seconds = DEADLINE.total_seconds.round.to_i
 
         spawn do
           inbox.send(begin
             @ollama_probe.call(host)
           rescue ex : Exception
-            OllamaProbe.new(error: "probe failed: #{ex.message.presence || ex.class.name}")
-          end)
-        end
-
-        spawn do
-          inbox.send(begin
-            mcp_probe.call
-          rescue ex : Exception
-            McpProbe.new(warnings: ["probe failed: #{ex.message.presence || ex.class.name}"])
+            OllamaProbe.new(error: "probe failed: #{Doctor.scrub(ex.message.presence || ex.class.name)}")
           end)
         end
 
@@ -586,6 +697,39 @@ module Smith
           rescue ex : Exception
             Sandbox::Probe.new(Sandbox::Availability::Blocked, "probe failed: #{ex.message.presence || ex.class.name}")
           end)
+        end
+
+        plan = nil.as(McpPlan?)
+        manager = nil.as(MCP::Manager?)
+
+        if injected = @mcp_probe
+          spawn do
+            inbox.send(begin
+              injected.call
+            rescue ex : Exception
+              McpProbe.new(incomplete: "probe failed: #{ex.message.presence || ex.class.name}")
+            end)
+          end
+        else
+          # Reading mcp.json is file I/O, so it happens before the clock
+          # starts — and that is what lets the report name every configured
+          # server even when no handshake finished.
+          found = Doctor.plan_mcp(@config, @start_dir)
+          plan = found
+
+          if found.probes?
+            started = Doctor.build_manager(found)
+            manager = started
+            spawn do
+              inbox.send(begin
+                found.to_probe(Doctor.probe_servers(started))
+              rescue ex : Exception
+                found.unprobed("probe failed: #{Doctor.scrub(ex.message.presence || ex.class.name)}")
+              end)
+            end
+          else
+            spawn { inbox.send(found.to_probe(Array(McpServerProbe).new)) }
+          end
         end
 
         ollama : OllamaProbe? = nil
@@ -609,13 +753,19 @@ module Smith
           end
         end
 
-        seconds = DEADLINE.total_seconds.round.to_i
+        overdue = "the MCP probe did not finish within #{seconds}s"
 
         {
           ollama || OllamaProbe.new(error: "no answer within #{seconds}s"),
-          mcp || McpProbe.new(warnings: ["the MCP probe did not finish within #{seconds}s"]),
+          mcp || plan.try(&.unprobed(overdue)) || McpProbe.new(incomplete: overdue),
           sandbox || Sandbox::Probe.new(Sandbox::Availability::Blocked, "no answer within #{seconds}s"),
         }
+      ensure
+        # Runs whether or not the fiber that started them ever came back, and
+        # before `run` returns — so nothing smith spawned is still alive when
+        # the process exits. The manager kills outright rather than asking
+        # politely, which is why this costs no time.
+        manager.try &.shutdown
       end
 
       # Both files a run would read, whether or not they parsed.

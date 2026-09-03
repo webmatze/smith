@@ -1423,7 +1423,9 @@ One block per check, each `ok`, `warn` or `fail`:
 
 The exit code is 1 if any check failed and 0 otherwise; a warning never changes it, so `smith doctor` is usable as a precondition in a script.
 
-Every probe carries its own deadline and they all run at once, so an unreachable Ollama and a hanging MCP server cost the longest probe rather than their sum — a completely unreachable setup answers in about three seconds, and the probes together are capped at six. One thing sits outside that cap: Crystal does not bound `getaddrinfo` on Unix, so a *name lookup* that hangs — as opposed to a name that does not resolve — blocks the whole process for as long as the system resolver takes.
+Every probe carries its own deadline and they all run at once, so an unreachable Ollama and a hanging MCP server cost the longest probe rather than their sum — a completely unreachable setup answers in about three seconds, and the probes together are capped at six.
+
+Nothing an MCP probe starts outlives it, however badly it behaves: a server that ignores `SIGTERM` is killed outright, and the shutdown runs after the deadline rather than inside it. Nothing the report prints comes from a server either — a stdio server inherits smith's environment, so what it writes to its own stderr stays out of a page meant to be pasted into a bug report. Neither does anything out of `mcp.json` beyond what identifies a server: an argument list is summarised by its length and a url is cut back to scheme, host and port, because `--api-key` and `https://token@host/` are both ordinary ways to configure a server.
 
 ### Command Line Options
 
