@@ -233,6 +233,19 @@ describe Smith::SessionExport do
     end
   end
 
+  it "exports a session whose name an earlier release let contain a slash" do
+    with_store do |store|
+      session = seed_session(store)
+      session.name = "feat/export"
+      store.save(session, derive_name: false, check_name: false)
+
+      document = Smith::SessionExport.build(store, "feat/export")
+
+      document.id.should eq(session.id)
+      document.messages.size.should eq(3)
+    end
+  end
+
   it "does not swallow an ambiguous name just because a directory of that name has a transcript" do
     with_store do |store|
       first = seed_session(store)
@@ -357,6 +370,33 @@ describe Smith::SessionExport do
       markdown.lines.count { |line| line.matches?(/\A {0,3}`{3,}/) }.should eq(2)
       # The turn after it is still a heading, not code.
       markdown.should contain("### 2 · User")
+    end
+  end
+
+  it "closes an unclosed tilde fence too, which is what a model reaches for" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      # `~~~` is chosen precisely when the content already holds backticks.
+      session.messages << Smith::LLM::Message.assistant("Like so:\n\n~~~markdown\n```\nstill inside\n```")
+      session.messages << Smith::LLM::Message.user("thanks")
+      store.save(session)
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.should contain("\n~~~\n")
+      markdown.should contain("### 2 · User")
+    end
+  end
+
+  it "leaves a balanced tilde fence alone" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.assistant("Balanced:\n\n~~~\n```\ncode\n```\n~~~")
+      store.save(session)
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.lines.count { |line| line.matches?(/\A {0,3}~{3,}\s*\z/) }.should eq(2)
     end
   end
 

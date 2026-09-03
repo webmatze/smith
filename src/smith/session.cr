@@ -390,15 +390,24 @@ module Smith::Session
     # load — the raw transcript beside it is still exportable.
     def resolve_id(reference : String) : String
       wanted = reference.strip
-      assert_plain_reference(wanted)
       entries = list
 
-      return wanted if entries.any? { |e| e.id == wanted } || session_file?(wanted)
+      # Matching an id or a name is a string compare against something the
+      # index already holds, and cannot leave the sessions directory. The
+      # filesystem probe can — `File.join` defuses an absolute path but
+      # carries `..` straight through — so the guard sits on that branch
+      # alone. In front of all three it would also strand a session named
+      # `feat/export` by an earlier release, which `rename` used to allow.
+      return wanted if entries.any? { |e| e.id == wanted }
+      return wanted if plain_reference?(wanted) && session_file?(wanted)
 
       matches = entries.select { |e| e.name == wanted }
 
       case matches.size
       when 0
+        # Nothing is named this, and nothing ever could be: the sharper
+        # message beats "not found" for a reference that is a path.
+        assert_plain_reference(wanted)
         raise NotFound.new("Session '#{wanted}' not found. Run 'smith sessions' to see what there is.")
       when 1
         matches.first.id
@@ -456,8 +465,11 @@ module Smith::Session
     # index rather than the loaded transcript, so a half-written session can
     # still be cleaned up. Returns the index entry when there was one.
     def delete(reference : String) : IndexEntry?
-      entry = resolve_entry(reference)
-      remove(entry.try(&.id) || reference)
+      # The resolved id, never the raw reference: what the user typed has not
+      # been through resolution, and this is the call that deletes a directory.
+      id = resolve_id(reference)
+      entry = list.find { |e| e.id == id }
+      remove(id)
       entry
     end
 
@@ -497,6 +509,11 @@ module Smith::Session
     end
 
     private def remove(id : String) : Nil
+      # Checked once more at the point of no return: everything that reaches
+      # here becomes an `rm -rf`, and an id read back from a hand-edited index
+      # has been through no resolution at all.
+      assert_plain_reference(id)
+
       # Index first: interrupted before the files go, what is left is an
       # invisible orphan directory; the other way round the index would keep
       # naming a session that is no longer there.
@@ -509,16 +526,19 @@ module Smith::Session
       File.delete(legacy) if File.exists?(legacy)
     end
 
-    # A reference names one session — an id or a name — and never a path.
+    # Whether a reference can be used as a directory name under `sessions/`.
     #
     # `File.join` defuses an absolute path but carries `..` straight through,
-    # so a reference like `../../notes` used to resolve to a directory outside
-    # the sessions tree. Whatever resolves is what `sessions delete` removes
-    # and what an export reads, so the refusal belongs at the one point both
-    # go through.
+    # so `../../notes` reached a directory outside the sessions tree — read by
+    # an export and, worse, removed by `sessions delete`, which deletes what it
+    # resolves. Everything that turns a reference into a path asks this first.
+    private def plain_reference?(reference : String) : Bool
+      !reference.empty? && reference != "." && reference != ".." &&
+        File.basename(reference) == reference
+    end
+
     private def assert_plain_reference(reference : String) : Nil
-      return if !reference.empty? && reference != "." && reference != ".." &&
-                File.basename(reference) == reference
+      return if plain_reference?(reference)
 
       raise ArgumentError.new(
         "'#{reference}' is not a session reference — a name or an id, never a path. Run 'smith sessions' to see what there is."

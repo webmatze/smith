@@ -420,20 +420,27 @@ module Smith
     # Tracked the way CommonMark reads fences rather than counted: a shorter
     # run of backticks *inside* a longer fence is content, not a second fence,
     # and a parity count would "close" a document that was never open.
+    #
+    # Tildes as well as backticks, because a model reaches for `~~~` exactly
+    # when what it is quoting already contains backticks — so the unclosed
+    # fence is at least as likely to be a tilde one.
     private def self.close_open_fence(text : String) : String
       open : String? = nil
 
       text.each_line do |line|
-        match = line.match(/\A {0,3}(`{3,})(.*)\z/)
+        match = line.match(/\A {0,3}(`{3,}|~{3,})(.*)\z/)
         next if match.nil?
 
         marker, rest = match[1], match[2]
 
-        if open.nil?
-          # An opening fence may carry an info string, but never a backtick.
-          open = marker unless rest.includes?('`')
-        elsif marker.size >= open.size && rest.strip.empty?
-          open = nil
+        if current = open
+          # A closer repeats the opening character, is at least as long, and
+          # carries nothing else.
+          open = nil if marker[0] == current[0] && marker.size >= current.size && rest.strip.empty?
+        elsif marker.starts_with?('~') || !rest.includes?('`')
+          # A backtick fence may not have a backtick in its info string; a
+          # tilde fence may.
+          open = marker
         end
       end
 

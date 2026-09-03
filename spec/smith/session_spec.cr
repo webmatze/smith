@@ -653,6 +653,51 @@ describe "a session reference" do
     end
   end
 
+  it "still resolves a slash-shaped name an earlier release allowed" do
+    with_store do |store|
+      # `rename` accepted this before the guard existed, and the name is in
+      # both index.json and session.json of every session named that way.
+      # Refusing to resolve it would strand a session that is still listed.
+      session = session_with(store, "a branch-shaped name")
+      session.name = "feat/export"
+      store.save(session, derive_name: false, check_name: false)
+
+      store.resolve_id("feat/export").should eq(session.id)
+      store.resolve("feat/export").id.should eq(session.id)
+      store.list.first.name.should eq("feat/export")
+    end
+  end
+
+  it "deletes such a session by its name without touching anything else" do
+    with_store do |store|
+      session = session_with(store, "a branch-shaped name")
+      session.name = "feat/export"
+      store.save(session, derive_name: false, check_name: false)
+
+      store.delete("feat/export").try(&.id).should eq(session.id)
+      Dir.exists?(store.session_dir(session.id)).should be_false
+      # Never `sessions/feat`, which is what a path-shaped name would name.
+      Dir.exists?(File.join(store.sessions_dir, "feat")).should be_false
+    end
+  end
+
+  it "refuses to remove anything a path could reach, even from a hand-edited index" do
+    with_store do |store|
+      session_with(store, "a real session")
+      outside = File.join(store.base_dir, "victim")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "keepme.txt"), "secret")
+
+      expect_raises(ArgumentError, /is not a session reference/) { store.delete("../victim") }
+
+      # An id is only ever a generated one — unless someone writes their own.
+      File.write(store.index_path, %([{"id": "../victim", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0}]))
+      expect_raises(ArgumentError, /is not a session reference/) { store.delete("../victim") }
+
+      File.exists?(File.join(outside, "keepme.txt")).should be_true
+    end
+  end
+
   it "tells a reference that names nothing from one that is refused" do
     with_store do |store|
       # A caller that means to fall back when a session is gone must not also

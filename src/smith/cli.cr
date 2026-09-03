@@ -2170,8 +2170,19 @@ module Smith
       puts "   #{remaining} session(s) #{(@dry_run ? "would remain" : "left")}; the newest one is never pruned."
     end
 
+    # The index entries, with anything unreadable in the file named on stderr.
+    #
+    # A listing or a total that is quietly one session short is worse than an
+    # error, because nothing about it looks wrong. The store already knows
+    # what it could not parse; every command built on the index says so.
+    private def index_entries : Array(Session::IndexEntry)
+      entries, damage = @session_store.read_index
+      damage.each { |problem| STDERR.puts "⚠️  The session index is damaged: #{problem}." }
+      entries
+    end
+
     private def list_sessions
-      entries = @session_store.list
+      entries = index_entries
       if entries.empty?
         puts "No saved sessions found under #{@session_store.sessions_dir}"
         return
@@ -2196,7 +2207,7 @@ module Smith
     # `smith stats` — totals across every saved session, built from the
     # index alone. Read-only by construction: nothing here writes (#85).
     private def show_stats
-      entries = @session_store.list
+      entries = index_entries
       if entries.empty?
         puts "No sessions found under #{@session_store.sessions_dir}"
         puts "Start a chat (`smith chat`) or a headless run, and the totals land here."
