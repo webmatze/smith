@@ -494,6 +494,45 @@ describe "the slash-command popup" do
     ]
   end
 
+  # The two commands the Enter rule tells apart: one whose bare form reports
+  # something, one whose bare form is meaningless.
+  argument_commands = ->(app : App) do
+    app.completions = [
+      Completion.new(name: "/model", description: "show or switch the model", takes_args: true, optional_args: true),
+      Completion.new(name: "/resume", description: "switch session", takes_args: true),
+    ]
+  end
+
+  it "runs a finished command whose bare form does something on the first Enter" do
+    # `/model` on its own reports the model in use, so Enter must submit it
+    # rather than complete it and wait for an argument nobody has to give.
+    app = app_with(["/model", :tick, "\r", :tick])
+    argument_commands.call(app)
+
+    submitted = [] of String
+    app.run do |text|
+      submitted << text
+      app.turn_finished
+    end
+
+    submitted.should eq(["/model"])
+  end
+
+  it "still waits for the argument of a command that needs one" do
+    # `/resume` bare is meaningless, so the first Enter completes the word and
+    # the submission only happens once a target has been typed.
+    app = app_with(["/resume", :tick, "\r", :tick, "my-session\r", :tick])
+    argument_commands.call(app)
+
+    submitted = [] of String
+    app.run do |text|
+      submitted << text
+      app.turn_finished
+    end
+
+    submitted.should eq(["/resume my-session"])
+  end
+
   it "comes up on a bare slash and follows the typing" do
     app = app_with(["/", :tick, :tick])
     completions.call(app)

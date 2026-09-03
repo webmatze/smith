@@ -244,7 +244,12 @@ module Smith::UI
 
     private def submit(event : Termisu::Event::Key) : Nil
       if current = popup_selection
-        if current.takes_args
+        # A command whose bare form does something runs as typed: `/model`
+        # alone reports the model in use, so Enter on the finished word must
+        # submit rather than wait for an argument that is only optional.
+        as_typed = current.optional_args && editor.text.strip.downcase == current.name
+
+        if current.takes_args && !as_typed
           # Complete the command word, then let the human type the
           # argument — submitting a half-typed `/resume` does nothing.
           editor.set_text("#{current.name} ")

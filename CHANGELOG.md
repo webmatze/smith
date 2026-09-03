@@ -4,6 +4,10 @@ All notable changes to smith. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Added
+
+- **`/model` switches the model mid-session**: bare it reports the model and provider in use, with a name it switches the model from the next request onward — the provider client, its API key and its connection stay as they are, which is all `-m` ever decided at startup. The new model is written to the session straight away, so `smith resume` comes back on it, and subagents spawned afterwards follow it. `--max-budget-usd` now adds each turn up at the rates in force when that turn was billed, so a switch cannot re-price money already spent. No allow-list stands in the way of a model released next week — a name must be a single word that is not a flag, a path or a provider, and anything else the provider rejects at the next request as an ordinary turn error. One session still records one model, so a session that switched is reported under the model it ended on by `smith stats` and the `COST` column (#94).
+
 ## [0.4.0] — 2026-09-02
 
 ### Added

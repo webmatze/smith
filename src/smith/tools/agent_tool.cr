@@ -8,7 +8,9 @@ module Smith::Tools
   class AgentTool < Tool
     getter supervisor : Smith::Subagents::Supervisor
     getter provider : Smith::LLM::Provider
-    getter model : String
+    # Writable so `/model` reaches children too: `-m` picks the model for
+    # subagents at startup, and a mid-session switch should mean the same.
+    property model : String
     getter agents : Smith::Agents::Catalog
 
     def initialize(
