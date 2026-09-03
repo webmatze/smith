@@ -729,7 +729,7 @@ smith skills list         # the same for the skills catalog, warnings included
 
 `smith agents list` prints the *effective* tool list, so a definition that names no `tools` shows the set its `mode` implies rather than a blank, and one that declares an empty `tools:` shows `(none)`.
 
-`smith skills list` adds a `shadows:` line wherever two sources define the same name, so which file is actually in effect is visible rather than inferred. Below the list it names every `SKILL.md` that did not read as written:
+Both add a `shadows:` line wherever two sources define the same name, so which file is actually in effect is visible rather than inferred — and a warning about a file that lost the clash says which file won, instead of reading as though the one you are using were broken. Below the list, `smith skills list` names every `SKILL.md` that did not read as written (agent definitions get the same check, on stderr):
 
 | What is wrong | What happens |
 |---|---|

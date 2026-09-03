@@ -182,3 +182,47 @@ describe "the tools an agent definition resolves to" do
     end
   end
 end
+
+# Global is read first, so a project definition of the same name replaces it. A
+# warning that names the file which lost, without saying it lost, reads as "the
+# agent you are using is broken".
+describe "agent definitions that shadow each other" do
+  it "names the file in effect when the broken one is the one that lost" do
+    warnings = IO::Memory.new
+    with_agents(
+      project: {"dup" => "---\nname: dup\ndescription: The good one.\n---\nP"},
+      global: {"dup" => "---\nname: dup\ndescription: The broken one.\n\nG"}
+    ) do |dir|
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      project_path = File.join(dir, ".smith", "agents", "dup.md")
+      global_path = File.join(dir, "smith-home", "agents", "dup.md")
+
+      catalog.agents["dup"].description.should eq("The good one.")
+      catalog.agents["dup"].path.should eq(project_path)
+      catalog.shadowed["dup"].should eq([global_path])
+
+      warnings.to_s.should contain(global_path)
+      warnings.to_s.should contain("comes from #{project_path}")
+    end
+  end
+
+  it "claims no such thing when the broken file is the one in effect" do
+    warnings = IO::Memory.new
+    with_agents(
+      project: {"dup" => "---\nname: dup\ndescription: The broken one.\n\nP"},
+      global: {"dup" => "---\nname: dup\ndescription: The good one.\n---\nG"}
+    ) do |dir|
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      project_path = File.join(dir, ".smith", "agents", "dup.md")
+      global_path = File.join(dir, "smith-home", "agents", "dup.md")
+
+      catalog.agents["dup"].path.should eq(project_path)
+      warnings.to_s.should contain(project_path)
+      warnings.to_s.should_not contain("comes from")
+      # The file that lost is still accounted for, so the listing can show it.
+      catalog.shadowed["dup"].should eq([global_path])
+    end
+  end
+end

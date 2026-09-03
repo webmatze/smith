@@ -54,7 +54,11 @@ module Smith
       return Document.new(fields, content, malformed: opens_header?(content)) if match.nil?
 
       # A line this rule cannot read is dropped, and dropping it silently is how
-      # `tools:` over a YAML list ends up meaning "no tools at all".
+      # `tools:` over a YAML list ends up meaning "no tools at all". Reported
+      # rather than repaired on purpose: teaching this parser YAML lists is a
+      # format change, and `---\ntools:\n---` already means "configured as
+      # empty" (see `list`) — so a caller cannot tell a dropped list from a
+      # deliberate one, and only a warning can.
       unreadable = false
 
       match[1].each_line do |line|
@@ -77,6 +81,14 @@ module Smith
     # may legitimately begin with a `---` thematic break. Only the run of lines
     # directly under the opener counts: prose further down that happens to carry
     # a colon must not be able to make a break look like a header.
+    #
+    # One false positive survives this, deliberately: a thematic break whose
+    # very next line is prose containing a colon, with no blank line between
+    # them, is read as a header. Narrowing it further would need to tell prose
+    # from a field, which this format cannot do — and the trade is the right way
+    # round, since the cost of the false positive is one advisory line on a file
+    # that still loads in full, while the cost of missing a real broken header is
+    # a skill that silently never does what it says.
     private def self.opens_header?(content : String) : Bool
       opening = OPENING.match(content)
       return false if opening.nil?

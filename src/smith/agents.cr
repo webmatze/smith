@@ -43,20 +43,34 @@ module Smith::Agents
   class Catalog
     DIRECTORY_NAME = "agents"
 
+    # A definition that did not read the way its author meant it to. Held
+    # rather than announced on the spot, because whether the file is the one in
+    # effect is only known once every source has been read — and a warning
+    # about a file that lost a name clash reads as "the agent you are using is
+    # broken".
+    private record Problem, name : String, path : String, reason : String
+
     getter agents = Hash(String, Definition).new
+
+    # Per agent name, the paths that lost the clash. Which source won was
+    # otherwise nowhere visible, and the warnings may name the files that lost.
+    getter shadowed = Hash(String, Array(String)).new
+
+    @problems = Array(Problem).new
 
     # Global first, then project, so a project definition overwrites a global
     # one of the same name — the rule skills and config already follow.
     def self.discover(workspace_dir : String = Dir.current, warn_io : IO = STDERR) : Catalog
       catalog = Catalog.new
 
-      catalog.load_dir(File.join(Smith.home_dir, DIRECTORY_NAME), warn_io)
-      catalog.load_dir(File.join(workspace_dir, ".smith", DIRECTORY_NAME), warn_io)
+      catalog.load_dir(File.join(Smith.home_dir, DIRECTORY_NAME))
+      catalog.load_dir(File.join(workspace_dir, ".smith", DIRECTORY_NAME))
+      catalog.report(warn_io)
 
       catalog
     end
 
-    def load_dir(dir : String, warn_io : IO = STDERR) : Nil
+    def load_dir(dir : String) : Nil
       return unless Dir.exists?(dir)
 
       Dir.children(dir).sort.each do |child|
@@ -65,9 +79,30 @@ module Smith::Agents
         path = File.join(dir, child)
         next unless File.file?(path)
 
-        definition = parse(path, File.basename(child, ".md"), warn_io)
-        @agents[definition.name] = definition if definition
+        definition = parse(path, File.basename(child, ".md"))
+        next if definition.nil?
+
+        if previous = @agents[definition.name]?
+          (@shadowed[definition.name] ||= Array(String).new) << previous.path
+        end
+
+        @agents[definition.name] = definition
       end
+    end
+
+    # Everything worth saying about the files just read, on the channel agent
+    # warnings have always used. Called once, after the last source, so a line
+    # can name the file that won whenever the file it warns about lost.
+    def report(warn_io : IO = STDERR) : Nil
+      @problems.each do |problem|
+        line = "⚠️  Agent '#{problem.name}' (#{problem.path}): #{problem.reason}"
+        winner = @agents[problem.name]?
+        line += " The '#{problem.name}' in this catalog comes from #{winner.path} instead." if winner && winner.path != problem.path
+
+        warn_io.puts line
+      end
+
+      @problems.clear
     end
 
     def [](name : String) : Definition?
@@ -87,8 +122,8 @@ module Smith::Agents
       end
     end
 
-    private def parse(path : String, filename : String, warn_io : IO) : Definition?
-      content = read_definition(path, warn_io)
+    private def parse(path : String, filename : String) : Definition?
+      content = read_definition(path)
       return nil if content.nil?
 
       document = Frontmatter.parse(content)
@@ -99,9 +134,9 @@ module Smith::Agents
       # but a header that did not read costs the agent its name and its
       # description, and puts the raw `---` lines in the system prompt.
       if document.malformed?
-        warn_io.puts "⚠️  Agent '#{name}' (#{path}): the frontmatter could not be read as 'key: value' lines; what it declared was ignored."
+        @problems << Problem.new(name, path, "the frontmatter could not be read as 'key: value' lines; what it declared was ignored.")
       elsif description.nil?
-        warn_io.puts "⚠️  Agent '#{name}' (#{path}) has no description; the model will not know when to use it."
+        @problems << Problem.new(name, path, "no description in the frontmatter; the model will not know when to use it.")
       end
 
       Definition.new(
@@ -118,16 +153,16 @@ module Smith::Agents
 
     # One unreadable file must not take every smith command with it: the catalog
     # is built in the CLI's constructor, before it knows what was asked for.
-    private def read_definition(path : String, warn_io : IO) : String?
+    private def read_definition(path : String) : String?
       content = File.read(path)
       # PCRE refuses to match against bytes that are not UTF-8, so a file saved
       # as Latin-1 raises out of the parser rather than parsing badly.
       return content if content.valid_encoding?
 
-      warn_io.puts "⚠️  Agent definition #{path} is not valid UTF-8; it was skipped."
+      @problems << Problem.new(File.basename(path, ".md"), path, "the file is not valid UTF-8; it was skipped.")
       nil
     rescue ex : IO::Error
-      warn_io.puts "⚠️  Agent definition #{path} could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped."
+      @problems << Problem.new(File.basename(path, ".md"), path, "the file could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
       nil
     end
   end

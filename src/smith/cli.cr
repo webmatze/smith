@@ -1861,6 +1861,9 @@ module Smith
         puts "      model:       #{agent.model || "(inherited)"}"
         puts "      mode:        #{mode}"
         puts "      tools:       #{tools}"
+        # Which source won a name clash is otherwise nowhere visible, and a
+        # warning on stderr may name the file that lost.
+        catalog.shadowed[agent.name]?.try(&.each { |lost| puts "      shadows:     #{lost}" })
       end
 
       puts
