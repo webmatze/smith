@@ -17,6 +17,13 @@ module Smith::Skills
   class Catalog
     getter skills = Hash(String, Skill).new
 
+    # Files that loaded, but not the way their author meant them to. Collected
+    # rather than written to a `warn_io` the way agents do it: the CLI builds
+    # both catalogs in its constructor, so an IO would print before every
+    # command's own output — `smith skills list` is where these belong, and it
+    # renders them from here.
+    getter warnings = Array(String).new
+
     def self.discover(workspace_dir : String = Dir.current) : Catalog
       catalog = Catalog.new
 
@@ -41,25 +48,34 @@ module Smith::Skills
     def load_skills_dir(dir : String)
       return unless Dir.exists?(dir)
 
-      Dir.children(dir).each do |child|
+      Dir.children(dir).sort.each do |child|
         skill_dir = File.join(dir, child)
         next unless Dir.exists?(skill_dir)
 
         skill_file = File.join(skill_dir, "SKILL.md")
         next unless File.exists?(skill_file)
 
-        if skill = parse_skill_file(child, skill_file)
-          @skills[skill.name] = skill
-        end
+        skill = parse_skill_file(child, skill_file)
+        @skills[skill.name] = skill
       end
     end
 
-    private def parse_skill_file(dir_name : String, file_path : String) : Skill?
+    private def parse_skill_file(dir_name : String, file_path : String) : Skill
       document = Frontmatter.parse(File.read(file_path))
+      name = document["name"] || dir_name
+      description = document["description"]
+
+      # Loaded either way — a body still expands, which is the point of a skill
+      # — but a header nobody read is a header nobody can trust.
+      if document.malformed?
+        @warnings << "⚠️  Skill '#{name}' (#{file_path}): the frontmatter block could not be read; name and description were ignored."
+      elsif description.nil?
+        @warnings << "⚠️  Skill '#{name}' (#{file_path}) has no description; the model will not know when to use it."
+      end
 
       Skill.new(
-        name: document["name"] || dir_name,
-        description: document["description"] || "No description provided.",
+        name: name,
+        description: description || "No description provided.",
         body: document.body,
         path: file_path
       )

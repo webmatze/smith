@@ -6,12 +6,21 @@ module Smith
   # keeps a malformed header from being able to fail a run.
   module Frontmatter
     HEADER = /\A---\s*\n(.*?)\n---\s*\n?(.*)\z/m
+    # The opening delimiter alone, which is what separates "the author meant to
+    # write a header" from "this file simply has none".
+    OPENING = /\A---[ \t]*\r?\n/
 
     struct Document
       getter fields : Hash(String, String)
       getter body : String
 
-      def initialize(@fields : Hash(String, String), @body : String)
+      # True when a `---` block was opened but yielded no fields: it is never
+      # closed, or no line in it is `key: value`. Either way everything declared
+      # there is read as prose, silently — which is what makes it worth
+      # reporting rather than merely tolerating.
+      getter? malformed : Bool
+
+      def initialize(@fields : Hash(String, String), @body : String, @malformed : Bool = false)
       end
 
       def [](key : String) : String?
@@ -39,7 +48,7 @@ module Smith
       fields = Hash(String, String).new
 
       match = content.match(HEADER)
-      return Document.new(fields, content) if match.nil?
+      return Document.new(fields, content, malformed: OPENING.matches?(content)) if match.nil?
 
       match[1].each_line do |line|
         stripped = line.strip
@@ -51,7 +60,7 @@ module Smith
         fields[key.strip] = unquote(value.strip)
       end
 
-      Document.new(fields, match[2])
+      Document.new(fields, match[2], malformed: fields.empty?)
     end
 
     private def self.unquote(value : String) : String

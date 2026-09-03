@@ -76,3 +76,34 @@ describe "skill frontmatter" do
     end
   end
 end
+
+# A header that did not parse used to be invisible: the skill still loaded, but
+# under the wrong name and without its description, and nothing said so.
+describe "skill frontmatter warnings" do
+  it "warns about a block that is never closed, and still loads the body" do
+    with_skill("---\nname: deploy\ndescription: Ship the branch\n\nRun the deploy script.\n", dir_name: "deploy") do |catalog|
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(File.join("deploy", "SKILL.md"))
+      catalog.warnings.first.should contain("frontmatter")
+
+      # The declared name never arrived, so the directory name is all there is.
+      skill = catalog.skills["deploy"]
+      skill.description.should eq("No description provided.")
+      skill.body.should contain("Run the deploy script.")
+    end
+  end
+
+  it "warns about a skill the model has nothing to choose by" do
+    with_skill("---\nname: bare\n---\nbody", dir_name: "bare") do |catalog|
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain("no description")
+      catalog.skills["bare"].body.should eq("body")
+    end
+  end
+
+  it "stays quiet about a skill that reads fine" do
+    with_skill("---\nname: ok\ndescription: Does a thing.\n---\nbody") do |catalog|
+      catalog.warnings.should be_empty
+    end
+  end
+end

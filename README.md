@@ -18,7 +18,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📂 Project Context & Skills Catalog**:
   - Automatically loads instructions from `SMITH.md` or `AGENTS.md`, walking up from the current directory to the Git root, plus global instructions from `~/.smith/`.
   - Discovers custom agents in `.smith/agents/<name>.md` and `~/.smith/agents/`, sharing the frontmatter parser with skills.
-  - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable.
+  - Discovers reusable skills in `.smith/skills/<name>/SKILL.md` (project-local), `~/.smith/skills/` (global), as well as `.gemini/skills/` and `.agents/skills/`, and expands `$skill-name` or `/skill-name` references at runtime. The home directory can be overridden via the `SMITH_HOME` environment variable. `smith skills list` shows what was found, where it came from, and which files had a frontmatter smith could not read.
 - **↩️ Auto-Continue at the output limit**: A response cut off mid-sentence is continued automatically; a tool call cut off mid-JSON is discarded rather than half-executed.
 - **🖼️ Image & PDF Input**: `@screenshot.png` attaches the image itself rather than its bytes as text; `read_file` on one hands the model the picture instead of a refusal, and so does an MCP server that answers with an image — format decided from the magic bytes, not the extension, capped and refused rather than silently scaled. PDFs go to Anthropic natively; elsewhere the model is told to extract the text with a real tool.
 - **🌐 Web Tools (`Smith::Web`)**: `web_fetch` turns a page into markdown, `web_search` sits behind a provider adapter. Both mark their output as untrusted, and fetching is guarded against SSRF **after** DNS resolution.
@@ -720,6 +720,15 @@ smith --agent reviewer run "Review the diff on the current branch"
 
 This puts the definition on the **main** thread — its prompt, its tools, its model — which makes smith usable as a single-purpose runner in a script.
 
+#### Seeing what is defined
+
+```bash
+smith agents list         # name, file, description, provider, model, mode and tools
+smith skills list         # the same for the skills catalog, warnings included
+```
+
+`smith agents list` prints the *effective* tool list, so a definition that names no `tools` shows the set its `mode` implies rather than a blank. `smith skills list` names every `SKILL.md` whose frontmatter could not be read — those still load, but under their directory name and without their description, which is otherwise invisible until `$skill-name` quietly fails to expand.
+
 #### Two rules that still apply
 
 **A definition may ask for the `agent` tool**, and then it can delegate further. That is bounded by the [nesting depth and the shared spawn budget](#subagent-limits); at the deepest level the tool is simply not offered, since every call would be refused.
@@ -1319,39 +1328,48 @@ Resume a previous session (or latest session if ID is omitted):
 
 ```text
 Usage: smith [command] [options] [prompt]
-
 Commands:
   chat                       Start an interactive chat session (default)
   run <prompt>               Run a single prompt in headless mode and exit
   resume [<session>]         Resume a session by name or id (default: the latest)
   continue [<prompt>]        Continue the latest session; same as -c
   sessions, list             List all saved local chat sessions
+  sessions delete <ref>…     Delete sessions (name or id), files and all
+  sessions prune             Drop sessions older than --older-than (30d), keeping --keep-last
+  stats                      Total cost and tokens across all saved sessions
   rename <session> <name>    Give a session a name you can resume by
   fork <session>             Copy a session so it can be taken two ways
   context [<session>]        Show where the context window is going
   checkpoints [<session_id>] List the file snapshots taken during a session
   rewind [<session_id>]      Undo a session's file changes
   mcp list | tools <server>  Show the configured MCP servers and their tools
-
+  skills list                Show the skills catalog: name, origin and description
+  agents list                Show the agent definitions and the model and tools each asks for
 Options:
-  -m MODEL, --model=MODEL    Specify the LLM model (default: provider's default model)
-  -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: openrouter)
-  -y, --yes                  Auto-approve mutating tools (bash, write_file, edit_file)
-      --auto-approve         Alias for --yes
-      --to CHECKPOINT        rewind: undo this checkpoint and everything after it (default: only the newest)
-      --files-only           rewind: restore files but leave the transcript alone
-      --dry-run              rewind: show what would change, change nothing
-      --force                rewind: overwrite files changed outside smith since the snapshot
-      --agent NAME           Run the main thread as the agent defined in .smith/agents/NAME.md
-      --trust-hooks          Trust this project's hooks without asking (they run arbitrary commands)
-      --plan                 Start in plan mode: research only, until you approve a plan
-      --json                 Emit JSON Lines on stdout (headless 'run' only)
-      --think                Enable thinking (Anthropic); --no-think turns it off
-  -c, --continue             Continue the most recent session; a prompt after it runs headless
-      --max-budget-usd USD   Stop the run once the estimated cost reaches this (exit code 2)
-      --no-stream            Wait for the complete response instead of streaming it
-  -v, --version              Print version information
-  -h, --help                 Show help banner
+
+    -m MODEL, --model=MODEL          Specify the LLM model (defaults to provider's default model)
+    -p PROVIDER, --provider=PROVIDER Specify the provider: openrouter, ollama, anthropic, openai (default: from config, else openrouter)
+    -y, --yes                        Auto-approve mutating tools (bash, write_file, edit_file)
+        --auto-approve               Alias for --yes
+        --to CHECKPOINT              rewind: undo this checkpoint and everything after it (default: only the newest)
+        --files-only                 rewind: restore files but leave the transcript alone
+        --dry-run                    rewind / sessions: show what would change, change nothing
+        --force                      rewind: overwrite files changed outside smith since the snapshot
+        --older-than SPAN            sessions prune: drop sessions last updated longer ago (e.g. 30d, 12h, 15m; default 30d)
+        --keep-last N                sessions prune: keep the N most recent regardless of age
+        --agent NAME                 Run the main thread as the agent defined in .smith/agents/NAME.md
+        --think                      Enable extended thinking (Anthropic)
+        --no-think                   Disable extended thinking
+    -c, --continue                   Continue the most recent session; a prompt after it runs headless
+        --max-budget-usd USD         Stop the run once the estimated cost reaches this (exit code 2)
+        --trust-hooks                Trust this project's hooks without asking (they run arbitrary commands)
+        --plan                       Start in plan mode: research only, until you approve a plan
+        --json                       Emit JSON Lines on stdout (headless 'run' only)
+        --no-stream                  Wait for the complete response instead of streaming it
+        --tui                        Force the fullscreen terminal UI (interactive sessions)
+        --no-tui                     Use the plain line renderer instead of the fullscreen UI
+    -v, --version                    Print version information
+    -h, --help                       Show this help banner
 ```
 
 You can also pass a prompt directly without a subcommand to run it headless, e.g. `smith "Summarize src/smith.cr"`.
