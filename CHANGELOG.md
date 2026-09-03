@@ -11,7 +11,7 @@ All notable changes to smith. The format follows [Keep a Changelog](https://keep
 
 ### Fixed
 
-- **A skill or agent file smith cannot read no longer takes smith with it.** Both catalogs are built before the CLI knows which command was asked for, so a single `SKILL.md` that could not be opened, or one saved as Latin-1 rather than UTF-8, aborted every command with a stack trace — `smith -v` included. Each is now reported by path and reason and skipped (#93).
+- **A skill or agent file smith cannot read no longer takes smith with it.** Both catalogs are built before the CLI knows which command was asked for, so a single unreadable file aborted every command with a stack trace — `smith -v` included — and a named pipe in place of a `SKILL.md` hung it with nothing on screen at all. Permissions, bytes that are not UTF-8, a directory, a symlink loop and a FIFO are each now reported by path and reason and skipped (#93).
 
 ## [0.4.0] — 2026-09-02
 

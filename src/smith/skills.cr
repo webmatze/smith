@@ -69,17 +69,52 @@ module Smith::Skills
     end
 
     def load_skills_dir(dir : String)
-      return unless Dir.exists?(dir)
+      return unless directory?(dir)
 
       Dir.children(dir).sort.each do |child|
         skill_dir = File.join(dir, child)
-        next unless Dir.exists?(skill_dir)
+        next unless entry_info(child, skill_dir).try(&.directory?)
 
         skill_file = File.join(skill_dir, "SKILL.md")
-        next unless File.exists?(skill_file)
+        next unless regular_file?(child, skill_file)
 
         load_skill_file(child, skill_file)
       end
+    end
+
+    # A source directory that is absent is the ordinary case, and one that
+    # cannot be stat'ed at all — a symlink loop where `.smith/skills` should be
+    # — is a broken workspace rather than a broken skill. Neither is worth a
+    # line; neither may raise either, since this runs before smith knows what
+    # was asked for.
+    private def directory?(path : String) : Bool
+      File.info?(path).try(&.directory?) || false
+    rescue File::Error
+      false
+    end
+
+    # What an entry is, without opening it. `File.info?` answers nil for
+    # "absent" but raises for a symlink loop, which is a file smith cannot read
+    # like any other and belongs in the list rather than in a stack trace.
+    private def entry_info(name : String, path : String) : File::Info?
+      File.info?(path)
+    rescue ex : File::Error
+      @problems << Problem.new(name, path, "could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      nil
+    end
+
+    # Only a regular file can be read: a directory raises on read, and a FIFO
+    # blocks `File.read` until something writes to it — smith hanging with
+    # nothing on screen, which is worse than a crash for being unattributable.
+    # Absent stays silent; anything present but unusable is named, because
+    # putting it there was deliberate.
+    private def regular_file?(name : String, path : String) : Bool
+      info = entry_info(name, path)
+      return false if info.nil?
+      return true if info.file?
+
+      @problems << Problem.new(name, path, "not a regular file (#{info.type.to_s.downcase}); it was skipped.")
+      false
     end
 
     private def load_skill_file(dir_name : String, file_path : String) : Nil

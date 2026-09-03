@@ -79,16 +79,26 @@ module Smith
 
     # An opened block still has to look like a header, because a markdown file
     # may legitimately begin with a `---` thematic break. Only the run of lines
-    # directly under the opener counts: prose further down that happens to carry
-    # a colon must not be able to make a break look like a header.
+    # before the first blank one counts: prose further down that happens to
+    # carry a colon must not be able to make a break look like a header.
     #
-    # One false positive survives this, deliberately: a thematic break whose
-    # very next line is prose containing a colon, with no blank line between
-    # them, is read as a header. Narrowing it further would need to tell prose
-    # from a field, which this format cannot do — and the trade is the right way
-    # round, since the cost of the false positive is one advisory line on a file
-    # that still loads in full, while the cost of missing a real broken header is
-    # a skill that silently never does what it says.
+    # That cut costs accuracy in both directions, deliberately, and both are
+    # worth knowing before touching this:
+    #
+    # * False positive — a break followed, with no blank line between, by prose
+    #   in which *any* line carries a colon is read as a header. A body opening
+    #   `---` then `See https://example.com for more.` trips on the `https:`.
+    # * False negative — a header opened, a blank line, then fields, and never
+    #   closed (`---\n\nname: x\n`) stops at that blank line and is not
+    #   flagged, though it is as broken as the same file without the blank.
+    #   It is still reported, but as "no description", which points at the
+    #   symptom rather than the cause.
+    #
+    # Both are the price of not telling prose from fields, which this format
+    # cannot do. The trade is the right way round: a false positive costs one
+    # advisory line on a file that still loads in full, and the false negative
+    # still warns, while the case this catches — a header nobody read — is a
+    # skill that silently never does what it says.
     private def self.opens_header?(content : String) : Bool
       opening = OPENING.match(content)
       return false if opening.nil?

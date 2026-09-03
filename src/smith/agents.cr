@@ -71,13 +71,13 @@ module Smith::Agents
     end
 
     def load_dir(dir : String) : Nil
-      return unless Dir.exists?(dir)
+      return unless directory?(dir)
 
       Dir.children(dir).sort.each do |child|
         next unless child.ends_with?(".md")
 
         path = File.join(dir, child)
-        next unless File.file?(path)
+        next unless regular_file?(File.basename(child, ".md"), path)
 
         definition = parse(path, File.basename(child, ".md"))
         next if definition.nil?
@@ -103,6 +103,33 @@ module Smith::Agents
       end
 
       @problems.clear
+    end
+
+    # A source directory that is absent is the ordinary case, and one that
+    # cannot be stat'ed at all — a symlink loop where `.smith/agents` should be
+    # — is a broken workspace rather than a broken definition. Neither is worth
+    # a line; neither may raise either, since this runs before smith knows what
+    # was asked for.
+    private def directory?(path : String) : Bool
+      File.info?(path).try(&.directory?) || false
+    rescue File::Error
+      false
+    end
+
+    # Only a regular file can be read. `File.file?` answers that, but it raises
+    # on a symlink loop — which is a file smith cannot read like any other, and
+    # belongs in a warning rather than in a stack trace. A FIFO would block
+    # `File.read` until something wrote to it, so it never gets that far.
+    private def regular_file?(name : String, path : String) : Bool
+      info = File.info?(path)
+      return false if info.nil?
+      return true if info.file?
+
+      @problems << Problem.new(name, path, "not a regular file (#{info.type.to_s.downcase}); it was skipped.")
+      false
+    rescue ex : File::Error
+      @problems << Problem.new(name, path, "could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      false
     end
 
     def [](name : String) : Definition?

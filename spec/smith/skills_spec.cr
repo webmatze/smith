@@ -188,7 +188,7 @@ end
 # The catalog is built in the CLI's constructor, so a file that raises here
 # takes every smith command with it, `smith -v` included.
 describe "skills that cannot be read at all" do
-  it "warns and skips a SKILL.md it cannot open" do
+  it "warns and skips a SKILL.md that is a directory" do
     with_skill_files do |dir|
       # A directory in its place: unreadable for every user, root included,
       # which a mode-000 file is not.
@@ -199,6 +199,53 @@ describe "skills that cannot be read at all" do
       catalog.skills.should be_empty
       catalog.warnings.size.should eq(1)
       catalog.warnings.first.should contain(project_skill_path(dir, "folder"))
+      catalog.warnings.first.should contain("not a regular file (directory)")
+    end
+  end
+
+  # `File.read` on a FIFO blocks until something writes to it, so this is the
+  # one shape that hangs rather than crashes — no output, no timeout, nothing
+  # saying why. It must never be opened.
+  it "warns and skips a SKILL.md that is a named pipe" do
+    with_skill_files do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills", "fifo"))
+      status = Process.run("mkfifo", [project_skill_path(dir, "fifo")])
+      status.success?.should be_true
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(project_skill_path(dir, "fifo"))
+      catalog.warnings.first.should contain("not a regular file")
+    end
+  end
+
+  # A symlink loop is the shape where asking *what* the entry is raises, so a
+  # guard that only rescues the read is one level too late.
+  it "warns and skips a SKILL.md that is a symlink loop" do
+    with_skill_files do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills", "loop"))
+      File.symlink("SKILL.md", project_skill_path(dir, "loop"))
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(project_skill_path(dir, "loop"))
+      catalog.warnings.first.should contain("could not be read")
+    end
+  end
+
+  it "warns and skips a skill directory that is a symlink loop" do
+    with_skill_files do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills"))
+      File.symlink("loopdir", File.join(dir, ".smith", "skills", "loopdir"))
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
       catalog.warnings.first.should contain("could not be read")
     end
   end

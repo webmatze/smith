@@ -736,9 +736,9 @@ Both add a `shadows:` line wherever two sources define the same name, so which f
 | The `---` block is never closed, or a byte-order mark or space sits in front of it | The whole header is read as prose: the skill loads under its **directory** name, without its description |
 | A line in the block is not `key: value` — a `tools:` over a YAML list, say | That line is dropped, so the value arrives empty |
 | No `description:` at all | The skill loads, but the model has nothing to choose it by |
-| The file cannot be opened, or is not UTF-8 | The file is skipped — and, since the catalogs are built before smith knows what was asked for, it no longer aborts every command |
+| The file cannot be opened, is not UTF-8, or is not a regular file at all (a directory, a named pipe, a symlink loop) | The file is skipped — and, since the catalogs are built before smith knows what was asked for, it no longer aborts or hangs every command |
 
-A file that opens with a `---` thematic break followed by prose is markdown, not a broken header, and is left alone.
+A file that opens with a `---` thematic break followed by prose is markdown, not a broken header, and is left alone — unless a line of that prose carries a colon before the first blank line, which is indistinguishable from a field and draws the warning anyway.
 
 #### Two rules that still apply
 

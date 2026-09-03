@@ -128,6 +128,33 @@ describe Smith::Agents::Catalog do
     end
   end
 
+  # Asking what the entry is raises here, so the guard has to sit around the
+  # stat, not around the read.
+  it "warns and skips a definition that is a symlink loop" do
+    warnings = IO::Memory.new
+    with_agents do |dir|
+      File.symlink("aloop.md", File.join(dir, ".smith", "agents", "aloop.md"))
+
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      catalog.agents.should be_empty
+      warnings.to_s.should contain("aloop.md")
+      warnings.to_s.should contain("could not be read")
+    end
+  end
+
+  it "warns and skips a definition that is a directory" do
+    warnings = IO::Memory.new
+    with_agents do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "agents", "folder.md"))
+
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      catalog.agents.should be_empty
+      warnings.to_s.should contain("not a regular file (directory)")
+    end
+  end
+
   it "ignores anything that is not a .md file" do
     with_agents(project: {"reviewer" => REVIEWER}) do |dir|
       File.write(File.join(dir, ".smith", "agents", "notes.txt"), "not an agent")
