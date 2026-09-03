@@ -57,6 +57,18 @@ private def build_archive(dir : String, content : String) : Bytes
   File.read(archive).to_slice
 end
 
+# Packs an archive whose `smith` member is a symlink to `victim`, stored under
+# `member` so the `./`-prefixed spelling can be tried too.
+private def symlink_archive(dir : String, victim : String, member : String) : String
+  evil = File.join(dir, "evil_#{Random::Secure.hex(4)}")
+  FileUtils.mkdir_p(evil)
+  File.symlink(victim, File.join(evil, "smith"))
+
+  archive = File.join(dir, "evil_#{Random::Secure.hex(4)}.tar.gz")
+  Process.run("tar", ["-czf", archive, "-C", evil, member])
+  archive
+end
+
 describe Smith::Update::SemVer do
   it "reads a plain and a v-prefixed tag the same way" do
     Smith::Update::SemVer.parse?("1.2.3").should eq(Smith::Update::SemVer.new(1, 2, 3))
@@ -380,36 +392,53 @@ describe Smith::Update::Installer do
     end
   end
 
-  # A `smith` member that is a symlink would otherwise be chmod'ed and renamed
-  # *through* the link: 0755 onto whatever it points at, anywhere on the
-  # filesystem, and a link where the user's binary was.
-  {"smith", "./smith"}.each do |member|
-    it "refuses a #{member.inspect} member that is a symlink, touching nothing outside the staging directory" do
-      with_temp_dir do |dir|
-        victim = File.join(dir, "id_ed25519")
-        File.write(victim, "secret key material")
-        File.chmod(victim, 0o600)
+  # Chmod'ed and renamed *through* the link otherwise: 0755 onto whatever it
+  # points at, anywhere on the filesystem, and a link where the binary was.
+  it "refuses a smith member that is a symlink, touching nothing outside the staging directory" do
+    with_temp_dir do |dir|
+      victim = File.join(dir, "id_ed25519")
+      File.write(victim, "secret key material")
+      File.chmod(victim, 0o600)
 
-        evil = File.join(dir, "evil")
-        FileUtils.mkdir_p(evil)
-        File.symlink(victim, File.join(evil, "smith"))
-        archive = File.join(dir, "evil.tar.gz")
-        Process.run("tar", ["-czf", archive, "-C", evil, member])
+      target = File.join(dir, "smith")
+      File.write(target, "the real binary")
+      File.chmod(target, 0o755)
 
-        target = File.join(dir, "smith")
-        File.write(target, "the real binary")
-        File.chmod(target, 0o755)
-
-        expect_raises(Smith::Update::Error, /not a regular file/) do
-          Smith::Update::Installer.new(target).install(File.read(archive).to_slice)
-        end
-
-        File.info(victim).permissions.value.should eq(0o600)
-        File.read(victim).should eq("secret key material")
-        File.symlink?(target).should be_false
-        File.read(target).should eq("the real binary")
-        Dir.children(dir).none?(&.starts_with?(".smith-update")).should be_true
+      expect_raises(Smith::Update::Error, /not a regular file/) do
+        Smith::Update::Installer.new(target).install(File.read(symlink_archive(dir, victim, "smith")).to_slice)
       end
+
+      File.info(victim).permissions.value.should eq(0o600)
+      File.read(victim).should eq("secret key material")
+      File.symlink?(target).should be_false
+      File.read(target).should eq("the real binary")
+      Dir.children(dir).none?(&.starts_with?(".smith-update")).should be_true
+    end
+  end
+
+  # Stored as "./smith" the two tars disagree: bsdtar normalises the prefix and
+  # extracts it, so the regular-file check catches it, while GNU tar does not
+  # match it against the requested member and unpacks nothing at all. Both fail
+  # closed, so the assertion is on the outcome rather than on either message.
+  it "refuses a ./smith member that is a symlink, whichever tar is installed" do
+    with_temp_dir do |dir|
+      victim = File.join(dir, "id_ed25519")
+      File.write(victim, "secret key material")
+      File.chmod(victim, 0o600)
+
+      target = File.join(dir, "smith")
+      File.write(target, "the real binary")
+      File.chmod(target, 0o755)
+
+      expect_raises(Smith::Update::Error) do
+        Smith::Update::Installer.new(target).install(File.read(symlink_archive(dir, victim, "./smith")).to_slice)
+      end
+
+      File.info(victim).permissions.value.should eq(0o600)
+      File.read(victim).should eq("secret key material")
+      File.symlink?(target).should be_false
+      File.read(target).should eq("the real binary")
+      Dir.children(dir).none?(&.starts_with?(".smith-update")).should be_true
     end
   end
 
