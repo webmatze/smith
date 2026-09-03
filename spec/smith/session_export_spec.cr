@@ -134,7 +134,7 @@ describe Smith::SessionExport do
     end
   end
 
-  it "skips a truncated transcript line instead of aborting the export" do
+  it "skips a truncated transcript line, and says how many it skipped" do
     with_store do |store|
       session = seed_session(store)
 
@@ -146,6 +146,10 @@ describe Smith::SessionExport do
       document = Smith::SessionExport.build(store, session.reference)
 
       document.messages.map { |m| m.content.first.text }.should eq(["first", "third"])
+      # Silently dropping it would make a record that lost a line look intact.
+      document.transcript_skipped.should eq(1)
+      document.warnings.join("\n").should contain("1 line(s) of the transcript could not be read")
+      document.to_markdown.should contain("1 unreadable line(s) skipped")
     end
   end
 
@@ -183,19 +187,67 @@ describe Smith::SessionExport do
     end
   end
 
-  it "survives a damaged index: one bad entry must not abort the export" do
+  it "survives a damaged index entry, exporting by name" do
     with_store do |store|
       session = seed_session(store)
-      # One entry missing required fields makes the whole index unparseable.
-      File.write(store.index_path, %([{"id": "session-broken"}]))
 
+      # One unreadable entry beside the good one. Resolving a *name* is the
+      # case that needs the index, so it is the one worth testing.
+      entries = JSON.parse(File.read(store.index_path)).as_a
+      broken = JSON.parse(%({"id": "session-broken", "updated_at": "not-a-timestamp"}))
+      File.write(store.index_path, ([broken] + entries).to_json)
+
+      document = Smith::SessionExport.build(store, session.name.not_nil!)
+
+      document.id.should eq(session.id)
+      document.messages.size.should eq(3)
+      document.name.should eq(session.name)
+      document.to_markdown.should contain("**Cost:** $7.50")
+      document.warnings.join("\n").should contain("The session index is damaged")
+    end
+  end
+
+  it "survives an index that is not a list of sessions at all" do
+    with_store do |store|
+      session = seed_session(store)
+      File.write(store.index_path, "{ not even an array")
+
+      # The name is gone with the index, but the id still names the session.
       document = Smith::SessionExport.build(store, session.id)
 
       document.messages.size.should eq(3)
-      # Everything the index would have said is in the session file too.
-      document.name.should eq(session.name)
       document.provider.should eq("anthropic")
-      document.to_markdown.should contain("**Cost:** $7.50")
+      document.warnings.join("\n").should contain("not a readable list of sessions")
+    end
+  end
+
+  it "refuses a reference that is a path rather than a name or an id" do
+    with_store do |store|
+      seed_session(store)
+
+      ["../elsewhere", "../../etc", "sessions/x", "/etc/passwd", "..", "."].each do |reference|
+        expect_raises(ArgumentError, /is not a session reference/) do
+          Smith::SessionExport.build(store, reference)
+        end
+      end
+    end
+  end
+
+  it "does not swallow an ambiguous name just because a directory of that name has a transcript" do
+    with_store do |store|
+      first = seed_session(store)
+      second = seed_session(store)
+      # Only reachable by editing files by hand, which is why it is refused.
+      File.write(store.index_path, [
+        first.to_index_entry, Smith::Session::IndexEntry.new(
+          id: second.id, created_at: second.created_at, updated_at: second.updated_at,
+          first_prompt: "x", message_count: 3, name: first.name),
+      ].to_json)
+      Smith::TranscriptLog.new(store.session_dir(first.name.not_nil!)).append([Smith::LLM::Message.user("decoy")])
+
+      expect_raises(ArgumentError, /ambiguous/) do
+        Smith::SessionExport.build(store, first.name.not_nil!)
+      end
     end
   end
 
@@ -289,6 +341,79 @@ describe Smith::SessionExport do
       markdown = Smith::SessionExport.build(store, session.id).to_markdown
 
       markdown.should contain("````\n```crystal")
+    end
+  end
+
+  it "keeps a code fence a message never closed from swallowing the rest of the document" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      # An assistant turn cut off at max_tokens, mid code block.
+      session.messages << Smith::LLM::Message.assistant("Here is the patch:\n\n```crystal\ndef fix\n  puts 1")
+      session.messages << Smith::LLM::Message.user("thanks")
+      store.save(session)
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.lines.count { |line| line.matches?(/\A {0,3}`{3,}/) }.should eq(2)
+      # The turn after it is still a heading, not code.
+      markdown.should contain("### 2 · User")
+    end
+  end
+
+  it "leaves a closed fence alone, even one showing a shorter fence inside it" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      # Three fence lines, all balanced: the inner ``` is content of the ````
+      # block, the way a README documenting Markdown writes it.
+      session.messages << Smith::LLM::Message.assistant("Nest them:\n\n````markdown\n```\ncode\n```\n````")
+      session.messages << Smith::LLM::Message.user("clear")
+      store.save(session)
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.lines.count { |line| line.matches?(/\A {0,3}`{3,}/) }.should eq(4)
+      markdown.should contain("### 2 · User")
+    end
+  end
+
+  it "makes an export of non-UTF-8 tool output readable text, on both paths" do
+    with_store do |store|
+      # Latin-1 bytes, a NUL, a BEL and a raw ANSI escape — what a `bash`
+      # result picks up from a program that does not speak UTF-8.
+      dirty = String.new(Bytes[0x48, 0x69, 0x20, 0xE4, 0xF6, 0xFC, 0x0A, 0x00, 0x07, 0x1B, 0x5B, 0x33, 0x31, 0x6D, 0x21])
+      dirty.valid_encoding?.should be_false
+
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.tool_results([
+        Smith::LLM::ContentBlock.tool_result("call-1", dirty, false),
+      ])
+      store.save(session)
+
+      document = Smith::SessionExport.build(store, session.id)
+
+      markdown = document.to_markdown
+      markdown.valid_encoding?.should be_true
+      markdown.should_not contain('\u0000')
+      markdown.should_not contain('\u0007')
+      markdown.should_not contain('\u001b')
+      # The text either side of the damage survives.
+      markdown.should contain("Hi ")
+      markdown.should contain("[31m!")
+
+      json = document.to_json_document
+      json.valid_encoding?.should be_true
+      JSON.parse(json)["messages"].as_a.size.should eq(1)
+    end
+  end
+
+  it "prints timestamps with their offset, so Markdown and JSON name the same instant" do
+    with_store do |store|
+      session = seed_session(store)
+
+      document = Smith::SessionExport.build(store, session.id)
+
+      # `Z` on a machine running in UTC, an offset anywhere else.
+      document.to_markdown.should match(/\*\*Created:\*\* \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (?:[+-]\d{2}:\d{2}|Z)/)
     end
   end
 

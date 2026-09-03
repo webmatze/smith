@@ -596,6 +596,75 @@ describe "pruning sessions" do
   end
 end
 
+describe "a damaged session index" do
+  it "costs the damaged entry and no other session" do
+    with_store do |store|
+      good = session_with(store, "still here")
+      broken = JSON.parse(%({"id": "session-broken", "updated_at": "not-a-timestamp"}))
+      File.write(store.index_path, ([broken] + JSON.parse(File.read(store.index_path)).as_a).to_json)
+
+      entries, damage = store.read_index
+
+      entries.map(&.id).should eq([good.id])
+      damage.size.should eq(1)
+      damage.first.should contain("index entry 1")
+      # The listing, resume-by-name, delete and stats all read this.
+      store.list.map(&.id).should eq([good.id])
+      store.resolve_id(good.name.not_nil!).should eq(good.id)
+    end
+  end
+
+  it "reports an index that is not a list of sessions at all" do
+    with_store do |store|
+      session_with(store, "still here")
+      File.write(store.index_path, "{ not even an array")
+
+      entries, damage = store.read_index
+
+      entries.should be_empty
+      damage.first.should contain("not a readable list of sessions")
+    end
+  end
+end
+
+describe "a session reference" do
+  it "is a name or an id, never a path" do
+    with_store do |store|
+      session_with(store, "a real session")
+
+      # `File.join` defuses an absolute path but carries `..` through, so this
+      # used to resolve — and read, or with `sessions delete` remove — a
+      # directory outside the sessions tree entirely.
+      ["../elsewhere", "../../etc", "sessions/x", "/etc/passwd", "..", ".", ""].each do |reference|
+        expect_raises(ArgumentError, /is not a session reference/) do
+          store.resolve_id(reference)
+        end
+      end
+    end
+  end
+
+  it "cannot be renamed into one either" do
+    with_store do |store|
+      session = session_with(store, "a real session")
+
+      expect_raises(ArgumentError, /is not a session reference/) do
+        store.rename(session.id, "../evil")
+      end
+    end
+  end
+
+  it "tells a reference that names nothing from one that is refused" do
+    with_store do |store|
+      # A caller that means to fall back when a session is gone must not also
+      # fall back when the reference was refused.
+      expect_raises(Smith::Session::NotFound) { store.resolve_id("no-such-session") }
+
+      refused = expect_raises(ArgumentError) { store.resolve_id("../elsewhere") }
+      refused.class.should eq(ArgumentError)
+    end
+  end
+end
+
 describe Smith::Session::Retention do
   it "parses days, hours and minutes" do
     Smith::Session::Retention.parse("30d").should eq(30.days)

@@ -16,6 +16,10 @@ module Smith
     # length, and `--json` is right there for anyone who wants all of it.
     ABBREVIATED_CHARS = 800
 
+    # The offset is part of the timestamp. An export is read somewhere other
+    # than where it was made, and the JSON says UTC.
+    TIME_FORMAT = "%Y-%m-%d %H:%M:%S %:z"
+
     # Which of the two records the messages came from. They are not versions of
     # one another: compaction shortens the session file, while a transcript log
     # that could not be written is abandoned mid-run and ends up a prefix. So
@@ -49,6 +53,11 @@ module Smith
       getter transcript_count : Int32?
       getter session_count : Int32?
 
+      # Lines of the transcript that could not be parsed. Counted rather than
+      # dropped: without it a record that lost a line looks exactly like an
+      # intact one.
+      getter transcript_skipped : Int32
+
       # Damage found on the way in. Reported beside the export, never in it:
       # stdout stays the document so it can be piped.
       getter warnings : Array(String)
@@ -67,6 +76,7 @@ module Smith
         @cost : Float64? = nil,
         @todos : Array(TodoList::Item) = Array(TodoList::Item).new,
         @transcript_count : Int32? = nil,
+        @transcript_skipped : Int32 = 0,
         @session_count : Int32? = nil,
         @warnings : Array(String) = Array(String).new,
       )
@@ -79,7 +89,7 @@ module Smith
 
       def to_markdown : String
         String.build do |md|
-          md << "# " << reference << "\n\n"
+          md << "# " << SessionExport.sanitize(reference) << "\n\n"
           header(md)
           todo_section(md)
 
@@ -96,6 +106,16 @@ module Smith
       # attachment is `JSON::Field(ignore: true)`, so what serializes is the
       # media type and the digest that finds the bytes in the session directory.
       def to_json_document : String
+        # Scrubbed as a whole rather than field by field: a message carries
+        # whatever bytes a tool produced, and one invalid UTF-8 sequence
+        # anywhere makes the document invalid JSON for every reader. The
+        # delimiters are ASCII, so replacing bad bytes inside the strings
+        # cannot disturb the structure — and JSON already escapes the control
+        # characters the Markdown path has to strip by hand.
+        build_json.scrub
+      end
+
+      private def build_json : String
         JSON.build(indent: "  ") do |json|
           json.object do
             json.field "id", @id
@@ -119,11 +139,15 @@ module Smith
       end
 
       private def header(md : String::Builder) : Nil
-        md << "- **Session:** `" << @id << "`\n"
-        md << "- **Provider / model:** " << (@provider || "unknown") << " / " << (@model || "unknown") << "\n"
-        @created_at.try { |time| md << "- **Created:** " << time.to_s("%Y-%m-%d %H:%M") << "\n" }
-        @updated_at.try { |time| md << "- **Updated:** " << time.to_s("%Y-%m-%d %H:%M") << "\n" }
-        @cwd.try { |dir| md << "- **Working directory:** `" << dir << "`\n" }
+        md << "- **Session:** `" << SessionExport.sanitize(@id) << "`\n"
+        md << "- **Provider / model:** " << SessionExport.sanitize(@provider || "unknown") <<
+          " / " << SessionExport.sanitize(@model || "unknown") << "\n"
+        # With the offset: an export is read somewhere else than it was made,
+        # and a bare wall-clock time next to the UTC one in the JSON reads as
+        # two different instants.
+        @created_at.try { |time| md << "- **Created:** " << time.to_s(TIME_FORMAT) << "\n" }
+        @updated_at.try { |time| md << "- **Updated:** " << time.to_s(TIME_FORMAT) << "\n" }
+        @cwd.try { |dir| md << "- **Working directory:** `" << SessionExport.sanitize(dir) << "`\n" }
 
         if usage = @usage
           md << "- **Tokens:** " << usage.prompt_tokens << " prompt, " << usage.completion_tokens <<
@@ -135,10 +159,13 @@ module Smith
           " characters; `--json` exports the log in full._\n\n"
       end
 
-      # Both counts, always, so a shorter record is never passed off as the run.
+      # Both counts, always, so a shorter record is never passed off as the
+      # run — and the lines that could not be read, because a record that lost
+      # one otherwise looks exactly like an intact one.
       private def source_note : String
         parts = [@source.transcript? ? "the untouched record" : "the working history, after compaction"]
         parts << "#{@messages.size} message(s)"
+        parts << "#{@transcript_skipped} unreadable line(s) skipped" if @transcript_skipped > 0
 
         other = @source.transcript? ? @session_count : @transcript_count
         other_label = @source.transcript? ? "session file" : "raw transcript"
@@ -154,7 +181,7 @@ module Smith
         @todos.each do |item|
           mark = item.status.completed? ? "x" : " "
           suffix = item.status.in_progress? ? " _(in progress)_" : ""
-          md << "- [" << mark << "] " << item.content << suffix << "\n"
+          md << "- [" << mark << "] " << SessionExport.sanitize(item.content) << suffix << "\n"
         end
         md << "\n"
       end
@@ -172,7 +199,11 @@ module Smith
       warnings = Array(String).new
 
       data = load_session(store, id, warnings)
-      recorded = load_transcript(store, id, warnings)
+      recorded, skipped_lines = load_transcript(store, id, warnings)
+
+      if skipped_lines > 0
+        warnings << "#{skipped_lines} line(s) of the transcript could not be read and were skipped; the record is incomplete."
+      end
 
       if data.nil? && (recorded.nil? || recorded.empty?)
         raise ArgumentError.new(
@@ -216,6 +247,7 @@ module Smith
         cost: cost_of(usage, provider, model, overrides),
         todos: data.try(&.todos) || Array(TodoList::Item).new,
         transcript_count: recorded.try(&.size),
+        transcript_skipped: skipped_lines,
         session_count: session_count,
         warnings: warnings
       )
@@ -225,9 +257,12 @@ module Smith
     # directory that has lost both but still holds its raw transcript is
     # exactly the case an export is for, so an id naming one is accepted —
     # after the store has had its say, so names keep resolving the usual way.
+    #
+    # `NotFound` only: an ambiguous name and a reference that is a path are
+    # both refusals the user has to see, not gaps to paper over.
     private def self.resolve(store : Session::Store, reference : String) : String
       store.resolve_id(reference)
-    rescue ex : ArgumentError
+    rescue ex : Session::NotFound
       candidate = reference.strip
       raise ex unless TranscriptLog.new(store.session_dir(candidate)).exists?
 
@@ -250,28 +285,26 @@ module Smith
       nil
     end
 
-    # nil means there is no transcript log at all, which is different from one
-    # that is there and empty.
-    private def self.load_transcript(store : Session::Store, id : String, warnings : Array(String)) : Array(LLM::Message)?
+    # A nil message array means there is no transcript log at all, which is
+    # different from one that is there and empty.
+    private def self.load_transcript(store : Session::Store, id : String, warnings : Array(String)) : {Array(LLM::Message)?, Int32}
       log = TranscriptLog.new(store.session_dir(id))
-      return nil unless log.exists?
+      return {nil, 0} unless log.exists?
 
-      log.messages
+      log.read
     rescue ex
       warnings << "The transcript at #{store.session_dir(id)} could not be read (#{ex.message})."
-      nil
+      {nil, 0}
     end
 
-    # One malformed entry makes the whole index unparseable, and the store
-    # answers that with an empty list. The export survives it: everything the
+    # A damaged entry costs its own session and no other, so the export finds
+    # what it needs whenever the entry it wants is intact — and everything the
     # index would have said is in the session file too.
     private def self.index_entry(store : Session::Store, id : String, warnings : Array(String)) : Session::IndexEntry?
-      entries = store.list
-      entry = entries.find { |e| e.id == id }
-      return entry unless entry.nil?
+      entries, damage = store.read_index
+      damage.each { |problem| warnings << "The session index is damaged: #{problem}." }
 
-      warnings << "No index entry for #{id}; the session index is missing or damaged." if entries.empty?
-      nil
+      entries.find { |e| e.id == id }
     end
 
     def self.render_message(md : String::Builder, message : LLM::Message, position : Int32) : Nil
@@ -295,10 +328,10 @@ module Smith
     private def self.render_block(md : String::Builder, block : LLM::ContentBlock) : Nil
       case block.type
       when .text?
-        text = block.text.try(&.strip)
-        md << "\n" << text << "\n" unless text.nil? || text.empty?
+        text = sanitize(block.text || "").strip
+        md << "\n" << close_open_fence(text) << "\n" unless text.empty?
       when .thinking?
-        md << "\n**Thinking**\n\n" << quote(abbreviate(block.text || ""))
+        md << "\n**Thinking**\n\n" << quote(abbreviate(sanitize(block.text || "")))
       when .redacted_thinking?
         md << "\n_Redacted thinking (" << (block.text.try(&.size) || 0) << " encrypted characters, not shown)._\n"
       when .tool_use?
@@ -311,21 +344,21 @@ module Smith
     end
 
     private def self.render_tool_use(md : String::Builder, block : LLM::ContentBlock) : Nil
-      md << "\n**Tool call: `" << (block.tool_name || "unknown") << "`**"
-      block.tool_call_id.try { |id| md << " (`" << id << "`)" }
+      md << "\n**Tool call: `" << sanitize(block.tool_name || "unknown") << "`**"
+      block.tool_call_id.try { |id| md << " (`" << sanitize(id) << "`)" }
       md << "\n\n"
 
       args = block.tool_args.try(&.to_json)
       if args.nil? || args.empty?
         md << "_No arguments._\n"
       else
-        fenced(md, abbreviate(args), "json")
+        fenced(md, abbreviate(sanitize(args)), "json")
       end
     end
 
     private def self.render_tool_result(md : String::Builder, block : LLM::ContentBlock) : Nil
       md << "\n**Tool result**"
-      block.tool_call_id.try { |id| md << " (`" << id << "`)" }
+      block.tool_call_id.try { |id| md << " (`" << sanitize(id) << "`)" }
       md << " — error" if block.is_error
       md << "\n\n"
 
@@ -333,7 +366,7 @@ module Smith
       if text.nil? || text.empty?
         md << "_Empty result._\n"
       else
-        fenced(md, abbreviate(text))
+        fenced(md, abbreviate(sanitize(text)))
       end
     end
 
@@ -342,10 +375,69 @@ module Smith
     # is megabytes of noise where one line of description belongs.
     private def self.render_media(md : String::Builder, block : LLM::ContentBlock) : Nil
       kind = block.type.document? ? "Document" : "Image"
-      md << "\n_[" << kind << ": " << block.media_label
-      block.media_type.try { |type| md << " (" << type << ")" if type != block.media_label }
-      block.media_ref.try { |ref| md << ", stored as `" << ref[0, Math.min(12, ref.size)] << "`" }
+      md << "\n_[" << kind << ": " << sanitize(block.media_label)
+      block.media_type.try { |type| md << " (" << sanitize(type) << ")" if type != block.media_label }
+      block.media_ref.try { |ref| md << ", stored as `" << sanitize(ref[0, Math.min(12, ref.size)]) << "`" }
       md << "]_\n"
+    end
+
+    # What a transcript is allowed to put into the document.
+    #
+    # Tool output is bytes from someone else's program. It can be invalid
+    # UTF-8 — a `bash` result carrying Latin-1 or a stray binary byte — which
+    # would make the export unreadable to anything that expects text and, on
+    # the JSON path, not even valid JSON. And it can carry NUL, BEL or raw
+    # ANSI escapes, which turn a `cat` of the file into a terminal effect and
+    # make `grep` treat a Markdown file as binary.
+    #
+    # `\n` and `\t` are the structure of the output and stay; `\r` is a
+    # terminal effect in captured output and goes; everything else in the
+    # control range becomes the replacement character, which says a byte was
+    # there without acting on the terminal.
+    def self.sanitize(text : String) : String
+      scrubbed = text.scrub
+      return scrubbed unless scrubbed.each_char.any? { |char| strip?(char) }
+
+      String.build(scrubbed.bytesize) do |io|
+        scrubbed.each_char do |char|
+          next if char == '\r'
+          io << (strip?(char) ? '�' : char)
+        end
+      end
+    end
+
+    private def self.strip?(char : Char) : Bool
+      return false if char == '\n' || char == '\t'
+
+      char.control?
+    end
+
+    # A code fence the message never closed — an assistant turn cut off at
+    # max_tokens is the everyday way to get one — would swallow every heading,
+    # tool call and result after it. Closing it costs one line; leaving it open
+    # costs the rest of the document.
+    #
+    # Tracked the way CommonMark reads fences rather than counted: a shorter
+    # run of backticks *inside* a longer fence is content, not a second fence,
+    # and a parity count would "close" a document that was never open.
+    private def self.close_open_fence(text : String) : String
+      open : String? = nil
+
+      text.each_line do |line|
+        match = line.match(/\A {0,3}(`{3,})(.*)\z/)
+        next if match.nil?
+
+        marker, rest = match[1], match[2]
+
+        if open.nil?
+          # An opening fence may carry an info string, but never a backtick.
+          open = marker unless rest.includes?('`')
+        elsif marker.size >= open.size && rest.strip.empty?
+          open = nil
+        end
+      end
+
+      open.nil? ? text : "#{text}\n#{open}"
     end
 
     private def self.abbreviate(text : String) : String

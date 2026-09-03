@@ -180,10 +180,6 @@ module Smith
           @older_than = value
         end
 
-        opts.on("--out PATH", "sessions export: write the export to this file instead of stdout") do |value|
-          @out_path = value
-        end
-
         opts.on("--keep-last N", "sessions prune: keep the N most recent regardless of age") do |value|
           count = value.to_i?
           if count.nil? || count < 0
@@ -191,6 +187,10 @@ module Smith
             exit(1)
           end
           @keep_last = count
+        end
+
+        opts.on("--out PATH", "sessions export: write the export to this file instead of stdout") do |value|
+          @out_path = value
         end
 
         opts.on("--agent NAME", "Run the main thread as the agent defined in .smith/agents/NAME.md") do |name|
@@ -309,7 +309,7 @@ module Smith
         when "delete"
           delete_sessions(@args[2..-1]?)
         when "export"
-          export_session(@args[2]?)
+          export_session(@args[2..-1]?)
         when "prune"
           prune_sessions
         else
@@ -2074,10 +2074,20 @@ module Smith
     #
     # Nothing on this path builds a provider or needs an API key: an export is
     # a view over files that are already on disk.
-    private def export_session(reference : String?) : Nil
+    private def export_session(references : Array(String)?) : Nil
+      reference = references.try(&.first?)
+
       if reference.nil?
         STDERR.puts "Error: 'smith sessions export' needs a session (name or id)."
         STDERR.puts "Example: smith sessions export my-refactor --out run.md"
+        exit(1)
+      end
+
+      # One session per export: silently ignoring the rest would export
+      # something other than what was asked for.
+      if references && references.size > 1
+        STDERR.puts "Error: 'smith sessions export' takes one session, got #{references.size}: #{references.join(", ")}."
+        STDERR.puts "Export them one at a time, each with its own --out."
         exit(1)
       end
 
@@ -2094,9 +2104,18 @@ module Smith
       content = @json_output ? document.to_json_document : document.to_markdown
 
       if path = @out_path
+        # AtomicFile creates the directories its own callers need; an export
+        # goes where the user pointed, so a typo has to be an error rather
+        # than a tree of empty directories.
+        parent = File.dirname(path)
+        unless Dir.exists?(parent)
+          STDERR.puts "❌ Could not write the export to #{path}: the directory #{parent} does not exist."
+          exit(1)
+        end
+
         begin
           # Atomic, like everything else smith writes: half an export is worse
-          # than none, and 0600 matches the session it came from.
+          # than none.
           AtomicFile.write(path, content)
         rescue ex : File::Error | IO::Error
           STDERR.puts "❌ Could not write the export to #{path}: #{ex.message}"
@@ -2104,7 +2123,16 @@ module Smith
         end
         puts "📄 Exported #{document.reference} (#{document.messages.size} message(s)) to #{path}"
       else
-        puts content
+        begin
+          # Unbuffered, so a closed pipe surfaces here with nothing left to
+          # flush at exit. `smith sessions export … | head -1` is how a long
+          # export gets read, and it must not end in a stack trace.
+          STDOUT.sync = true
+          STDOUT.puts content
+        rescue IO::Error
+          # The reader went away. The export is fine; there is nobody to
+          # hand it to.
+        end
       end
     end
 

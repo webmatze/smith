@@ -8,6 +8,13 @@ require "./pricing"
 require "./todos"
 
 module Smith::Session
+  # A reference that names nothing, as opposed to one that names too much (an
+  # ambiguous name) or is not a reference at all. Everything already catching
+  # ArgumentError keeps catching it; only callers that want to tell "gone"
+  # from "refused" — `sessions export` does — need the distinction.
+  class NotFound < ArgumentError
+  end
+
   struct IndexEntry
     include JSON::Serializable
 
@@ -275,7 +282,7 @@ module Smith::Session
       path = legacy_path(id) unless File.exists?(path)
 
       unless File.exists?(path)
-        raise ArgumentError.new("Session '#{id}' not found at #{path}")
+        raise NotFound.new("Session '#{id}' not found at #{path}")
       end
 
       data = Data.from_json(File.read(path))
@@ -333,14 +340,36 @@ module Smith::Session
     end
 
     def list : Array(IndexEntry)
-      return Array(IndexEntry).new unless File.exists?(@index_path)
+      read_index[0]
+    end
 
-      begin
-        entries = Array(IndexEntry).from_json(File.read(@index_path))
-        entries.sort_by { |e| -e.updated_at.to_unix }
-      rescue
-        Array(IndexEntry).new
+    # The index, and what in it could not be read.
+    #
+    # Parsed entry by entry rather than in one go: the index is a plain file
+    # that a crash, a hand edit or a half-finished write can damage, and
+    # parsing the array as a whole meant a single bad entry took every other
+    # session with it — no resume by name, no cost column, no stats. A
+    # skipped entry costs its own session and nothing else.
+    def read_index : {Array(IndexEntry), Array(String)}
+      empty = {Array(IndexEntry).new, Array(String).new}
+      return empty unless File.exists?(@index_path)
+
+      raw = begin
+        Array(JSON::Any).from_json(File.read(@index_path))
+      rescue ex
+        return {Array(IndexEntry).new, ["#{@index_path} is not a readable list of sessions (#{ex.message})"]}
       end
+
+      entries = Array(IndexEntry).new
+      damage = Array(String).new
+
+      raw.each_with_index do |element, position|
+        entries << IndexEntry.from_json(element.to_json)
+      rescue ex
+        damage << "index entry #{position + 1} could not be read (#{ex.message})"
+      end
+
+      {entries.sort_by { |e| -e.updated_at.to_unix }, damage}
     end
 
     def latest : Data?
@@ -361,6 +390,7 @@ module Smith::Session
     # load — the raw transcript beside it is still exportable.
     def resolve_id(reference : String) : String
       wanted = reference.strip
+      assert_plain_reference(wanted)
       entries = list
 
       return wanted if entries.any? { |e| e.id == wanted } || session_file?(wanted)
@@ -369,7 +399,7 @@ module Smith::Session
 
       case matches.size
       when 0
-        raise ArgumentError.new("Session '#{wanted}' not found. Run 'smith sessions' to see what there is.")
+        raise NotFound.new("Session '#{wanted}' not found. Run 'smith sessions' to see what there is.")
       when 1
         matches.first.id
       else
@@ -385,6 +415,9 @@ module Smith::Session
       wanted = name.strip
 
       raise ArgumentError.new("A session name cannot be empty.") if wanted.empty?
+      # Refused here as well as in resolution, so a name that could never be
+      # typed back at smith cannot be created in the first place.
+      assert_plain_reference(wanted)
       assert_available(wanted, session.id)
 
       session.name = wanted
@@ -474,6 +507,22 @@ module Smith::Session
 
       legacy = legacy_path(id)
       File.delete(legacy) if File.exists?(legacy)
+    end
+
+    # A reference names one session — an id or a name — and never a path.
+    #
+    # `File.join` defuses an absolute path but carries `..` straight through,
+    # so a reference like `../../notes` used to resolve to a directory outside
+    # the sessions tree. Whatever resolves is what `sessions delete` removes
+    # and what an export reads, so the refusal belongs at the one point both
+    # go through.
+    private def assert_plain_reference(reference : String) : Nil
+      return if !reference.empty? && reference != "." && reference != ".." &&
+                File.basename(reference) == reference
+
+      raise ArgumentError.new(
+        "'#{reference}' is not a session reference — a name or an id, never a path. Run 'smith sessions' to see what there is."
+      )
     end
 
     private def session_file?(id : String) : Bool
