@@ -22,6 +22,7 @@ require "./trust"
 require "./sandbox"
 require "./tools/sandbox_approver"
 require "./mcp"
+require "./update"
 require "./ui"
 
 module Smith
@@ -69,6 +70,7 @@ module Smith
     @interactive_tui : Bool = false
     @tui_app : UI::App? = nil
     @tui_warned : Bool = false
+    @update_check : Bool = false
 
     def initialize(@args : Array(String))
       @config = Config.load
@@ -125,7 +127,8 @@ module Smith
           str.puts "  rewind [<session_id>]      Undo a session's file changes"
           str.puts "  mcp list | tools <server>  Show the configured MCP servers and their tools"
           str.puts "  skills list                Show the skills catalog: name, origin and description"
-          str.puts "  agents list                Show the agent definitions and the model and tools each asks for\n"
+          str.puts "  agents list                Show the agent definitions and the model and tools each asks for"
+          str.puts "  update [--check]           Replace this binary with the newest release binary\n"
           str.puts "Options:"
         end
 
@@ -159,6 +162,10 @@ module Smith
 
         opts.on("--force", "rewind: overwrite files changed outside smith since the snapshot") do
           @force = true
+        end
+
+        opts.on("--check", "update: report whether a newer release exists, change nothing") do
+          @update_check = true
         end
 
         opts.on("--older-than SPAN", "sessions prune: drop sessions last updated longer ago (e.g. 30d, 12h, 15m; default 30d)") do |value|
@@ -311,6 +318,8 @@ module Smith
         run_agents(@args[1]?)
       when "sandbox"
         show_sandbox
+      when "update"
+        run_update
       else
         prompt = @args.join(" ")
         if prompt.empty?
@@ -321,7 +330,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update]
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -1554,6 +1563,13 @@ module Smith
       return lead if Smith.git_root(Dir.current).nil?
 
       "#{lead} `git diff` shows what a command changed since your last commit."
+    end
+
+    # The whole of it lives in Smith::Update — replacing the running binary is
+    # its own problem, and it is testable only away from the CLI.
+    private def run_update : Nil
+      code = Update::Command.new(check_only: @update_check).run
+      exit(code) unless code.zero?
     end
 
     # What is actually in force, printable. A sandbox nobody can inspect is a
