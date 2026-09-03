@@ -4,10 +4,15 @@ module Smith::UI
   # One entry in the autocomplete popup. Built-in chat commands and skills
   # share the list — both are invoked with a leading slash, and the popup is
   # the place where a human sees that skills cannot shadow built-ins.
+  # `takes_args` means an argument may follow, so completing the word leaves
+  # the cursor after a space. `optional_args` narrows that: the bare form does
+  # something too, so a fully typed command runs on the first Enter instead of
+  # waiting for an argument nobody has to give.
   record Completion,
     name : String,
     description : String,
     takes_args : Bool = false,
+    optional_args : Bool = false,
     builtin : Bool = true
 
   # The autocomplete popup.

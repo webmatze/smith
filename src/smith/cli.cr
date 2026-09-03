@@ -15,6 +15,7 @@ require "./presentation"
 require "./todos"
 require "./plan"
 require "./chat_commands"
+require "./model_name"
 require "./checkpoints"
 require "./hooks"
 require "./trust"
@@ -1181,62 +1182,56 @@ module Smith
     # hands back the session the loop should switch to.
     private record CommandOutcome, quit : Bool = false, resume : Session::Data? = nil
 
+    # Exhaustive on purpose: a command added to ChatCommand without a branch
+    # here must fail to compile, rather than fall through to whatever the last
+    # `if` happened to be.
     private def run_chat_command(invocation : ChatCommands::Invocation, session_data : Session::Data, agent : Agent) : CommandOutcome
-      command = invocation.command
-
-      if command.rewind?
+      case invocation.command
+      in ChatCommand::Rewind
         rewind_from_chat(session_data)
-        return CommandOutcome.new
-      end
-
-      if command.context?
+        CommandOutcome.new
+      in ChatCommand::Context
         print_context(session_data, agent.messages, agent)
-        return CommandOutcome.new
-      end
-
-      if command.rename?
+        CommandOutcome.new
+      in ChatCommand::Rename
         rename_from_chat(session_data, invocation.argument.not_nil!)
-        return CommandOutcome.new
-      end
-
-      if command.help?
+        CommandOutcome.new
+      in ChatCommand::Help
         print_chat_help
-        return CommandOutcome.new
-      end
-
-      if command.clear?
-        # Order matters in the TUI: the screen wipe drops every block, so the
-        # confirmation has to arrive after it to survive.
-        agent.clear!
-        # A replace on an already empty list would still announce "Todos
-        # cleared" — for a clear that cleared nothing.
-        @todos.replace(Array(TodoList::Item).new) unless @todos.empty?
-        presentation.clear_screen
-        chat_puts("🧹 Context cleared.")
-        return CommandOutcome.new
-      end
-
-      if command.sessions?
+        CommandOutcome.new
+      in ChatCommand::Clear
+        clear_from_chat(agent)
+        CommandOutcome.new
+      in ChatCommand::Sessions
         print_sessions_list
-        return CommandOutcome.new
-      end
-
-      if command.resume?
-        target = resolve_resume_target(session_data, invocation.argument.not_nil!)
-        return CommandOutcome.new(resume: target)
-      end
-
-      if command.model?
+        CommandOutcome.new
+      in ChatCommand::Resume
+        CommandOutcome.new(resume: resolve_resume_target(session_data, invocation.argument.not_nil!))
+      in ChatCommand::Model
         switch_model(session_data, agent, invocation.argument)
-        return CommandOutcome.new
+        CommandOutcome.new
+      in ChatCommand::Plan
+        switch_mode(Mode::Plan)
+      in ChatCommand::Normal
+        switch_mode(Mode::Normal)
+      in ChatCommand::Quit
+        CommandOutcome.new(quit: true)
       end
+    end
 
-      if command.quit?
-        return CommandOutcome.new(quit: true)
-      end
+    private def clear_from_chat(agent : Agent) : Nil
+      # Order matters in the TUI: the screen wipe drops every block, so the
+      # confirmation has to arrive after it to survive.
+      agent.clear!
+      # A replace on an already empty list would still announce "Todos
+      # cleared" — for a clear that cleared nothing.
+      @todos.replace(Array(TodoList::Item).new) unless @todos.empty?
+      presentation.clear_screen
+      chat_puts("🧹 Context cleared.")
+    end
 
+    private def switch_mode(target : Mode) : CommandOutcome
       plan = plan_session
-      target = command.plan? ? Mode::Plan : Mode::Normal
 
       if plan.mode == target
         chat_puts("Already in #{target.to_s.downcase} mode.")
@@ -1260,17 +1255,8 @@ module Smith
         return
       end
 
-      # A model name is a single word. Anything else is a typo, and passing it
-      # on would only buy a rejection from the provider one request later.
-      if name.each_char.any?(&.whitespace?)
-        chat_puts("❌ '#{name}' is not a model name — it must be a single word.")
-        return
-      end
-
-      # A provider is not a model. Switching providers means another client and
-      # another API key, so it stays a restart rather than a chat command.
-      if Config::BUILTIN_MODELS.has_key?(name.downcase)
-        chat_puts("❌ '#{name}' is a provider, not a model. Restart with --provider #{name.downcase} to change provider.")
+      if reason = ModelName.rejection(name)
+        chat_puts("❌ #{reason}")
         return
       end
 
@@ -1297,9 +1283,14 @@ module Smith
 
       reprice(session_data.provider, name, agent)
 
-      # Written now rather than when the turn ends: /quit leaves the loop
+      # Written now rather than when the turn ends: /quit leaves the plain loop
       # without persisting, and the switch has to survive that.
-      persist(session_data, agent)
+      #
+      # Through `save` rather than `persist`: persist copies the agent's live
+      # messages over the session's, which would let `/clear` followed by
+      # `/model` write an emptied transcript over a saved one. Only the model
+      # is meant to change here, and `save` rebuilds the index row from it.
+      @session_store.save(session_data)
 
       chat_puts("🔀 Model: #{previous} → #{name} (#{session_data.provider}). In effect from the next request.")
     end
@@ -1325,7 +1316,12 @@ module Smith
     # sees that built-ins win over skills of the same name.
     private def chat_completions : Array(UI::Completion)
       entries = ChatCommands.definitions.map do |d|
-        UI::Completion.new(name: d.verb, description: d.description, takes_args: d.takes_argument?)
+        UI::Completion.new(
+          name: d.verb,
+          description: d.description,
+          takes_args: d.takes_argument?,
+          optional_args: d.arity.optional?
+        )
       end
 
       @skills_catalog.skills.values

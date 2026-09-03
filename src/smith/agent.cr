@@ -51,6 +51,15 @@ module Smith
     # reason `model` is: prices are per model, so a switch has to re-price.
     property rates : Pricing::Rates? = nil
 
+    # What this run has cost so far, added up per response at the rates that
+    # were in force when that response arrived.
+    #
+    # Pricing `cumulative_usage` in one go cannot answer this once `/model` has
+    # switched mid-run: it would re-price money already spent at the new
+    # model's rates, inventing headroom when the switch is to a cheaper model
+    # and ending the run over money never spent when it is to a dearer one.
+    getter spent_usd : Float64 = 0.0
+
     def initialize(
       @provider : LLM::Provider,
       @registry : Tools::Registry = Tools::Registry.default,
@@ -92,7 +101,11 @@ module Smith
     # to neutral with it — it was measured against a history that no longer
     # exists. The transcript log keeps its copy: it is append-only on purpose.
     def clear! : Nil
-      @messages.clear
+      # A fresh array rather than `@messages.clear`: a resumed session hands
+      # its *own* messages array to the agent, so clearing in place would empty
+      # the session's transcript too, and the next save — a `/model` switch,
+      # say — would write that emptied record over what was on disk.
+      @messages = Array(LLM::Message).new
       @context_ratio = 1.0
       @transcript_logged = 0
     end
@@ -202,11 +215,15 @@ module Smith
     # letting a run believe it is capped.
     private def over_budget? : Float64?
       limit = @cost_limit_usd
-      rates = @rates
-      return nil if limit.nil? || rates.nil?
+      return nil if limit.nil?
 
-      spent = Pricing.cost(@cumulative_usage, rates)
-      spent >= limit ? spent : nil
+      # Never priced anything, so there is nothing to enforce — same as before
+      # this was accumulated. Once a stretch *has* been priced the money is
+      # real, and a later switch to a model with no known rate does not
+      # un-spend it.
+      return nil if @rates.nil? && @spent_usd.zero?
+
+      @spent_usd >= limit ? @spent_usd : nil
     end
 
     private def run_loop
@@ -488,6 +505,11 @@ module Smith
 
     private def update_usage(u : LLM::Usage)
       @cumulative_usage += u
+      # A stretch with no known rate contributes nothing rather than a guess —
+      # the CLI is what says so out loud when a budget is set.
+      if rates = @rates
+        @spent_usd += Pricing.cost(u, rates)
+      end
     end
   end
 end
