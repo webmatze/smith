@@ -1782,10 +1782,13 @@ module Smith
     # explanation.
     private def list_skills : Nil
       catalog = @skills_catalog
+      # Derived from every source at once, so read it once rather than rebuild
+      # it per use.
+      warnings = catalog.warnings
 
       # Both clauses matter: a file that could not be read at all warns without
       # ever becoming a skill.
-      if catalog.skills.empty? && catalog.warnings.empty?
+      if catalog.skills.empty? && warnings.empty?
         puts "No skills found."
         puts "   Add one at .smith/skills/<name>/SKILL.md, or globally at #{File.join(Smith.home_dir, "skills")}/<name>/SKILL.md."
         return
@@ -1803,9 +1806,9 @@ module Smith
         catalog.shadowed[skill.name]?.try(&.each { |lost| puts "      shadows:     #{lost}" })
       end
 
-      unless catalog.warnings.empty?
+      unless warnings.empty?
         puts
-        catalog.warnings.each { |warning| puts warning }
+        warnings.each { |warning| puts warning }
       end
 
       puts
