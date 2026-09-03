@@ -26,7 +26,10 @@ module Smith
 
     getter provider : LLM::Provider
     getter registry : Tools::Registry
-    getter model : String
+    # Writable because `/model` switches the model mid-session: every request
+    # is built from this name, so the next one goes to the new model without
+    # the provider client — its key, its connection — being rebuilt.
+    property model : String
     # Writable because the mode switch rebuilds it mid-session (/plan, /normal).
     property system_prompt : String
     getter messages : Array(LLM::Message)
@@ -43,6 +46,10 @@ module Smith
     # it; a session read back from disk has no such history to report.
     getter compactions : Int32 = 0
     getter last_compaction : Context::Strategy? = nil
+
+    # What --max-budget-usd meters the run against. Writable for the same
+    # reason `model` is: prices are per model, so a switch has to re-price.
+    property rates : Pricing::Rates? = nil
 
     def initialize(
       @provider : LLM::Provider,

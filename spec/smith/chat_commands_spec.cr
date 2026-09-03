@@ -87,12 +87,39 @@ describe "the context and session-switch commands" do
   end
 end
 
+describe "the model command" do
+  it "reads a bare /model as the report form" do
+    invocation = Smith::ChatCommands.parse("/model").not_nil!
+
+    invocation.command.should eq(Smith::ChatCommand::Model)
+    invocation.argument.should be_nil
+  end
+
+  it "carries the new model name along with /model" do
+    invocation = Smith::ChatCommands.parse("/model claude-opus-5").not_nil!
+
+    invocation.command.should eq(Smith::ChatCommand::Model)
+    invocation.argument.should eq("claude-opus-5")
+  end
+
+  it "is the one built-in that claims both forms" do
+    Smith::ChatCommands.parse("  /MODEL  ").try(&.command).should eq(Smith::ChatCommand::Model)
+    Smith::ChatCommands.parse("/model  gpt-5.6-luna ").try(&.argument).should eq("gpt-5.6-luna")
+  end
+
+  it "hands a multi-word argument on whole, for the handler to reject" do
+    # The parser's job is to claim the command; whether the name is a name is
+    # a question about models, and that is answered where models are known.
+    Smith::ChatCommands.parse("/model claude opus 5").try(&.argument).should eq("claude opus 5")
+  end
+end
+
 describe "the command table" do
   it "exposes every built-in exactly once" do
     verbs = Smith::ChatCommands.definitions.map(&.verb)
     verbs.size.should eq(verbs.uniq.size)
 
-    expected = ["/plan", "/normal", "/clear", "/context", "/rewind", "/sessions", "/resume", "/rename", "/help", "/quit"]
+    expected = ["/plan", "/normal", "/clear", "/context", "/rewind", "/sessions", "/resume", "/rename", "/model", "/help", "/quit"]
     verbs.sort.should eq(expected.sort)
   end
 
@@ -102,6 +129,29 @@ describe "the command table" do
       .map(&.verb)
 
     args.sort.should eq(["/rename", "/resume"])
+  end
+
+  it "flags exactly which commands may take one" do
+    optional = Smith::ChatCommands.definitions
+      .select(&.arity.optional?)
+      .map(&.verb)
+
+    optional.should eq(["/model"])
+
+    # What the popup uses to decide whether to leave the cursor after a space.
+    Smith::ChatCommands.definitions
+      .select(&.takes_argument?)
+      .map(&.verb)
+      .sort
+      .should eq(["/model", "/rename", "/resume"])
+  end
+
+  it "brackets an optional argument in the usage /help prints" do
+    usages = Smith::ChatCommands.definitions.to_h { |d| {d.verb, d.usage} }
+
+    usages["/model"].should eq("/model [<name>]")
+    usages["/rename"].should eq("/rename <name>")
+    usages["/plan"].should eq("/plan")
   end
 
   it "gives every definition a description the UI can show" do

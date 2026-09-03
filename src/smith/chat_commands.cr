@@ -9,6 +9,7 @@ module Smith
     Clear
     Sessions
     Resume
+    Model
     Quit
   end
 
@@ -22,17 +23,42 @@ module Smith
   # The DEFINITIONS table is the single source of truth for parsing, for
   # `/help` and for the TUI's autocomplete popup — the three must not drift.
   module ChatCommands
+    # How a command relates to its argument. `/model` is why the middle case
+    # exists: bare it reports the model in use, with a name it switches.
+    enum Arity
+      None
+      Optional
+      Required
+    end
+
     record Invocation, command : ChatCommand, argument : String? = nil
 
     # One row of the command table. `argument` names an expected argument
-    # ("/rename <name>") or is nil for bare commands; `requires_argument`
-    # says the command is meaningless without one.
+    # ("/rename <name>") or is nil for bare commands; `arity` says whether one
+    # may be given at all, and whether the command is meaningless without it.
     record Definition,
       command : ChatCommand,
       verb : String,
       description : String,
       argument : String? = nil,
-      requires_argument : Bool = false
+      arity : Arity = Arity::None do
+      def requires_argument : Bool
+        arity.required?
+      end
+
+      def takes_argument? : Bool
+        !arity.none?
+      end
+
+      # What `/help` shows: an optional argument is bracketed, so the one
+      # command that works both ways says so.
+      def usage : String
+        arg = @argument
+        return @verb if arg.nil?
+
+        arity.optional? ? "#{@verb} [#{arg}]" : "#{@verb} #{arg}"
+      end
+    end
 
     DEFINITIONS = [
       Definition.new(ChatCommand::Plan, "/plan", "Switch to plan mode (research only)"),
@@ -41,8 +67,9 @@ module Smith
       Definition.new(ChatCommand::Context, "/context", "Show where the context window goes"),
       Definition.new(ChatCommand::Rewind, "/rewind", "Undo this session back to its start"),
       Definition.new(ChatCommand::Sessions, "/sessions", "List saved sessions"),
-      Definition.new(ChatCommand::Resume, "/resume", "Switch to another session", argument: "<session>", requires_argument: true),
-      Definition.new(ChatCommand::Rename, "/rename", "Rename the current session", argument: "<name>", requires_argument: true),
+      Definition.new(ChatCommand::Resume, "/resume", "Switch to another session", argument: "<session>", arity: Arity::Required),
+      Definition.new(ChatCommand::Rename, "/rename", "Rename the current session", argument: "<name>", arity: Arity::Required),
+      Definition.new(ChatCommand::Model, "/model", "Show the model in use, or switch to another", argument: "<name>", arity: Arity::Optional),
       Definition.new(ChatCommand::Help, "/help", "Show this list"),
       Definition.new(ChatCommand::Quit, "/quit", "End the session"),
     ]
@@ -62,14 +89,14 @@ module Smith
       definition = DEFINITIONS.find { |d| d.verb == verb.downcase }
       return nil if definition.nil?
 
-      if definition.requires_argument
+      if argument
+        # Arguments are how a skill invocation looks (`/deploy staging`), so a
+        # built-in claims the argument form only when it has a use for one.
+        definition.takes_argument? ? Invocation.new(definition.command, argument) : nil
+      else
         # Without its argument there is nothing to do, and the skill catalog
         # may as well have the bare form.
-        argument ? Invocation.new(definition.command, argument) : nil
-      else
-        # Arguments are how a skill invocation looks (`/deploy staging`), so a
-        # built-in only claims the bare form.
-        argument.nil? ? Invocation.new(definition.command) : nil
+        definition.requires_argument ? nil : Invocation.new(definition.command)
       end
     end
   end

@@ -1099,13 +1099,15 @@ module Smith
                 provider, agent = activate_session(target, provider)
                 session_data = target
 
-                app.model_name = agent.model
                 app.usage_text = ""
                 app.cost_text = ""
                 tui_banner(session_data, agent)
                 replay_tui_history(app, session_data)
                 app.notice("🔄 Resumed session '#{target.reference}'.")
               end
+              # /model and /resume both change it; every other command leaves
+              # it as it was.
+              app.model_name = agent.model
               # Slash commands produce notice blocks, not a turn — but the
               # prompt must come back all the same.
               app.turn_finished
@@ -1224,6 +1226,11 @@ module Smith
         return CommandOutcome.new(resume: target)
       end
 
+      if command.model?
+        switch_model(session_data, agent, invocation.argument)
+        return CommandOutcome.new
+      end
+
       if command.quit?
         return CommandOutcome.new(quit: true)
       end
@@ -1240,6 +1247,73 @@ module Smith
       CommandOutcome.new
     end
 
+    # `/model` — bare it reports what is in use, with a name it switches the
+    # model for the rest of the session.
+    #
+    # Only the name on the wire changes: every request is built from
+    # Agent#model, so the provider client keeps its API key and its connection.
+    # That is the same thing `-m` does at startup, which is why swapping the
+    # *provider* is not offered here — that needs a different client.
+    private def switch_model(session_data : Session::Data, agent : Agent, name : String?) : Nil
+      if name.nil?
+        chat_puts("Model: #{agent.model} | Provider: #{session_data.provider}")
+        return
+      end
+
+      # A model name is a single word. Anything else is a typo, and passing it
+      # on would only buy a rejection from the provider one request later.
+      if name.each_char.any?(&.whitespace?)
+        chat_puts("❌ '#{name}' is not a model name — it must be a single word.")
+        return
+      end
+
+      # A provider is not a model. Switching providers means another client and
+      # another API key, so it stays a restart rather than a chat command.
+      if Config::BUILTIN_MODELS.has_key?(name.downcase)
+        chat_puts("❌ '#{name}' is a provider, not a model. Restart with --provider #{name.downcase} to change provider.")
+        return
+      end
+
+      if name == agent.model
+        chat_puts("Already using #{name}.")
+        return
+      end
+
+      previous = agent.model
+      agent.model = name
+
+      # Persisted as well as applied, so `smith resume` comes back on the new
+      # model — the index row is rebuilt from this same field on save.
+      session_data.model = name
+      # Kept in step so a later /resume, which rebuilds the agent, does not
+      # read a stale -m out of the CLI.
+      @model = name
+
+      # Subagents are spawned with the model the tool was built with; `-m`
+      # reaches them at startup, so a switch has to reach them too.
+      if tool = agent.registry.get("agent").as?(Tools::AgentTool)
+        tool.model = name
+      end
+
+      reprice(session_data.provider, name, agent)
+
+      # Written now rather than when the turn ends: /quit leaves the loop
+      # without persisting, and the switch has to survive that.
+      persist(session_data, agent)
+
+      chat_puts("🔀 Model: #{previous} → #{name} (#{session_data.provider}). In effect from the next request.")
+    end
+
+    # Prices are per model, so a switch re-reads them. Deliberately not through
+    # budget_rates: that one writes to STDERR, which would smear the TUI.
+    private def reprice(provider_name : String, model : String, agent : Agent) : Nil
+      return if @max_budget_usd.nil?
+
+      rates = Pricing.rates_for(provider_name, model, @config.pricing)
+      chat_puts("⚠️  No price known for #{provider_name}/#{model}; --max-budget-usd cannot be enforced.") if rates.nil?
+      agent.rates = rates
+    end
+
     # Text printed by chat commands: lines in the plain loop, notice blocks in
     # the fullscreen one.
     private def chat_puts(text : String) : Nil
@@ -1251,7 +1325,7 @@ module Smith
     # sees that built-ins win over skills of the same name.
     private def chat_completions : Array(UI::Completion)
       entries = ChatCommands.definitions.map do |d|
-        UI::Completion.new(name: d.verb, description: d.description, takes_args: d.requires_argument)
+        UI::Completion.new(name: d.verb, description: d.description, takes_args: d.takes_argument?)
       end
 
       @skills_catalog.skills.values
@@ -1267,8 +1341,7 @@ module Smith
       lines = Array(String).new
       lines << "Chat commands:"
       ChatCommands.definitions.each do |d|
-        verb = d.argument ? "#{d.verb} #{d.argument}" : d.verb
-        lines << "  %-20s %s" % [verb, d.description]
+        lines << "  %-20s %s" % [d.usage, d.description]
       end
 
       unless @skills_catalog.skills.empty?

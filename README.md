@@ -32,7 +32,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
-- **💬 Chat Commands & Autocomplete (`Smith::ChatCommands`)**: Slash commands (`/help`, `/clear`, `/sessions`, `/resume`, `/rename`, `/rewind`, `/context`, `/plan`, `/normal`, `/quit`) resolved before skill expansion, with a popup that filters and completes them — arrow keys select, Tab fills, Enter runs.
+- **💬 Chat Commands & Autocomplete (`Smith::ChatCommands`)**: Slash commands (`/help`, `/clear`, `/sessions`, `/resume`, `/rename`, `/model`, `/rewind`, `/context`, `/plan`, `/normal`, `/quit`) resolved before skill expansion, with a popup that filters and completes them — arrow keys select, Tab fills, Enter runs.
 - **⚡ Native Performance**: Compiles to a lightweight native binary; the test suite runs in well under a second.
 
 ---
@@ -981,9 +981,14 @@ The built-in commands, resolved before skill expansion (a skill of the same name
 | `/sessions`         | List saved sessions                                                   |
 | `/resume <session>` | Switch to another session without leaving the loop                    |
 | `/rename <name>`    | Rename the current session                                            |
+| `/model [<name>]`   | Show the model in use, or switch to another one                       |
 | `/quit`             | End the session (same as `exit` or `quit`)                            |
 
 `/clear` wipes the conversation (and, in the fullscreen UI, the screen) but leaves the on-disk transcript alone — it is append-only. `/resume` saves the session you were in first, then clears the screen and resumes the target; the interrupt handlers and the todo list follow the switch.
+
+`/model` is the one built-in that works both bare and with an argument: on its own it reports the model and provider in use, and with a name it switches the model from the next request onward. Only the name on the wire changes — the provider client, its API key and its connection stay as they are, which is exactly what `-m` decides at startup. The new model is written to the session immediately, so `smith resume` comes back on it and `smith sessions`, `smith stats` and the cost column price the run correctly. Switching *provider* is not offered: that needs a different client and a different API key, so it stays a restart with `--provider`.
+
+The name is not validated against a list, because there is no honest offline list of every model a provider will accept — a hardcoded one would reject models released next week. What is checked is what can be: a name must be a single word, and a provider name given by mistake (`/model anthropic`) is named as such. A model that does not exist is rejected by the provider at the next request and reported as a turn error; the session stays open, and another `/model` puts it right.
 
 ### Headless Mode
 
