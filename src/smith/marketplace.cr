@@ -767,7 +767,13 @@ module Smith::Marketplace
       path = Marketplace.registry_path
       return Registry.new unless File.exists?(path)
 
-      Registry.from_json(File.read(path))
+      registry = Registry.from_json(File.read(path))
+      # The names in this file become directory names under ~/.smith — for
+      # `marketplace remove`, a directory it deletes. smith only ever writes
+      # validated names here, but the file is editable, so it is validated on
+      # the way in too rather than trusted for having been ours once.
+      registry.marketplaces.reject! { |name, entry| !Safe.name?(name) || name != entry.name }
+      registry
     rescue JSON::ParseException | IO::Error
       # A registry smith cannot read must not brick `smith plugin list`; the
       # next write replaces it.
@@ -804,13 +810,16 @@ module Smith::Marketplace
 
     property plugin : String
     property marketplace : String
+    # Both forms on purpose: one line a human can read, and the entry exactly
+    # as the marketplace wrote it, so a later phase can tell what it asked for.
     property source : String
+    property source_json : String = "null"
     property version : String
     property description : String?
     property installed_at : String
     property ignored : Array(String) = Array(String).new
 
-    def initialize(@plugin, @marketplace, @source, @version, @description, @installed_at, @ignored)
+    def initialize(@plugin, @marketplace, @source, @source_json, @version, @description, @installed_at, @ignored)
     end
 
     def self.load(dir : String) : InstallMeta?
@@ -981,6 +990,10 @@ module Smith::Marketplace
       end
 
       replaced = @registry[manifest.name]?
+      # Re-adding the same name from a local directory retires the clone the
+      # previous entry left in the cache; nothing would ever look at it again.
+      FileUtils.rm_rf(File.join(cache_dir, manifest.name)) if replaced && !replaced.local? && entry.local?
+
       @registry.marketplaces[manifest.name] = entry
       @registry.save
 
@@ -1147,7 +1160,16 @@ module Smith::Marketplace
 
     private def clone_plugin(url : String, source : Source) : {String, String?}
       target = File.join(cache_dir, ".plugin-#{Random::Secure.hex(6)}")
-      commit = Git.materialize(url, target, ref: Safe.ref!(source.ref), sha: Safe.sha!(source.sha))
+
+      begin
+        commit = Git.materialize(url, target, ref: Safe.ref!(source.ref), sha: Safe.sha!(source.sha))
+      rescue ex
+        # The caller only cleans up what it was handed back, so a fetch that
+        # dies halfway would otherwise leave its half-clone in the cache.
+        FileUtils.rm_rf(target) if File.exists?(target)
+        raise ex
+      end
+
       {target, commit}
     end
 
@@ -1161,7 +1183,8 @@ module Smith::Marketplace
       skipped = Array(String).new
       Marketplace.copy_tree(source_dir, target, skipped)
 
-      meta = InstallMeta.new(entry.name, marketplace_name, entry.source.to_s, version, description, Time.utc.to_rfc3339, ignored)
+      meta = InstallMeta.new(entry.name, marketplace_name, entry.source.to_s, entry.source.raw.to_json,
+        version, description, Time.utc.to_rfc3339, ignored)
       AtomicFile.write(File.join(target, META_FILE), meta.to_pretty_json)
 
       skills, agents = components(marketplace_name, entry.name, target)

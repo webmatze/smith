@@ -346,6 +346,23 @@ describe Smith::Marketplace do
       end
     end
 
+    it "drops a registry entry whose name could be a path" do
+      with_home do
+        FileUtils.mkdir_p(Smith::Marketplace.root_dir)
+        File.write(Smith::Marketplace.registry_path, <<-JSON)
+          {"version": 1, "marketplaces": {
+            "../escape": {"name": "../escape", "source": "x", "added_at": "t", "updated_at": "t"},
+            "renamed": {"name": "something-else", "source": "x", "added_at": "t", "updated_at": "t"},
+            "fine": {"name": "fine", "source": "x", "added_at": "t", "updated_at": "t"}
+          }}
+          JSON
+
+        # `marketplace remove` deletes a directory named after the key, so a
+        # hand-edited file must not be able to name one outside ~/.smith.
+        Smith::Marketplace::Registry.load.names.should eq(["fine"])
+      end
+    end
+
     it "names the marketplaces it knows when asked for one it does not" do
       with_fixture do |temp_dir, repo|
         run("marketplace", "add", repo.work)
