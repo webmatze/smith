@@ -21,7 +21,7 @@ private def with_agents(project : Hash(String, String) = {} of String => String,
     yield temp_dir
   ensure
     previous ? (ENV["SMITH_HOME"] = previous) : ENV.delete("SMITH_HOME")
-    FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+    remove_tree(temp_dir)
   end
 end
 
@@ -101,6 +101,60 @@ describe Smith::Agents::Catalog do
     end
   end
 
+  it "says so when a definition's frontmatter did not read" do
+    warnings = IO::Memory.new
+    with_agents(project: {"broken" => "---\nname: deploy\ndescription: Ships the branch.\n\nYou deploy."}) do |dir|
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      # The declared name never arrived, so the filename is all there is.
+      catalog.agents["broken"]?.should_not be_nil
+      catalog.agents["deploy"]?.should be_nil
+      warnings.to_s.should contain("broken")
+      warnings.to_s.should contain("frontmatter")
+    end
+  end
+
+  # The catalog is built in the CLI's constructor, so a file that raises here
+  # takes every smith command with it.
+  it "warns and skips a definition that is not valid UTF-8" do
+    warnings = IO::Memory.new
+    with_agents do |dir|
+      File.write(File.join(dir, ".smith", "agents", "latin1.md"), Bytes[0x2d, 0x2d, 0x2d, 0x0a, 0xff, 0xfe, 0x0a])
+
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      catalog.agents.should be_empty
+      warnings.to_s.should contain("not valid UTF-8")
+    end
+  end
+
+  # Asking what the entry is raises here, so the guard has to sit around the
+  # stat, not around the read.
+  it "warns and skips a definition that is a symlink loop" do
+    warnings = IO::Memory.new
+    with_agents do |dir|
+      File.symlink("aloop.md", File.join(dir, ".smith", "agents", "aloop.md"))
+
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      catalog.agents.should be_empty
+      warnings.to_s.should contain("aloop.md")
+      warnings.to_s.should contain("could not be read")
+    end
+  end
+
+  it "warns and skips a definition that is a directory" do
+    warnings = IO::Memory.new
+    with_agents do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "agents", "folder.md"))
+
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      catalog.agents.should be_empty
+      warnings.to_s.should contain("not a regular file (directory)")
+    end
+  end
+
   it "ignores anything that is not a .md file" do
     with_agents(project: {"reviewer" => REVIEWER}) do |dir|
       File.write(File.join(dir, ".smith", "agents", "notes.txt"), "not an agent")
@@ -152,6 +206,50 @@ describe "the tools an agent definition resolves to" do
 
       names.should contain("bash")
       names.should contain("write_file")
+    end
+  end
+end
+
+# Global is read first, so a project definition of the same name replaces it. A
+# warning that names the file which lost, without saying it lost, reads as "the
+# agent you are using is broken".
+describe "agent definitions that shadow each other" do
+  it "names the file in effect when the broken one is the one that lost" do
+    warnings = IO::Memory.new
+    with_agents(
+      project: {"dup" => "---\nname: dup\ndescription: The good one.\n---\nP"},
+      global: {"dup" => "---\nname: dup\ndescription: The broken one.\n\nG"}
+    ) do |dir|
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      project_path = File.join(dir, ".smith", "agents", "dup.md")
+      global_path = File.join(dir, "smith-home", "agents", "dup.md")
+
+      catalog.agents["dup"].description.should eq("The good one.")
+      catalog.agents["dup"].path.should eq(project_path)
+      catalog.shadowed["dup"].should eq([global_path])
+
+      warnings.to_s.should contain(global_path)
+      warnings.to_s.should contain("comes from #{project_path}")
+    end
+  end
+
+  it "claims no such thing when the broken file is the one in effect" do
+    warnings = IO::Memory.new
+    with_agents(
+      project: {"dup" => "---\nname: dup\ndescription: The broken one.\n\nP"},
+      global: {"dup" => "---\nname: dup\ndescription: The good one.\n---\nG"}
+    ) do |dir|
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      project_path = File.join(dir, ".smith", "agents", "dup.md")
+      global_path = File.join(dir, "smith-home", "agents", "dup.md")
+
+      catalog.agents["dup"].path.should eq(project_path)
+      warnings.to_s.should contain(project_path)
+      warnings.to_s.should_not contain("comes from")
+      # The file that lost is still accounted for, so the listing can show it.
+      catalog.shadowed["dup"].should eq([global_path])
     end
   end
 end

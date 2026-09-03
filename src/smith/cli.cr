@@ -123,7 +123,9 @@ module Smith
           str.puts "  context [<session>]        Show where the context window is going"
           str.puts "  checkpoints [<session_id>] List the file snapshots taken during a session"
           str.puts "  rewind [<session_id>]      Undo a session's file changes"
-          str.puts "  mcp list | tools <server>  Show the configured MCP servers and their tools\n"
+          str.puts "  mcp list | tools <server>  Show the configured MCP servers and their tools"
+          str.puts "  skills list                Show the skills catalog: name, origin and description"
+          str.puts "  agents list                Show the agent definitions and the model and tools each asks for\n"
           str.puts "Options:"
         end
 
@@ -303,6 +305,10 @@ module Smith
         run_rewind(@args[1]?)
       when "mcp"
         run_mcp(@args[1]?, @args[2]?)
+      when "skills"
+        run_skills(@args[1]?)
+      when "agents"
+        run_agents(@args[1]?)
       when "sandbox"
         show_sandbox
       else
@@ -315,7 +321,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp sandbox stats]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats]
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -1756,6 +1762,115 @@ module Smith
         puts "   #{MCP::Manager.tool_name(handle.name, definition.name)}"
         puts "      #{definition.description.lines.first? || ""}"
       end
+    end
+
+    private def run_skills(subcommand : String?) : Nil
+      case subcommand
+      when nil, "list"
+        list_skills
+      else
+        STDERR.puts "❌ Error: unknown 'smith skills' subcommand #{subcommand.inspect}."
+        STDERR.puts "   Usage: smith skills list"
+        exit(1)
+      end
+    end
+
+    # The catalog exactly as the model gets it: what loaded, which file it came
+    # from, and what its frontmatter says. A skill whose header could not be
+    # read loads anyway, so the warnings below the list are the only place that
+    # says so — without them a `$skill-name` that quietly fails to expand has no
+    # explanation.
+    private def list_skills : Nil
+      catalog = @skills_catalog
+      # Derived from every source at once, so read it once rather than rebuild
+      # it per use.
+      warnings = catalog.warnings
+
+      # Both clauses matter: a file that could not be read at all warns without
+      # ever becoming a skill.
+      if catalog.skills.empty? && warnings.empty?
+        puts "No skills found."
+        puts "   Add one at .smith/skills/<name>/SKILL.md, or globally at #{File.join(Smith.home_dir, "skills")}/<name>/SKILL.md."
+        return
+      end
+
+      puts "🧩 Skills (#{catalog.skills.size}):"
+
+      catalog.skills.values.sort_by(&.name).each do |skill|
+        puts
+        puts "   #{skill.name}"
+        puts "      path:        #{skill.path}"
+        puts "      description: #{skill.description}"
+        # Which source won a name clash is otherwise nowhere visible, and the
+        # warnings below refer to files that may be the ones that lost.
+        catalog.shadowed[skill.name]?.try(&.each { |lost| puts "      shadows:     #{lost}" })
+      end
+
+      unless warnings.empty?
+        puts
+        warnings.each { |warning| puts warning }
+      end
+
+      puts
+      puts "Read from .smith/skills/, .gemini/skills/, .agents/skills/ and #{File.join(Smith.home_dir, "skills")}/."
+      puts "Invoke one in chat with /<name>, or reference it in a prompt as $<name>."
+    end
+
+    private def run_agents(subcommand : String?) : Nil
+      case subcommand
+      when nil, "list"
+        list_agents
+      else
+        STDERR.puts "❌ Error: unknown 'smith agents' subcommand #{subcommand.inspect}."
+        STDERR.puts "   Usage: smith agents list"
+        exit(1)
+      end
+    end
+
+    # Every definition, and what it actually asks for. `tools` is the effective
+    # list, since a definition that names none still gets the set its mode
+    # implies — printing only what the file said would hide the difference.
+    private def list_agents : Nil
+      catalog = @agents_catalog
+
+      if catalog.agents.empty?
+        puts "No agent definitions found."
+        puts "   Add one at .smith/agents/<name>.md, or globally at #{File.join(Smith.home_dir, Agents::Catalog::DIRECTORY_NAME)}/<name>.md."
+        return
+      end
+
+      puts "🤖 Agents (#{catalog.agents.size}):"
+
+      catalog.agents.values.sort_by(&.name).each do |agent|
+        mode = agent.mode.to_s.downcase
+        configured = agent.tools
+
+        # An empty `tools:` is a real configuration — an agent that may call
+        # nothing — and must not render as a blank line.
+        tools =
+          if configured.nil?
+            "#{agent.tool_names.join(", ")} (default for mode '#{mode}')"
+          elsif configured.empty?
+            "(none)"
+          else
+            configured.join(", ")
+          end
+
+        puts
+        puts "   #{agent.name}"
+        puts "      path:        #{agent.path}"
+        puts "      description: #{agent.description}"
+        puts "      provider:    #{agent.provider || "(inherited)"}"
+        puts "      model:       #{agent.model || "(inherited)"}"
+        puts "      mode:        #{mode}"
+        puts "      tools:       #{tools}"
+        # Which source won a name clash is otherwise nowhere visible, and a
+        # warning on stderr may name the file that lost.
+        catalog.shadowed[agent.name]?.try(&.each { |lost| puts "      shadows:     #{lost}" })
+      end
+
+      puts
+      puts "Delegate to one with the agent tool's agent_type, or run one directly: smith --agent <name> run \"…\""
     end
 
     private def cost_for(provider_name : String, model : String, usage : LLM::Usage) : Float64?

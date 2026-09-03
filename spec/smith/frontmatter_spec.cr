@@ -61,4 +61,47 @@ describe Smith::Frontmatter do
 
     doc.body.should eq("intro\n\n---\n\nmore")
   end
+
+  it "flags a header that was opened but never closed" do
+    doc = Smith::Frontmatter.parse("---\nname: reviewer\ndescription: Reviews a diff.\n\nYou are a code reviewer.\n")
+
+    doc.malformed?.should be_true
+    doc["name"].should be_nil
+    doc.body.starts_with?("---").should be_true
+  end
+
+  it "flags a closed header with no key: value line in it" do
+    doc = Smith::Frontmatter.parse("---\njust prose, no colon\n---\nbody")
+
+    doc.malformed?.should be_true
+    doc.body.should eq("body")
+  end
+
+  it "leaves a readable header, and a file with none at all, unflagged" do
+    Smith::Frontmatter.parse("---\nname: x\n---\nbody").malformed?.should be_false
+    Smith::Frontmatter.parse("Just a prompt.").malformed?.should be_false
+    # A key with an empty value is still a key the author wrote.
+    Smith::Frontmatter.parse("---\ntools:\n---\nbody").malformed?.should be_false
+  end
+
+  it "flags a byte-order mark or a space in front of the opening ---" do
+    # Both defeat HEADER, so the header is read as prose and every field is
+    # lost — while the author sees a header they typed correctly.
+    Smith::Frontmatter.parse("\uFEFF---\nname: x\n---\nbody").malformed?.should be_true
+    Smith::Frontmatter.parse("  ---\nname: x\n---\nbody").malformed?.should be_true
+  end
+
+  it "flags a line the header rule cannot read, such as a YAML list" do
+    doc = Smith::Frontmatter.parse("---\nname: x\ntools:\n  - read_file\n  - grep\n---\nbody")
+
+    # The fields that did read are still there; the dropped line is the point.
+    doc["name"].should eq("x")
+    doc.list("tools").should eq([] of String)
+    doc.malformed?.should be_true
+  end
+
+  it "leaves a markdown file that opens with a thematic break alone" do
+    Smith::Frontmatter.parse("---\n\n# Title\n\nprose").malformed?.should be_false
+    Smith::Frontmatter.parse("---\n- one\n- two\n").malformed?.should be_false
+  end
 end

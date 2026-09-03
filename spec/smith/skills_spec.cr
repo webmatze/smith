@@ -39,7 +39,7 @@ describe Smith::Skills::Catalog do
       else
         ENV.delete("SMITH_HOME")
       end
-      FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+      remove_tree(temp_dir)
     end
   end
 end
@@ -57,7 +57,7 @@ private def with_skill(content : String, dir_name : String = "example", &)
     yield Smith::Skills::Catalog.discover(workspace_dir: temp_dir)
   ensure
     prev ? (ENV["SMITH_HOME"] = prev) : ENV.delete("SMITH_HOME")
-    FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+    remove_tree(temp_dir)
   end
 end
 
@@ -73,6 +73,194 @@ describe "skill frontmatter" do
       skill = catalog.skills["from-dir"]
       skill.description.should eq("No description provided.")
       skill.body.should eq("Just a body, no frontmatter.")
+    end
+  end
+end
+
+# A header that did not parse used to be invisible: the skill still loaded, but
+# under the wrong name and without its description, and nothing said so.
+describe "skill frontmatter warnings" do
+  it "warns about a block that is never closed, and still loads the body" do
+    with_skill("---\nname: deploy\ndescription: Ship the branch\n\nRun the deploy script.\n", dir_name: "deploy") do |catalog|
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(File.join("deploy", "SKILL.md"))
+      catalog.warnings.first.should contain("frontmatter")
+
+      # The declared name never arrived, so the directory name is all there is.
+      skill = catalog.skills["deploy"]
+      skill.description.should eq("No description provided.")
+      skill.body.should contain("Run the deploy script.")
+    end
+  end
+
+  it "warns about a skill the model has nothing to choose by" do
+    with_skill("---\nname: bare\n---\nbody", dir_name: "bare") do |catalog|
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain("no description")
+      catalog.skills["bare"].body.should eq("body")
+    end
+  end
+
+  it "stays quiet about a skill that reads fine" do
+    with_skill("---\nname: ok\ndescription: Does a thing.\n---\nbody") do |catalog|
+      catalog.warnings.should be_empty
+    end
+  end
+end
+
+# Writes SKILL.md files into a throwaway workspace and its isolated SMITH_HOME,
+# and hands the workspace back rather than a catalog, so a spec can break a file
+# before discovery runs.
+private def with_skill_files(
+  project : Hash(String, String) = {} of String => String,
+  global : Hash(String, String) = {} of String => String,
+  &
+)
+  temp_dir = File.join(Dir.tempdir, "smith_skill_cat_#{Random::Secure.hex(4)}")
+  home = File.join(temp_dir, "smith-home")
+
+  project.each { |name, content| write_skill_file(File.join(temp_dir, ".smith", "skills", name), content) }
+  global.each { |name, content| write_skill_file(File.join(home, "skills", name), content) }
+
+  previous = ENV["SMITH_HOME"]?
+  ENV["SMITH_HOME"] = home
+  begin
+    yield temp_dir
+  ensure
+    previous ? (ENV["SMITH_HOME"] = previous) : ENV.delete("SMITH_HOME")
+    remove_tree(temp_dir)
+  end
+end
+
+private def write_skill_file(dir : String, content : String) : String
+  FileUtils.mkdir_p(dir)
+  path = File.join(dir, "SKILL.md")
+  File.write(path, content)
+  path
+end
+
+private def project_skill_path(dir : String, name : String) : String
+  File.join(dir, ".smith", "skills", name, "SKILL.md")
+end
+
+private def global_skill_path(dir : String, name : String) : String
+  File.join(dir, "smith-home", "skills", name, "SKILL.md")
+end
+
+# Global is read first, so a project file of the same name replaces it. A
+# warning that names the file which lost, without saying it lost, reads as
+# "the skill you are using is broken".
+describe "skills that shadow each other" do
+  it "names the file in effect when the broken one is the one that lost" do
+    with_skill_files(
+      project: {"dup" => "---\nname: dup\ndescription: The good one.\n---\nproject body"},
+      global: {"dup" => "---\nname: dup\ndescription: The broken one.\n\nglobal body"}
+    ) do |dir|
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills["dup"].description.should eq("The good one.")
+      catalog.skills["dup"].path.should eq(project_skill_path(dir, "dup"))
+      catalog.shadowed["dup"].should eq([global_skill_path(dir, "dup")])
+
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(global_skill_path(dir, "dup"))
+      catalog.warnings.first.should contain("comes from #{project_skill_path(dir, "dup")}")
+    end
+  end
+
+  it "claims no such thing when the broken file is the one in effect" do
+    with_skill_files(
+      project: {"dup" => "---\nname: dup\ndescription: The broken one.\n\nproject body"},
+      global: {"dup" => "---\nname: dup\ndescription: The good one.\n---\nglobal body"}
+    ) do |dir|
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills["dup"].path.should eq(project_skill_path(dir, "dup"))
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(project_skill_path(dir, "dup"))
+      catalog.warnings.first.should_not contain("comes from")
+      # The file that lost is still accounted for, so the listing can show it.
+      catalog.shadowed["dup"].should eq([global_skill_path(dir, "dup")])
+    end
+  end
+end
+
+# The catalog is built in the CLI's constructor, so a file that raises here
+# takes every smith command with it, `smith -v` included.
+describe "skills that cannot be read at all" do
+  it "warns and skips a SKILL.md that is a directory" do
+    with_skill_files do |dir|
+      # A directory in its place: unreadable for every user, root included,
+      # which a mode-000 file is not.
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills", "folder", "SKILL.md"))
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(project_skill_path(dir, "folder"))
+      catalog.warnings.first.should contain("not a regular file (directory)")
+    end
+  end
+
+  # `File.read` on a FIFO blocks until something writes to it, so this is the
+  # one shape that hangs rather than crashes — no output, no timeout, nothing
+  # saying why. It must never be opened.
+  it "warns and skips a SKILL.md that is a named pipe" do
+    with_skill_files do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills", "fifo"))
+      status = Process.run("mkfifo", [project_skill_path(dir, "fifo")])
+      status.success?.should be_true
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(project_skill_path(dir, "fifo"))
+      catalog.warnings.first.should contain("not a regular file")
+    end
+  end
+
+  # A symlink loop is the shape where asking *what* the entry is raises, so a
+  # guard that only rescues the read is one level too late.
+  it "warns and skips a SKILL.md that is a symlink loop" do
+    with_skill_files do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills", "loop"))
+      File.symlink("SKILL.md", project_skill_path(dir, "loop"))
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(project_skill_path(dir, "loop"))
+      catalog.warnings.first.should contain("could not be read")
+    end
+  end
+
+  it "warns and skips a skill directory that is a symlink loop" do
+    with_skill_files do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills"))
+      File.symlink("loopdir", File.join(dir, ".smith", "skills", "loopdir"))
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain("could not be read")
+    end
+  end
+
+  it "warns and skips a SKILL.md that is not valid UTF-8" do
+    with_skill_files do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".smith", "skills", "latin1"))
+      File.write(project_skill_path(dir, "latin1"), Bytes[0x2d, 0x2d, 0x2d, 0x0a, 0xff, 0xfe, 0x0a])
+
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+
+      catalog.skills.should be_empty
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain(project_skill_path(dir, "latin1"))
+      catalog.warnings.first.should contain("not valid UTF-8")
     end
   end
 end
