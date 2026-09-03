@@ -21,7 +21,7 @@ private def with_agents(project : Hash(String, String) = {} of String => String,
     yield temp_dir
   ensure
     previous ? (ENV["SMITH_HOME"] = previous) : ENV.delete("SMITH_HOME")
-    FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+    remove_tree(temp_dir)
   end
 end
 

@@ -39,7 +39,7 @@ describe Smith::Skills::Catalog do
       else
         ENV.delete("SMITH_HOME")
       end
-      FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+      remove_tree(temp_dir)
     end
   end
 end
@@ -57,7 +57,7 @@ private def with_skill(content : String, dir_name : String = "example", &)
     yield Smith::Skills::Catalog.discover(workspace_dir: temp_dir)
   ensure
     prev ? (ENV["SMITH_HOME"] = prev) : ENV.delete("SMITH_HOME")
-    FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+    remove_tree(temp_dir)
   end
 end
 
@@ -128,7 +128,7 @@ private def with_skill_files(
     yield temp_dir
   ensure
     previous ? (ENV["SMITH_HOME"] = previous) : ENV.delete("SMITH_HOME")
-    FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+    remove_tree(temp_dir)
   end
 end
 
