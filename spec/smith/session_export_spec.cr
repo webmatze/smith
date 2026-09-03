@@ -1,0 +1,358 @@
+require "../spec_helper"
+require "../../src/smith/session_export"
+
+private def with_store(&)
+  temp_dir = File.join(Dir.tempdir, "smith_export_test_#{Random::Secure.hex(4)}")
+  begin
+    yield Smith::Session::Store.new(base_dir: temp_dir)
+  ensure
+    FileUtils.rm_rf(temp_dir) if Dir.exists?(temp_dir)
+  end
+end
+
+# A session with one tool call and its result — the shape every real run has.
+private def seed_session(store : Smith::Session::Store, provider = "anthropic", model = "claude-opus-5")
+  session = store.create(model: model, provider: provider, cwd: "/tmp/project")
+  session.messages << Smith::LLM::Message.user("why does this test fail on Linux?")
+  session.messages << Smith::LLM::Message.assistant_with_blocks([
+    Smith::LLM::ContentBlock.text("Let me look at the spec."),
+    Smith::LLM::ContentBlock.tool_use("call-1", "bash", JSON.parse(%({"command": "crystal spec"}))),
+  ])
+  session.messages << Smith::LLM::Message.tool_results([
+    Smith::LLM::ContentBlock.tool_result("call-1", "1019 examples, 0 failures", false),
+  ])
+  session.usage = Smith::LLM::Usage.new(1_000_000, 100_000, 1_100_000)
+  store.save(session)
+  session
+end
+
+describe Smith::SessionExport do
+  it "renders a run as Markdown: name, roles, tool calls, cost" do
+    with_store do |store|
+      session = seed_session(store)
+
+      markdown = Smith::SessionExport.build(store, session.reference).to_markdown
+
+      markdown.should contain("# #{session.name}")
+      markdown.should contain("`#{session.id}`")
+      markdown.should contain("anthropic / claude-opus-5")
+      markdown.should contain("`/tmp/project`")
+      markdown.should contain("### 1 · User")
+      markdown.should contain("why does this test fail on Linux?")
+      markdown.should contain("### 2 · Assistant")
+      markdown.should contain("**Tool call: `bash`**")
+      markdown.should contain(%({"command":"crystal spec"}))
+      markdown.should contain("### 3 · Tool results")
+      markdown.should contain("1019 examples, 0 failures")
+      # 1M in at $5 plus 100k out at $25 = $7.50
+      markdown.should contain("**Cost:** $7.50")
+    end
+  end
+
+  it "resolves a session by id as well as by name, like resume does" do
+    with_store do |store|
+      session = seed_session(store)
+
+      Smith::SessionExport.build(store, session.id).id.should eq(session.id)
+      Smith::SessionExport.build(store, session.name.not_nil!).id.should eq(session.id)
+    end
+  end
+
+  it "says n/a for a model whose rate is unknown rather than guessing" do
+    with_store do |store|
+      session = seed_session(store, provider: "openrouter", model: "some/unlisted-model")
+
+      document = Smith::SessionExport.build(store, session.reference)
+
+      document.cost.should be_nil
+      document.to_markdown.should contain("**Cost:** n/a")
+    end
+  end
+
+  it "honours [pricing] overrides the way the COST column does" do
+    with_store do |store|
+      session = seed_session(store, provider: "openrouter", model: "some/unlisted-model")
+      overrides = Smith::Pricing::Overrides{
+        "openrouter/some/unlisted-model" => Smith::Pricing::Rates.new(input: 1.0, output: 2.0),
+      }
+
+      document = Smith::SessionExport.build(store, session.reference, overrides)
+
+      document.cost.should eq(1.2)
+    end
+  end
+
+  it "prefers the raw transcript over the compaction-shortened session file, and says so" do
+    with_store do |store|
+      session = seed_session(store)
+
+      log = Smith::TranscriptLog.new(store.session_dir(session.id))
+      log.append(session.messages)
+      log.append([Smith::LLM::Message.user("a turn compaction later dropped")])
+
+      # What compaction does to the session file: the working history shrinks.
+      session.messages = [Smith::LLM::Message.user("(summary of the conversation so far)")]
+      store.save(session)
+
+      document = Smith::SessionExport.build(store, session.reference)
+
+      document.source.transcript?.should be_true
+      document.messages.size.should eq(4)
+      markdown = document.to_markdown
+      markdown.should contain("`transcript.jsonl`")
+      markdown.should contain("the untouched record")
+      markdown.should contain("session file: 1")
+      markdown.should contain("a turn compaction later dropped")
+    end
+  end
+
+  it "falls back to the session file when there is no transcript, and says so" do
+    with_store do |store|
+      session = seed_session(store)
+
+      document = Smith::SessionExport.build(store, session.reference)
+
+      document.source.session?.should be_true
+      document.warnings.should be_empty
+      markdown = document.to_markdown
+      markdown.should contain("`session.json`")
+      markdown.should contain("no raw transcript")
+    end
+  end
+
+  it "warns when the transcript is the shorter record, since a log write can fail mid-run" do
+    with_store do |store|
+      session = seed_session(store)
+
+      log = Smith::TranscriptLog.new(store.session_dir(session.id))
+      log.append([session.messages.first])
+
+      document = Smith::SessionExport.build(store, session.reference)
+
+      document.source.transcript?.should be_true
+      document.warnings.join("\n").should contain("cut short")
+    end
+  end
+
+  it "skips a truncated transcript line instead of aborting the export" do
+    with_store do |store|
+      session = seed_session(store)
+
+      log = Smith::TranscriptLog.new(store.session_dir(session.id))
+      log.append([Smith::LLM::Message.user("first")])
+      File.open(log.path, "a") { |f| f.puts %({"role":"assistant","content":[{"type":) }
+      log.append([Smith::LLM::Message.user("third")])
+
+      document = Smith::SessionExport.build(store, session.reference)
+
+      document.messages.map { |m| m.content.first.text }.should eq(["first", "third"])
+    end
+  end
+
+  it "exports from the transcript when the session file is gone" do
+    with_store do |store|
+      session = seed_session(store)
+
+      log = Smith::TranscriptLog.new(store.session_dir(session.id))
+      log.append(session.messages)
+      File.delete(File.join(store.session_dir(session.id), "session.json"))
+
+      document = Smith::SessionExport.build(store, session.reference)
+
+      document.source.transcript?.should be_true
+      document.messages.size.should eq(3)
+      document.warnings.join("\n").should contain("No session file")
+      # The index still knows the name, the model and what it cost.
+      document.name.should eq(session.name)
+      document.to_markdown.should contain("**Cost:** $7.50")
+    end
+  end
+
+  it "exports from the transcript when the session file will not parse" do
+    with_store do |store|
+      session = seed_session(store)
+
+      log = Smith::TranscriptLog.new(store.session_dir(session.id))
+      log.append(session.messages)
+      File.write(File.join(store.session_dir(session.id), "session.json"), "{ this is not json")
+
+      document = Smith::SessionExport.build(store, session.id)
+
+      document.source.transcript?.should be_true
+      document.warnings.join("\n").should contain("could not be read")
+    end
+  end
+
+  it "survives a damaged index: one bad entry must not abort the export" do
+    with_store do |store|
+      session = seed_session(store)
+      # One entry missing required fields makes the whole index unparseable.
+      File.write(store.index_path, %([{"id": "session-broken"}]))
+
+      document = Smith::SessionExport.build(store, session.id)
+
+      document.messages.size.should eq(3)
+      # Everything the index would have said is in the session file too.
+      document.name.should eq(session.name)
+      document.provider.should eq("anthropic")
+      document.to_markdown.should contain("**Cost:** $7.50")
+    end
+  end
+
+  it "exports a directory that lost both its session file and its index entry" do
+    with_store do |store|
+      session = seed_session(store)
+
+      log = Smith::TranscriptLog.new(store.session_dir(session.id))
+      log.append(session.messages)
+      File.delete(File.join(store.session_dir(session.id), "session.json"))
+      File.write(store.index_path, %([{"id": "session-broken"}]))
+
+      document = Smith::SessionExport.build(store, session.id)
+
+      document.source.transcript?.should be_true
+      document.messages.size.should eq(3)
+      # Nothing but the id is known any more, and the export says as much.
+      document.to_markdown.should contain("unknown / unknown")
+      document.to_markdown.should contain("**Cost:** n/a")
+
+      parsed = JSON.parse(document.to_json_document)
+      parsed["usage"].raw.should be_nil
+      parsed["cost_usd"].raw.should be_nil
+    end
+  end
+
+  it "refuses a reference that names nothing, with a message and no stack trace" do
+    with_store do |store|
+      expect_raises(ArgumentError, /not found/) do
+        Smith::SessionExport.build(store, "no-such-session")
+      end
+    end
+  end
+
+  it "says so when a session directory holds neither a session file nor a transcript" do
+    with_store do |store|
+      session = seed_session(store)
+      File.delete(File.join(store.session_dir(session.id), "session.json"))
+
+      expect_raises(ArgumentError, /nothing to export/) do
+        Smith::SessionExport.build(store, session.id)
+      end
+    end
+  end
+
+  it "renders an image as a placeholder, never as inlined base64" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      base64 = "iVBORw0KGgo#{"A" * 4_000}"
+      session.messages << Smith::LLM::Message.new(Smith::LLM::Role::User, [
+        Smith::LLM::ContentBlock.text("what is on this screenshot?"),
+        Smith::LLM::ContentBlock.image("image/png", base64, "screenshot.png"),
+      ])
+      store.save(session)
+
+      # Loading is what puts the bytes back into the block, from media/.
+      loaded = store.load(session.id)
+      loaded.messages.last.content.last.data.should_not be_nil
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.should contain("[Image: screenshot.png (image/png)")
+      markdown.should_not contain(base64)
+      markdown.size.should be < 2_000
+    end
+  end
+
+  it "abbreviates a huge tool result instead of pasting a whole build log" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.tool_results([
+        Smith::LLM::ContentBlock.tool_result("call-1", "x" * 50_000, false),
+      ])
+      store.save(session)
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.should contain("abbreviated; 50000 characters in total")
+      markdown.size.should be < 5_000
+    end
+  end
+
+  it "fences tool output that itself contains backticks so the Markdown stays intact" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.tool_results([
+        Smith::LLM::ContentBlock.tool_result("call-1", "```crystal\nputs 1\n```", false),
+      ])
+      store.save(session)
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.should contain("````\n```crystal")
+    end
+  end
+
+  it "marks a synthetic user message as smith's own, not something the user typed" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.user("Continue.", synthetic: true)
+      store.save(session)
+
+      Smith::SessionExport.build(store, session.id).to_markdown.should contain("User _(continuation by smith)_")
+    end
+  end
+
+  it "renders thinking and an error result without losing either" do
+    with_store do |store|
+      session = store.create(model: "claude-opus-5", provider: "anthropic")
+      session.messages << Smith::LLM::Message.assistant_with_blocks([
+        Smith::LLM::ContentBlock.thinking("The spec is platform dependent.", "sig"),
+      ])
+      session.messages << Smith::LLM::Message.tool_results([
+        Smith::LLM::ContentBlock.tool_result("call-1", "No such file", true),
+      ])
+      store.save(session)
+
+      markdown = Smith::SessionExport.build(store, session.id).to_markdown
+
+      markdown.should contain("**Thinking**")
+      markdown.should contain("> The spec is platform dependent.")
+      markdown.should contain("**Tool result** (`call-1`) — error")
+    end
+  end
+
+  it "exports the structured log as one JSON document, carrying no base64" do
+    with_store do |store|
+      session = seed_session(store)
+      session.todos = [Smith::TodoList::Item.new("Fix the spec", Smith::TodoList::Status::Completed)]
+      session.messages << Smith::LLM::Message.new(Smith::LLM::Role::User, [
+        Smith::LLM::ContentBlock.image("image/png", "iVBORw0KGgo#{"A" * 2_000}", "shot.png"),
+      ])
+      store.save(session)
+
+      raw = Smith::SessionExport.build(store, session.id).to_json_document
+      parsed = JSON.parse(raw)
+
+      parsed["id"].as_s.should eq(session.id)
+      parsed["name"].as_s.should eq(session.name)
+      parsed["source"].as_s.should eq("session.json")
+      parsed["cost_usd"].as_f.should be_close(7.5, 0.001)
+      parsed["message_count"].as_i.should eq(4)
+      parsed["todos"][0]["content"].as_s.should eq("Fix the spec")
+      parsed["messages"].as_a.size.should eq(4)
+      raw.should_not contain("AAAAAAAA")
+      # Round-trips into the type it came from, so a tool can read it back.
+      Array(Smith::LLM::Message).from_json(parsed["messages"].to_json).size.should eq(4)
+    end
+  end
+
+  it "reports an unknown cost as null in JSON, not as zero" do
+    with_store do |store|
+      session = seed_session(store, provider: "openrouter", model: "some/unlisted-model")
+
+      parsed = JSON.parse(Smith::SessionExport.build(store, session.id).to_json_document)
+
+      parsed["cost_usd"].raw.should be_nil
+    end
+  end
+end

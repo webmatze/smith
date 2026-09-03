@@ -3,6 +3,7 @@ require "./llm"
 require "./tools"
 require "./agent"
 require "./session"
+require "./session_export"
 require "./stats"
 require "./transcript_log"
 require "./project_ctx"
@@ -61,6 +62,7 @@ module Smith
     @force : Bool = false
     @older_than : String? = nil
     @keep_last : Int32 = 0
+    @out_path : String? = nil
     @mode : Mode? = nil
     @plan : PlanSession? = nil
     @real_approver : Tools::Approver? = nil
@@ -119,6 +121,7 @@ module Smith
           str.puts "  continue [<prompt>]        Continue the latest session; same as -c"
           str.puts "  sessions, list             List all saved local chat sessions"
           str.puts "  sessions delete <ref>…     Delete sessions (name or id), files and all"
+          str.puts "  sessions export <ref>      Write a session as Markdown (--json, --out <path>)"
           str.puts "  sessions prune             Drop sessions older than --older-than (30d), keeping --keep-last"
           str.puts "  stats                      Total cost and tokens across all saved sessions"
           str.puts "  rename <session> <name>    Give a session a name you can resume by"
@@ -177,6 +180,10 @@ module Smith
           @older_than = value
         end
 
+        opts.on("--out PATH", "sessions export: write the export to this file instead of stdout") do |value|
+          @out_path = value
+        end
+
         opts.on("--keep-last N", "sessions prune: keep the N most recent regardless of age") do |value|
           count = value.to_i?
           if count.nil? || count < 0
@@ -219,7 +226,7 @@ module Smith
           @mode = Mode::Plan
         end
 
-        opts.on("--json", "Emit JSON Lines on stdout (headless 'run' only)") do
+        opts.on("--json", "Emit JSON on stdout: JSON Lines for headless 'run', one document for 'sessions export'") do
           @json_output = true
         end
 
@@ -253,6 +260,7 @@ module Smith
           puts "  • Plan Mode: --plan (or [defaults] mode = \"plan\") researches first and asks before changing anything."
           puts "    In chat, /plan and /normal switch at runtime; these built-ins win over a skill of the same name."
           puts "  • Sessions: /rename <name> and /context work in chat; costs are shown when the model's price is known."
+          puts "    'smith sessions export <ref>' writes a run as Markdown (or --json), to stdout or --out <path>."
           exit
         end
       end
@@ -262,9 +270,11 @@ module Smith
       command = @args.first? || "chat"
 
       # JSON Lines only make sense for a single headless run; anything else
-      # would silently do something other than what was asked.
-      if @json_output && !headless?(command)
-        STDERR.puts "❌ Error: --json is only supported for headless runs ('smith run')."
+      # would silently do something other than what was asked. `sessions
+      # export` is the exception — it answers in JSON too, as one document
+      # rather than a stream of events.
+      if @json_output && !headless?(command) && !sessions_export?(command)
+        STDERR.puts "❌ Error: --json is only supported for headless runs ('smith run') and 'smith sessions export'."
         exit(1)
       end
 
@@ -298,6 +308,8 @@ module Smith
         case @args[1]?
         when "delete"
           delete_sessions(@args[2..-1]?)
+        when "export"
+          export_session(@args[2]?)
         when "prune"
           prune_sessions
         else
@@ -336,6 +348,10 @@ module Smith
     end
 
     KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update]
+
+    private def sessions_export?(command : String) : Bool
+      (command == "sessions" || command == "list") && @args[1]? == "export"
+    end
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -2051,6 +2067,45 @@ module Smith
       errors.each { |message| STDERR.puts "❌ #{message}" }
 
       exit(1) unless errors.empty?
+    end
+
+    # `smith sessions export <ref>` — a run you can take with you: Markdown to
+    # read, `--json` for the structured log, `--out` for a file (#95).
+    #
+    # Nothing on this path builds a provider or needs an API key: an export is
+    # a view over files that are already on disk.
+    private def export_session(reference : String?) : Nil
+      if reference.nil?
+        STDERR.puts "Error: 'smith sessions export' needs a session (name or id)."
+        STDERR.puts "Example: smith sessions export my-refactor --out run.md"
+        exit(1)
+      end
+
+      document = begin
+        SessionExport.build(@session_store, reference, @config.pricing)
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
+
+      # Damage goes to stderr so stdout stays the document and can be piped.
+      document.warnings.each { |warning| STDERR.puts "⚠️  #{warning}" }
+
+      content = @json_output ? document.to_json_document : document.to_markdown
+
+      if path = @out_path
+        begin
+          # Atomic, like everything else smith writes: half an export is worse
+          # than none, and 0600 matches the session it came from.
+          AtomicFile.write(path, content)
+        rescue ex : File::Error | IO::Error
+          STDERR.puts "❌ Could not write the export to #{path}: #{ex.message}"
+          exit(1)
+        end
+        puts "📄 Exported #{document.reference} (#{document.messages.size} message(s)) to #{path}"
+      else
+        puts content
+      end
     end
 
     # `smith sessions prune` — drops every session last updated before the

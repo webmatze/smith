@@ -356,8 +356,10 @@ module Smith::Session
     end
 
     # Resolution without loading: works on the index and the filesystem, so a
-    # session whose file is gone (or half-written) can still be named.
-    private def resolve_id(reference : String) : String
+    # session whose file is gone (or half-written) can still be named. Public
+    # because `sessions export` needs the id of a session it may not be able to
+    # load — the raw transcript beside it is still exportable.
+    def resolve_id(reference : String) : String
       wanted = reference.strip
       entries = list
 
