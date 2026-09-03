@@ -15,14 +15,19 @@ module Smith::Skills
   end
 
   class Catalog
+    # A file that did not read the way its author meant it to. Held as data
+    # rather than as a finished line because whether the file is the one in
+    # effect is only known once every source has been read.
+    private record Problem, name : String, path : String, reason : String
+
     getter skills = Hash(String, Skill).new
 
-    # Files that loaded, but not the way their author meant them to. Collected
-    # rather than written to a `warn_io` the way agents do it: the CLI builds
-    # both catalogs in its constructor, so an IO would print before every
-    # command's own output — `smith skills list` is where these belong, and it
-    # renders them from here.
-    getter warnings = Array(String).new
+    # Per skill name, the paths that lost the clash. Sources are read global
+    # first, so a project file of the same name replaces a global one — and
+    # which file won was, until now, nowhere visible.
+    getter shadowed = Hash(String, Array(String)).new
+
+    @problems = Array(Problem).new
 
     def self.discover(workspace_dir : String = Dir.current) : Catalog
       catalog = Catalog.new
@@ -45,6 +50,24 @@ module Smith::Skills
       catalog
     end
 
+    # Rendered by `smith skills list`. Collected rather than written to a
+    # `warn_io` the way agents do it: the CLI builds both catalogs in its
+    # constructor, so an IO would print before every command's own output.
+    #
+    # Built here rather than while parsing, because a warning is only honest
+    # once it can say whether the file it names is the one in effect. Warning
+    # about a shadowed file without saying so reads as "your working skill is
+    # broken".
+    def warnings : Array(String)
+      @problems.map do |problem|
+        line = "⚠️  Skill '#{problem.name}' (#{problem.path}): #{problem.reason}"
+        winner = @skills[problem.name]?
+        next line if winner.nil? || winner.path == problem.path
+
+        "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
+      end
+    end
+
     def load_skills_dir(dir : String)
       return unless Dir.exists?(dir)
 
@@ -55,30 +78,63 @@ module Smith::Skills
         skill_file = File.join(skill_dir, "SKILL.md")
         next unless File.exists?(skill_file)
 
-        skill = parse_skill_file(child, skill_file)
-        @skills[skill.name] = skill
+        load_skill_file(child, skill_file)
       end
     end
 
-    private def parse_skill_file(dir_name : String, file_path : String) : Skill
-      document = Frontmatter.parse(File.read(file_path))
+    private def load_skill_file(dir_name : String, file_path : String) : Nil
+      content = read_skill_file(dir_name, file_path)
+      return if content.nil?
+
+      document = Frontmatter.parse(content)
       name = document["name"] || dir_name
       description = document["description"]
 
       # Loaded either way — a body still expands, which is the point of a skill
       # — but a header nobody read is a header nobody can trust.
       if document.malformed?
-        @warnings << "⚠️  Skill '#{name}' (#{file_path}): the frontmatter block could not be read; name and description were ignored."
+        @problems << Problem.new(name, file_path, frontmatter_reason(document))
       elsif description.nil?
-        @warnings << "⚠️  Skill '#{name}' (#{file_path}) has no description; the model will not know when to use it."
+        @problems << Problem.new(name, file_path, "no description in the frontmatter; the model will not know when to use it.")
       end
 
-      Skill.new(
+      if previous = @skills[name]?
+        (@shadowed[name] ||= Array(String).new) << previous.path
+      end
+
+      @skills[name] = Skill.new(
         name: name,
         description: description || "No description provided.",
         body: document.body,
         path: file_path
       )
+    end
+
+    # Two shapes of broken header, and they need different words: one where
+    # nothing at all was read, one where a single line was dropped.
+    private def frontmatter_reason(document : Frontmatter::Document) : String
+      if document.empty?
+        "the frontmatter could not be read — a header opens and closes with a plain '---' line and holds 'key: value' lines; name and description were ignored."
+      else
+        "a line in the frontmatter is not 'key: value' and was dropped — a value written as a YAML list arrives as no value at all."
+      end
+    end
+
+    # A file that cannot be read must not take the process with it. The catalogs
+    # are built before the CLI knows which command is running, so one unreadable
+    # SKILL.md under .smith/skills/ would otherwise brick every smith command,
+    # `smith -v` included.
+    private def read_skill_file(dir_name : String, file_path : String) : String?
+      content = File.read(file_path)
+      # PCRE refuses to match against bytes that are not UTF-8, so a file saved
+      # as Latin-1 raises out of the parser rather than parsing badly.
+      return content if content.valid_encoding?
+
+      @problems << Problem.new(dir_name, file_path, "the file is not valid UTF-8; it was skipped.")
+      nil
+    rescue ex : IO::Error
+      @problems << Problem.new(dir_name, file_path, "the file could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      nil
     end
 
     def summary_prompt : String?

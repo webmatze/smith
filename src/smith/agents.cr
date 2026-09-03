@@ -66,7 +66,7 @@ module Smith::Agents
         next unless File.file?(path)
 
         definition = parse(path, File.basename(child, ".md"), warn_io)
-        @agents[definition.name] = definition
+        @agents[definition.name] = definition if definition
       end
     end
 
@@ -87,14 +87,20 @@ module Smith::Agents
       end
     end
 
-    private def parse(path : String, filename : String, warn_io : IO) : Definition
-      document = Frontmatter.parse(File.read(path))
+    private def parse(path : String, filename : String, warn_io : IO) : Definition?
+      content = read_definition(path, warn_io)
+      return nil if content.nil?
+
+      document = Frontmatter.parse(content)
       name = document["name"] || filename
 
       description = document["description"]
-      if description.nil?
-        # Loaded anyway — a usable agent with a poor listing beats a missing
-        # one — but the model has nothing to choose it by.
+      # Loaded anyway — a usable agent with a poor listing beats a missing one —
+      # but a header that did not read costs the agent its name and its
+      # description, and puts the raw `---` lines in the system prompt.
+      if document.malformed?
+        warn_io.puts "⚠️  Agent '#{name}' (#{path}): the frontmatter could not be read as 'key: value' lines; what it declared was ignored."
+      elsif description.nil?
         warn_io.puts "⚠️  Agent '#{name}' (#{path}) has no description; the model will not know when to use it."
       end
 
@@ -108,6 +114,21 @@ module Smith::Agents
         provider: document["provider"],
         mode: Subagents::Mode.from_string(document["mode"] || "work")
       )
+    end
+
+    # One unreadable file must not take every smith command with it: the catalog
+    # is built in the CLI's constructor, before it knows what was asked for.
+    private def read_definition(path : String, warn_io : IO) : String?
+      content = File.read(path)
+      # PCRE refuses to match against bytes that are not UTF-8, so a file saved
+      # as Latin-1 raises out of the parser rather than parsing badly.
+      return content if content.valid_encoding?
+
+      warn_io.puts "⚠️  Agent definition #{path} is not valid UTF-8; it was skipped."
+      nil
+    rescue ex : IO::Error
+      warn_io.puts "⚠️  Agent definition #{path} could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped."
+      nil
     end
   end
 end

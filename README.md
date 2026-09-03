@@ -727,7 +727,18 @@ smith agents list         # name, file, description, provider, model, mode and t
 smith skills list         # the same for the skills catalog, warnings included
 ```
 
-`smith agents list` prints the *effective* tool list, so a definition that names no `tools` shows the set its `mode` implies rather than a blank. `smith skills list` names every `SKILL.md` whose frontmatter could not be read — those still load, but under their directory name and without their description, which is otherwise invisible until `$skill-name` quietly fails to expand.
+`smith agents list` prints the *effective* tool list, so a definition that names no `tools` shows the set its `mode` implies rather than a blank, and one that declares an empty `tools:` shows `(none)`.
+
+`smith skills list` adds a `shadows:` line wherever two sources define the same name, so which file is actually in effect is visible rather than inferred. Below the list it names every `SKILL.md` that did not read as written:
+
+| What is wrong | What happens |
+|---|---|
+| The `---` block is never closed, or a byte-order mark or space sits in front of it | The whole header is read as prose: the skill loads under its **directory** name, without its description |
+| A line in the block is not `key: value` — a `tools:` over a YAML list, say | That line is dropped, so the value arrives empty |
+| No `description:` at all | The skill loads, but the model has nothing to choose it by |
+| The file cannot be opened, or is not UTF-8 | The file is skipped — and, since the catalogs are built before smith knows what was asked for, it no longer aborts every command |
+
+A file that opens with a `---` thematic break followed by prose is markdown, not a broken header, and is left alone.
 
 #### Two rules that still apply
 

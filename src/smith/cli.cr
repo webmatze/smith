@@ -1783,6 +1783,8 @@ module Smith
     private def list_skills : Nil
       catalog = @skills_catalog
 
+      # Both clauses matter: a file that could not be read at all warns without
+      # ever becoming a skill.
       if catalog.skills.empty? && catalog.warnings.empty?
         puts "No skills found."
         puts "   Add one at .smith/skills/<name>/SKILL.md, or globally at #{File.join(Smith.home_dir, "skills")}/<name>/SKILL.md."
@@ -1796,6 +1798,9 @@ module Smith
         puts "   #{skill.name}"
         puts "      path:        #{skill.path}"
         puts "      description: #{skill.description}"
+        # Which source won a name clash is otherwise nowhere visible, and the
+        # warnings below refer to files that may be the ones that lost.
+        catalog.shadowed[skill.name]?.try(&.each { |lost| puts "      shadows:     #{lost}" })
       end
 
       unless catalog.warnings.empty?
@@ -1835,7 +1840,18 @@ module Smith
 
       catalog.agents.values.sort_by(&.name).each do |agent|
         mode = agent.mode.to_s.downcase
-        tools = agent.tools ? "" : " (default for mode '#{mode}')"
+        configured = agent.tools
+
+        # An empty `tools:` is a real configuration — an agent that may call
+        # nothing — and must not render as a blank line.
+        tools =
+          if configured.nil?
+            "#{agent.tool_names.join(", ")} (default for mode '#{mode}')"
+          elsif configured.empty?
+            "(none)"
+          else
+            configured.join(", ")
+          end
 
         puts
         puts "   #{agent.name}"
@@ -1844,7 +1860,7 @@ module Smith
         puts "      provider:    #{agent.provider || "(inherited)"}"
         puts "      model:       #{agent.model || "(inherited)"}"
         puts "      mode:        #{mode}"
-        puts "      tools:       #{agent.tool_names.join(", ")}#{tools}"
+        puts "      tools:       #{tools}"
       end
 
       puts

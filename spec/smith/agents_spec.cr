@@ -101,6 +101,33 @@ describe Smith::Agents::Catalog do
     end
   end
 
+  it "says so when a definition's frontmatter did not read" do
+    warnings = IO::Memory.new
+    with_agents(project: {"broken" => "---\nname: deploy\ndescription: Ships the branch.\n\nYou deploy."}) do |dir|
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      # The declared name never arrived, so the filename is all there is.
+      catalog.agents["broken"]?.should_not be_nil
+      catalog.agents["deploy"]?.should be_nil
+      warnings.to_s.should contain("broken")
+      warnings.to_s.should contain("frontmatter")
+    end
+  end
+
+  # The catalog is built in the CLI's constructor, so a file that raises here
+  # takes every smith command with it.
+  it "warns and skips a definition that is not valid UTF-8" do
+    warnings = IO::Memory.new
+    with_agents do |dir|
+      File.write(File.join(dir, ".smith", "agents", "latin1.md"), Bytes[0x2d, 0x2d, 0x2d, 0x0a, 0xff, 0xfe, 0x0a])
+
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      catalog.agents.should be_empty
+      warnings.to_s.should contain("not valid UTF-8")
+    end
+  end
+
   it "ignores anything that is not a .md file" do
     with_agents(project: {"reviewer" => REVIEWER}) do |dir|
       File.write(File.join(dir, ".smith", "agents", "notes.txt"), "not an agent")

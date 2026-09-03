@@ -7,17 +7,20 @@ module Smith
   module Frontmatter
     HEADER = /\A---\s*\n(.*?)\n---\s*\n?(.*)\z/m
     # The opening delimiter alone, which is what separates "the author meant to
-    # write a header" from "this file simply has none".
-    OPENING = /\A---[ \t]*\r?\n/
+    # write a header" from "this file simply has none". Deliberately more
+    # tolerant than HEADER: a byte-order mark (routine from Windows editors) or
+    # a leading space in front of `---` defeats HEADER while leaving the author
+    # certain they wrote a header, and that gap is the whole point of the flag.
+    OPENING = /\A\x{FEFF}?[ \t]*---[ \t]*\r?\n/
 
     struct Document
       getter fields : Hash(String, String)
       getter body : String
 
-      # True when a `---` block was opened but yielded no fields: it is never
-      # closed, or no line in it is `key: value`. Either way everything declared
-      # there is read as prose, silently — which is what makes it worth
-      # reporting rather than merely tolerating.
+      # True when a `---` block was opened but not read the way it was written:
+      # it is never closed, nothing in it is `key: value`, or one of its lines
+      # is not (a YAML list under a key, say). What such a line declared is
+      # dropped silently, and the flag is the only trace of it.
       getter? malformed : Bool
 
       def initialize(@fields : Hash(String, String), @body : String, @malformed : Bool = false)
@@ -48,19 +51,44 @@ module Smith
       fields = Hash(String, String).new
 
       match = content.match(HEADER)
-      return Document.new(fields, content, malformed: OPENING.matches?(content)) if match.nil?
+      return Document.new(fields, content, malformed: opens_header?(content)) if match.nil?
+
+      # A line this rule cannot read is dropped, and dropping it silently is how
+      # `tools:` over a YAML list ends up meaning "no tools at all".
+      unreadable = false
 
       match[1].each_line do |line|
         stripped = line.strip
         next if stripped.empty? || stripped.starts_with?("#")
 
         key, _, value = stripped.partition(":")
-        next if value.empty? && !stripped.includes?(":")
+        if value.empty? && !stripped.includes?(":")
+          unreadable = true
+          next
+        end
 
         fields[key.strip] = unquote(value.strip)
       end
 
-      Document.new(fields, match[2], malformed: fields.empty?)
+      Document.new(fields, match[2], malformed: fields.empty? || unreadable)
+    end
+
+    # An opened block still has to look like a header, because a markdown file
+    # may legitimately begin with a `---` thematic break. Only the run of lines
+    # directly under the opener counts: prose further down that happens to carry
+    # a colon must not be able to make a break look like a header.
+    private def self.opens_header?(content : String) : Bool
+      opening = OPENING.match(content)
+      return false if opening.nil?
+
+      content[opening.end..].each_line do |line|
+        stripped = line.strip
+        return false if stripped.empty?
+        next if stripped.starts_with?("#")
+        return true if stripped.includes?(":")
+      end
+
+      false
     end
 
     private def self.unquote(value : String) : String
