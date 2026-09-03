@@ -5,12 +5,32 @@ require "./frontmatter"
 
 module Smith::Skills
   struct Skill
+    # The invocation address. For a plugin skill this is the namespaced
+    # `<plugin>:<skill>` form, which is the one that is always valid.
     getter name : String
     getter description : String
     getter body : String
     getter path : String
+    # Set only for a skill that came from an installed plugin.
+    getter plugin : String?
+    getter marketplace : String?
+    # The name the file itself carries, without the `<plugin>:` prefix.
+    getter bare_name : String
 
-    def initialize(@name : String, @description : String, @body : String, @path : String)
+    def initialize(
+      @name : String,
+      @description : String,
+      @body : String,
+      @path : String,
+      @plugin : String? = nil,
+      @marketplace : String? = nil,
+      bare_name : String? = nil,
+    )
+      @bare_name = bare_name || @name
+    end
+
+    def plugin? : Bool
+      !@plugin.nil?
     end
   end
 
@@ -29,6 +49,13 @@ module Smith::Skills
 
     @problems = Array(Problem).new
 
+    # Bare name → the namespaced key it stands for, and the bare names that
+    # could not get one. Both are derived from *every* source at once, so they
+    # are computed after the last one has been read and thrown away whenever
+    # another is added.
+    @aliases : Hash(String, String)? = nil
+    @collisions : Array(String)? = nil
+
     def self.discover(workspace_dir : String = Dir.current) : Catalog
       catalog = Catalog.new
 
@@ -36,7 +63,11 @@ module Smith::Skills
       global_skills_dir = File.join(Smith.home_dir, "skills")
       catalog.load_skills_dir(global_skills_dir)
 
-      # 2. Local workspace skills in .smith/skills/, .gemini/skills/, .claude/skills/
+      # 2. Skills from installed plugins. Only the directory tree is read — no
+      # git, no network, no JSON — because this runs on every smith invocation.
+      catalog.load_plugins_dir
+
+      # 3. Local workspace skills in .smith/skills/, .gemini/skills/, .claude/skills/
       workspace_skills_dirs = [
         File.join(workspace_dir, ".smith", "skills"),
         File.join(workspace_dir, ".gemini", "skills"),
@@ -59,16 +90,19 @@ module Smith::Skills
     # about a shadowed file without saying so reads as "your working skill is
     # broken".
     def warnings : Array(String)
-      @problems.map do |problem|
+      lines = @problems.map do |problem|
         line = "⚠️  Skill '#{problem.name}' (#{problem.path}): #{problem.reason}"
         winner = @skills[problem.name]?
         next line if winner.nil? || winner.path == problem.path
 
         "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
       end
+
+      lines + collisions
     end
 
     def load_skills_dir(dir : String)
+      invalidate
       return unless directory?(dir)
 
       Dir.children(dir).sort.each do |child|
@@ -80,6 +114,53 @@ module Smith::Skills
 
         load_skill_file(child, skill_file)
       end
+    end
+
+    # Skills from every installed plugin, `installed/<marketplace>/<plugin>/`.
+    #
+    # A two-level walk of a directory that is usually absent and never deep:
+    # this is on the startup path of every single smith command, so it may not
+    # grow a git call, a network call or an unbounded walk.
+    def load_plugins_dir(base : String = Smith.installed_plugins_dir) : Nil
+      return unless directory?(base)
+
+      Dir.children(base).sort.each do |marketplace|
+        marketplace_dir = File.join(base, marketplace)
+        next unless entry_info(marketplace, marketplace_dir).try(&.directory?)
+
+        Dir.children(marketplace_dir).sort.each do |plugin|
+          plugin_dir = File.join(marketplace_dir, plugin)
+          next unless entry_info(plugin, plugin_dir).try(&.directory?)
+
+          load_plugin_dir(marketplace, plugin, plugin_dir)
+        end
+      end
+    end
+
+    # One plugin's skills: `skills/<name>/SKILL.md`, or — only where the plugin
+    # has no `skills/` directory at all — a single `SKILL.md` at its root.
+    def load_plugin_dir(marketplace : String, plugin : String, plugin_dir : String) : Nil
+      invalidate
+
+      skills_dir = File.join(plugin_dir, "skills")
+      if directory?(skills_dir)
+        Dir.children(skills_dir).sort.each do |child|
+          skill_dir = File.join(skills_dir, child)
+          next unless entry_info(child, skill_dir).try(&.directory?)
+
+          skill_file = File.join(skill_dir, "SKILL.md")
+          next unless regular_file?(child, skill_file)
+
+          load_skill_file(child, skill_file, marketplace, plugin)
+        end
+
+        return
+      end
+
+      root_skill = File.join(plugin_dir, "SKILL.md")
+      return unless regular_file?(plugin, root_skill)
+
+      load_skill_file(plugin, root_skill, marketplace, plugin)
     end
 
     # A source directory that is absent is the ordinary case, and one that
@@ -117,12 +198,16 @@ module Smith::Skills
       false
     end
 
-    private def load_skill_file(dir_name : String, file_path : String) : Nil
+    private def load_skill_file(dir_name : String, file_path : String, marketplace : String? = nil, plugin : String? = nil) : Nil
       content = read_skill_file(dir_name, file_path)
       return if content.nil?
 
       document = Frontmatter.parse(content)
-      name = document["name"] || dir_name
+      bare = document["name"] || dir_name
+      # A plugin skill is keyed by its namespaced name, so it can neither
+      # replace a local skill nor be replaced by one — which is what makes the
+      # bare-name rule below a decision rather than an accident of load order.
+      name = plugin ? "#{plugin}:#{bare}" : bare
       description = document["description"]
 
       # Loaded either way — a body still expands, which is the point of a skill
@@ -141,8 +226,78 @@ module Smith::Skills
         name: name,
         description: description || "No description provided.",
         body: document.body,
-        path: file_path
+        path: file_path,
+        plugin: plugin,
+        marketplace: marketplace,
+        bare_name: bare
       )
+    end
+
+    # The names `/…` and `$…` accept: every key, plus every bare name that is
+    # unambiguous enough to stand for one.
+    def invocation_names : Array(String)
+      @skills.keys + bare_aliases.keys
+    end
+
+    # A plugin skill's namespaced `<plugin>:<name>` is its guaranteed address.
+    # It answers to its bare name *as well*, but only where nothing else claims
+    # that name — otherwise installing a plugin would quietly change what an
+    # existing `/deploy` in someone's notes means.
+    def bare_aliases : Hash(String, String)
+      build_aliases if @aliases.nil?
+      @aliases.not_nil!
+    end
+
+    # One line per bare name that had to be refused, reported with the rest of
+    # the catalog's warnings rather than printed at startup.
+    def collisions : Array(String)
+      build_aliases if @collisions.nil?
+      @collisions.not_nil!
+    end
+
+    # Exact name first, then the bare-name fallback. A colliding bare name
+    # resolves to nothing at all — never to a guess.
+    def resolve(name : String) : Skill?
+      if skill = @skills[name]?
+        return skill
+      end
+
+      key = bare_aliases[name]?
+      key ? @skills[key]? : nil
+    end
+
+    private def invalidate : Nil
+      @aliases = nil
+      @collisions = nil
+    end
+
+    private def build_aliases : Nil
+      aliases = Hash(String, String).new
+      collisions = Array(String).new
+
+      by_bare = Hash(String, Array(String)).new
+      @skills.each do |key, skill|
+        next unless skill.plugin?
+        (by_bare[skill.bare_name] ||= Array(String).new) << key
+      end
+
+      by_bare.each do |bare, keys|
+        local = @skills[bare]?
+        if local && !local.plugin?
+          collisions << "⚠️  Skill '#{bare}' is defined outside any plugin (#{local.path}) and by #{keys.join(", ")}; '/#{bare}' stays the one at #{local.path}, and the plugin skill answers only to its full name."
+          next
+        end
+
+        if keys.size > 1
+          collisions << "⚠️  Skill name '#{bare}' is claimed by #{keys.join(" and ")}; '/#{bare}' resolves to neither, so use the full name."
+          next
+        end
+
+        aliases[bare] = keys.first
+      end
+
+      @aliases = aliases
+      @collisions = collisions
     end
 
     # Two shapes of broken header, and they need different words: one where
@@ -191,23 +346,31 @@ module Smith::Skills
       expanded = user_text
       skills_appended = Array(Skill).new
 
-      # 1. Match slash invocation: /skill-name or /skill-name args...
+      # 1. Match slash invocation: /skill-name, /plugin:skill-name, plus args
       if user_text.starts_with?("/")
         parts = user_text.split(" ", 2)
         slash_cmd = parts[0][1..-1] # remove leading slash
-        if skill = @skills[slash_cmd]?
+        if skill = resolve(slash_cmd)
           skills_appended << skill
           arg_suffix = parts[1]? ? "\nArguments: #{parts[1]}" : ""
           expanded = "Execute skill '#{skill.name}'#{arg_suffix}"
         end
       end
 
-      # 2. Match $skill-name references in text
+      # 2. Match $skill-name references in text. Namespaced names first: a
+      # `$plugin:skill` also contains `$plugin`, and the full name is the one
+      # that was meant.
       @skills.each do |name, skill|
         pattern = "$#{name}"
         if user_text.includes?(pattern) && !skills_appended.includes?(skill)
           skills_appended << skill
         end
+      end
+
+      bare_aliases.each do |bare, key|
+        skill = @skills[key]?
+        next if skill.nil? || skills_appended.includes?(skill)
+        skills_appended << skill if mentions_bare?(user_text, bare)
       end
 
       # If any skills matched, append full bodies to user turn
@@ -222,6 +385,22 @@ module Smith::Skills
           end
         end
       end
+    end
+
+    # `$bare` where a namespaced reference does not already own the text: in
+    # `$plugin:skill` the substring `$plugin` must not fire an unrelated skill
+    # that happens to be called `plugin`.
+    private def mentions_bare?(text : String, bare : String) : Bool
+      token = "$#{bare}"
+      offset = 0
+
+      while index = text.index(token, offset)
+        after = index + token.size
+        return true if after >= text.size || text[after] != ':'
+        offset = after
+      end
+
+      false
     end
   end
 end

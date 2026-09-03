@@ -10,6 +10,21 @@ module Smith
     ENV.fetch("SMITH_HOME", File.join(Path.home, ".smith"))
   end
 
+  # Marketplace state: the registry, the clone cache and the installed plugins.
+  # Named here rather than in `Smith::Marketplace` because the two catalogs read
+  # the installed tree at startup and must not have to require the whole
+  # marketplace module — which requires them back.
+  def self.plugins_dir : String
+    File.join(home_dir, "plugins")
+  end
+
+  # `installed/<marketplace>/<plugin>/`. The two path segments *are* the
+  # provenance, which is what lets discovery answer "where did this skill come
+  # from" without opening a single JSON file.
+  def self.installed_plugins_dir : String
+    File.join(plugins_dir, "installed")
+  end
+
   # Whether this directory is the root of a git checkout.
   #
   # `File.exists?` rather than `Dir.exists?`, and that is the whole point: in a

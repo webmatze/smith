@@ -57,7 +57,7 @@ module Smith::Tools
                 json.field "agent_type" do
                   json.object do
                     json.field "type", "string"
-                    json.field "enum", @agents.agents.keys
+                    json.field "enum", @agents.invocation_names
                     json.field "description", "A specialised agent to run instead of the generic one. Overrides 'mode'."
                   end
                 end
@@ -77,7 +77,7 @@ module Smith::Tools
       if requested = args["agent_type"]?.try(&.as_s?)
         definition = @agents[requested]
         if definition.nil?
-          known = @agents.agents.keys
+          known = @agents.invocation_names
           return "Error: unknown agent_type '#{requested}'. " +
             (known.empty? ? "No agents are defined." : "Available: #{known.join(", ")}.")
         end
