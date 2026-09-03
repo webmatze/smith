@@ -206,6 +206,10 @@ module Smith::Agents
     private def invalidate : Nil
       @aliases = nil
       @collisions = nil
+      # A source added after a report can bring a clash the last report could
+      # not have known about, so the "said it once" flag is only good for the
+      # catalog as it stood.
+      @collisions_reported = false
     end
 
     private def build_aliases : Nil
