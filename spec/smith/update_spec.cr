@@ -5,6 +5,7 @@ require "../../src/smith/update"
 # socket; the decision logic is all pure and driven directly.
 private class FakeSource < Smith::Update::Source
   getter fetched = [] of String
+  getter caps = {} of String => Int32
 
   def initialize(@release : Smith::Update::Release, @bodies : Hash(String, Bytes) = {} of String => Bytes)
   end
@@ -13,8 +14,9 @@ private class FakeSource < Smith::Update::Source
     @release
   end
 
-  def fetch(asset : Smith::Update::Asset) : Bytes
+  def fetch(asset : Smith::Update::Asset, max_bytes : Int32) : Bytes
     @fetched << asset.name
+    @caps[asset.name] = max_bytes
     @bodies[asset.name]? || raise Smith::Update::Error.new("no fixture for #{asset.name}")
   end
 end
@@ -24,7 +26,7 @@ private class FailingSource < Smith::Update::Source
     raise Smith::Update::Error.new("could not reach api.github.com: nope")
   end
 
-  def fetch(asset : Smith::Update::Asset) : Bytes
+  def fetch(asset : Smith::Update::Asset, max_bytes : Int32) : Bytes
     raise Smith::Update::Error.new("unreachable")
   end
 end
@@ -164,6 +166,27 @@ describe Smith::Update::Release do
     Smith::Update::Release.from_json?(%({"tag_name": ""})).should be_nil
   end
 
+  it "returns nil for valid JSON that is not an object, instead of raising" do
+    # JSON::Any#[]? raises on anything but a Hash, and the API answer is the
+    # one input here that an attacker would shape.
+    Smith::Update::Release.from_json?("[1,2]").should be_nil
+    Smith::Update::Release.from_json?(%("a string")).should be_nil
+    Smith::Update::Release.from_json?("42").should be_nil
+    Smith::Update::Release.from_json?("null").should be_nil
+    Smith::Update::Release.from_json?("true").should be_nil
+  end
+
+  it "skips assets that are not objects, instead of raising" do
+    release = Smith::Update::Release.from_json?(%({"tag_name": "v1.0.0", "assets": [1, "x", null, []]}))
+    release.not_nil!.tag.should eq("v1.0.0")
+    release.not_nil!.assets.should be_empty
+  end
+
+  it "returns nil when assets is not an array at all" do
+    release = Smith::Update::Release.from_json?(%({"tag_name": "v1.0.0", "assets": "nope"}))
+    release.not_nil!.assets.should be_empty
+  end
+
   it "skips assets missing a name or a URL rather than failing" do
     release = Smith::Update::Release.from_json?(%({"tag_name": "v1.0.0", "assets": [{"name": "x"}, {"browser_download_url": "https://x/y"}]}))
     release.not_nil!.assets.should be_empty
@@ -243,20 +266,82 @@ describe "Smith::Update.classify" do
   end
 end
 
-describe "Smith::Update.https_reason" do
+describe "Smith::Update.download_reason" do
   it "passes an https URL" do
-    Smith::Update.https_reason("https://github.com/webmatze/smith/releases/download/v1/a.tar.gz").should be_nil
+    Smith::Update.download_reason("https://github.com/webmatze/smith/releases/download/v1/a.tar.gz").should be_nil
   end
 
   it "refuses http rather than upgrading it, unlike a URL a human typed" do
-    Smith::Update.https_reason("http://github.com/a.tar.gz").not_nil!.should contain("https only")
+    Smith::Update.download_reason("http://github.com/a.tar.gz").not_nil!.should contain("https only")
   end
 
   it "refuses every other scheme and a URL with no host" do
-    Smith::Update.https_reason("file:///etc/passwd").not_nil!.should contain("https only")
-    Smith::Update.https_reason("ftp://example.com/a").not_nil!.should contain("https only")
-    Smith::Update.https_reason("/just/a/path").not_nil!.should contain("https only")
-    Smith::Update.https_reason("https:///no-host").not_nil!.should contain("no host")
+    Smith::Update.download_reason("file:///etc/passwd").not_nil!.should contain("https only")
+    Smith::Update.download_reason("ftp://example.com/a").not_nil!.should contain("https only")
+    Smith::Update.download_reason("/just/a/path").not_nil!.should contain("https only")
+    Smith::Update.download_reason("https:///no-host").not_nil!.should contain("no host")
+  end
+
+  it "passes the hosts a release is actually served from" do
+    Smith::Update.download_reason("https://api.github.com/repos/webmatze/smith/releases/latest").should be_nil
+    Smith::Update.download_reason("https://objects.githubusercontent.com/x").should be_nil
+    Smith::Update.download_reason("https://release-assets.githubusercontent.com/x").should be_nil
+    Smith::Update.download_reason("https://GitHub.com/x").should be_nil
+  end
+
+  it "refuses a host outside the allow-list, however public and resolvable" do
+    # The URL comes out of the API answer, so the address check cannot cover
+    # this case — only pinning the host can.
+    Smith::Update.download_reason("https://example.com/smith.tar.gz").not_nil!.should contain("only from")
+    Smith::Update.download_reason("https://github.com.evil.test/x").not_nil!.should contain("only from")
+    # The leading dot in the suffix is what makes this one a refusal.
+    Smith::Update.download_reason("https://evilgithubusercontent.com/x").not_nil!.should contain("only from")
+  end
+end
+
+describe "Smith::Update.redirect_target" do
+  # The hop policy without a server: the loop resolves the Location, then puts
+  # the result back through download_reason. Both halves are driven here.
+  it "resolves a relative Location against the URL it came from" do
+    target = Smith::Update.redirect_target("https://github.com/webmatze/smith/releases/download/v1/a.tar.gz", "/elsewhere/b.tar.gz")
+    target.should eq("https://github.com/elsewhere/b.tar.gz")
+    Smith::Update.download_reason(target).should be_nil
+  end
+
+  it "resolves the cross-host hop a release download depends on" do
+    target = Smith::Update.redirect_target("https://github.com/x", "https://objects.githubusercontent.com/y")
+    Smith::Update.download_reason(target).should be_nil
+  end
+
+  it "produces a URL the policy then refuses, for every hop worth refusing" do
+    downgrade = Smith::Update.redirect_target("https://github.com/x", "http://github.com/y")
+    Smith::Update.download_reason(downgrade).not_nil!.should contain("https only")
+
+    offsite = Smith::Update.redirect_target("https://github.com/x", "https://evil.example.com/y")
+    Smith::Update.download_reason(offsite).not_nil!.should contain("only from")
+
+    metadata = Smith::Update.redirect_target("https://github.com/x", "https://169.254.169.254/latest/meta-data/")
+    Smith::Update.download_reason(metadata).not_nil!.should contain("only from")
+  end
+end
+
+describe Smith::Update::GitHubSource do
+  # These reach the real class, and none of them opens a socket: the URL policy
+  # is applied before any connection is attempted.
+  it "refuses to fetch a non-https asset URL without connecting" do
+    expect_raises(Smith::Update::Error, /https only/) do
+      Smith::Update::GitHubSource.new.fetch(
+        Smith::Update::Asset.new("a.tar.gz", "http://github.com/a.tar.gz"), Smith::Update::MAX_ARCHIVE
+      )
+    end
+  end
+
+  it "refuses to fetch an asset URL pointing off the allowed hosts" do
+    expect_raises(Smith::Update::Error, /only from/) do
+      Smith::Update::GitHubSource.new.fetch(
+        Smith::Update::Asset.new("a.tar.gz", "https://evil.example.com/a.tar.gz"), Smith::Update::MAX_ARCHIVE
+      )
+    end
   end
 end
 
@@ -292,6 +377,60 @@ describe Smith::Update::Installer do
 
       File.read(target).should eq("the old binary")
       Dir.children(dir).none?(&.starts_with?(".smith-update")).should be_true
+    end
+  end
+
+  # A `smith` member that is a symlink would otherwise be chmod'ed and renamed
+  # *through* the link: 0755 onto whatever it points at, anywhere on the
+  # filesystem, and a link where the user's binary was.
+  {"smith", "./smith"}.each do |member|
+    it "refuses a #{member.inspect} member that is a symlink, touching nothing outside the staging directory" do
+      with_temp_dir do |dir|
+        victim = File.join(dir, "id_ed25519")
+        File.write(victim, "secret key material")
+        File.chmod(victim, 0o600)
+
+        evil = File.join(dir, "evil")
+        FileUtils.mkdir_p(evil)
+        File.symlink(victim, File.join(evil, "smith"))
+        archive = File.join(dir, "evil.tar.gz")
+        Process.run("tar", ["-czf", archive, "-C", evil, member])
+
+        target = File.join(dir, "smith")
+        File.write(target, "the real binary")
+        File.chmod(target, 0o755)
+
+        expect_raises(Smith::Update::Error, /not a regular file/) do
+          Smith::Update::Installer.new(target).install(File.read(archive).to_slice)
+        end
+
+        File.info(victim).permissions.value.should eq(0o600)
+        File.read(victim).should eq("secret key material")
+        File.symlink?(target).should be_false
+        File.read(target).should eq("the real binary")
+        Dir.children(dir).none?(&.starts_with?(".smith-update")).should be_true
+      end
+    end
+  end
+
+  it "sweeps a staging directory a killed run left behind, and spares a fresh one" do
+    with_temp_dir do |dir|
+      target = File.join(dir, "smith")
+      File.write(target, "the old binary")
+
+      stale = File.join(dir, ".smith-update-deadbee")
+      FileUtils.mkdir_p(stale)
+      File.write(File.join(stale, "archive.tar.gz"), "junk")
+      File.touch(stale, Time.utc - 3.hours)
+
+      fresh = File.join(dir, ".smith-update-livedog")
+      FileUtils.mkdir_p(fresh)
+
+      Smith::Update::Installer.new(target).install(build_archive(dir, "new\n"))
+
+      Dir.exists?(stale).should be_false
+      Dir.exists?(fresh).should be_true
+      File.read(target).should eq("new\n")
     end
   end
 end
@@ -408,6 +547,9 @@ describe Smith::Update::Command do
       File.read(target).should eq("#!/bin/sh\necho 0.5.0\n")
       File.info(target).permissions.value.should eq(0o755)
       source.fetched.should eq([name, "SHA256SUMS"])
+      # A checksum file has no business being read under the archive ceiling.
+      source.caps[name].should eq(Smith::Update::MAX_ARCHIVE)
+      source.caps["SHA256SUMS"].should eq(Smith::Update::MAX_METADATA)
     end
   end
 
@@ -439,7 +581,10 @@ describe Smith::Update::Command do
     end
   end
 
-  it "warns loudly when the release carries no checksums, and still installs" do
+  # Every release from the one shipping this command onward carries sums, so a
+  # release without them is a signal — omitting the asset is all it would take
+  # to get a silent unverified install.
+  it "refuses a release newer than v0.4.0 that carries no checksums" do
     with_temp_dir do |dir|
       target = File.join(dir, "smith")
       File.write(target, "the old binary")
@@ -458,9 +603,60 @@ describe Smith::Update::Command do
         channel: "release", current: "0.4.0", target: target, io: IO::Memory.new, err: err
       ).run
 
-      code.should eq(0)
+      code.should eq(1)
       err.to_s.should contain("carries no SHA256SUMS")
+      err.to_s.should contain("--allow-unverified")
+      File.read(target).should eq("the old binary")
+    end
+  end
+
+  it "installs that same release when --allow-unverified is passed, still warning" do
+    with_temp_dir do |dir|
+      target = File.join(dir, "smith")
+      File.write(target, "the old binary")
+
+      host = Smith::Update::Platform.host_target?.not_nil!
+      name = Smith::Update.archive_name("v0.5.0", host)
+      archive = build_archive(dir, "#!/bin/sh\necho 0.5.0\n")
+
+      release = Smith::Update::Release.new("v0.5.0", [
+        Smith::Update::Asset.new(name, "https://github.com/webmatze/smith/releases/download/v0.5.0/#{name}"),
+      ])
+
+      err = IO::Memory.new
+      code = Smith::Update::Command.new(
+        allow_unverified: true, source: FakeSource.new(release, {name => archive}),
+        channel: "release", current: "0.4.0", target: target, io: IO::Memory.new, err: err
+      ).run
+
+      code.should eq(0)
+      err.to_s.should contain("cannot be verified")
       File.read(target).should eq("#!/bin/sh\necho 0.5.0\n")
+    end
+  end
+
+  it "warns and installs a release at or below v0.4.0, which genuinely has no sums" do
+    with_temp_dir do |dir|
+      target = File.join(dir, "smith")
+      File.write(target, "the old binary")
+
+      host = Smith::Update::Platform.host_target?.not_nil!
+      name = Smith::Update.archive_name("v0.4.0", host)
+      archive = build_archive(dir, "#!/bin/sh\necho 0.4.0\n")
+
+      release = Smith::Update::Release.new("v0.4.0", [
+        Smith::Update::Asset.new(name, "https://github.com/webmatze/smith/releases/download/v0.4.0/#{name}"),
+      ])
+
+      err = IO::Memory.new
+      code = Smith::Update::Command.new(
+        source: FakeSource.new(release, {name => archive}),
+        channel: "release", current: "0.3.0", target: target, io: IO::Memory.new, err: err
+      ).run
+
+      code.should eq(0)
+      err.to_s.should contain("cannot be verified")
+      File.read(target).should eq("#!/bin/sh\necho 0.4.0\n")
     end
   end
 
@@ -518,6 +714,38 @@ describe Smith::Update::Command do
       code.should eq(0)
       stdout.to_s.should contain("release build")
       stdout.to_s.should contain("up to date")
+    end
+  end
+
+  it "--check does not tell a platform with no release binary to run smith update" do
+    stdout = IO::Memory.new
+    code = Smith::Update::Command.new(
+      check_only: true, source: FakeSource.new(Smith::Update::Release.new("v0.5.0")),
+      channel: "release", current: "0.4.0", target: "/home/me/.local/bin/smith",
+      host_target: nil, io: stdout, err: IO::Memory.new
+    ).run
+
+    code.should eq(0)
+    stdout.to_s.should contain("v0.5.0 is available")
+    stdout.to_s.should contain("Releases carry no binary for")
+    stdout.to_s.should_not contain("Run `smith update`")
+  end
+
+  it "refuses an update on a platform no release is built for" do
+    with_temp_dir do |dir|
+      target = File.join(dir, "smith")
+      File.write(target, "unchanged")
+
+      err = IO::Memory.new
+      code = Smith::Update::Command.new(
+        source: FailingSource.new, channel: "release", current: "0.4.0",
+        target: target, host_target: nil, io: IO::Memory.new, err: err
+      ).run
+
+      code.should eq(1)
+      err.to_s.should contain("releases carry no binary for")
+      err.to_s.should contain("Build from source instead")
+      File.read(target).should eq("unchanged")
     end
   end
 

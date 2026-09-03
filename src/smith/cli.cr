@@ -71,6 +71,7 @@ module Smith
     @tui_app : UI::App? = nil
     @tui_warned : Bool = false
     @update_check : Bool = false
+    @allow_unverified : Bool = false
 
     def initialize(@args : Array(String))
       @config = Config.load
@@ -166,6 +167,10 @@ module Smith
 
         opts.on("--check", "update: report whether a newer release exists, change nothing") do
           @update_check = true
+        end
+
+        opts.on("--allow-unverified", "update: install a release that carries no SHA256SUMS anyway") do
+          @allow_unverified = true
         end
 
         opts.on("--older-than SPAN", "sessions prune: drop sessions last updated longer ago (e.g. 30d, 12h, 15m; default 30d)") do |value|
@@ -1568,7 +1573,7 @@ module Smith
     # The whole of it lives in Smith::Update — replacing the running binary is
     # its own problem, and it is testable only away from the CLI.
     private def run_update : Nil
-      code = Update::Command.new(check_only: @update_check).run
+      code = Update::Command.new(check_only: @update_check, allow_unverified: @allow_unverified).run
       exit(code) unless code.zero?
     end
 

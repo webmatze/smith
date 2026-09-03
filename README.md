@@ -67,7 +67,9 @@ smith update --check   # is there a newer release? changes nothing
 smith update           # download it and replace this binary
 ```
 
-`update` downloads the archive for this platform over HTTPS, verifies its SHA-256 against the release's `SHA256SUMS`, and swaps the binary in by renaming the new file over the old one — atomically, in the same directory, so an interrupted download can never leave a half-written executable behind. A release without a `SHA256SUMS` — v0.4.0 and everything before it, which will never gain one — is downloaded with a loud warning that nothing verified it. The downloaded file never carries a quarantine attribute, so the Gatekeeper dance above does not apply to updates.
+`update` downloads the archive for this platform over HTTPS, verifies its SHA-256 against the release's `SHA256SUMS`, and swaps the binary in by renaming the new file over the old one — atomically, in the same directory, so an interrupted download can never leave a half-written executable behind. The downloaded file never carries a quarantine attribute, so the Gatekeeper dance above does not apply to updates.
+
+Only `github.com`, `api.github.com` and `*.githubusercontent.com` are ever downloaded from, re-checked on every redirect, on top of the post-DNS address guard `web_fetch` uses. The archive must contain a plain regular file called `smith`: a symlink under that name would be made executable and renamed *through* the link, so it is refused.
 
 It refuses, and says what to run instead, when:
 
@@ -75,6 +77,9 @@ It refuses, and says what to run instead, when:
 - **a package manager owns the binary** — Homebrew (`brew upgrade smith`), the Nix store, or a distribution directory like `/usr/bin`. Replacing those behind the package manager's back is undone by its next command.
 - **the directory is not writable** by the current user. smith does not ask for privileges it was not started with.
 - **the platform has no release binary**, or the newest tag cannot be compared against this version. A build that is *newer* than the newest release is left alone rather than downgraded.
+- **the release carries no `SHA256SUMS`.** Every release from this one on attaches one, so a release without it is either broken or an answer shaped to slip an unverified binary past the check. v0.4.0 and earlier genuinely have none and are still installed with a loud warning; for anything newer, `--allow-unverified` says you have checked it by hand.
+
+One caveat rather than a refusal: if the binary is a **symlink**, the file it resolves to is what gets replaced, and the link keeps pointing at it. With a versioned layout (`smith -> smith-0.4.0`) that leaves the new version living under the old version's name.
 
 ### Building from source
 

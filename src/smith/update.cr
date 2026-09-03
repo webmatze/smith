@@ -71,6 +71,11 @@ module Smith
       end
     end
 
+    # The last release that will never carry a SHA256SUMS — sums are attached
+    # from the release that ships `smith update` onward. See
+    # Command#unverified_install_allowed?.
+    LAST_UNSIGNED_TAG = SemVer.new(0, 4, 0)
+
     enum Comparison
       Newer   # the release is newer than this build
       Current # the same version
@@ -162,8 +167,11 @@ module Smith
         assets.find { |asset| asset.name == name }
       end
 
-      # nil rather than an exception: a malformed answer from the API is an
-      # ordinary failure mode, and the caller turns it into a message.
+      # nil rather than an exception, for *every* shape of body and not only
+      # unparseable ones. `JSON::Any#[]?` raises on anything that is not a
+      # Hash, so each level is checked with `as_h?` before it is indexed: this
+      # body is the one thing here an attacker would shape, and a stack trace
+      # is not an error message.
       def self.from_json?(body : String) : Release?
         json = begin
           JSON.parse(body)
@@ -171,13 +179,19 @@ module Smith
           return nil
         end
 
-        tag = json["tag_name"]?.try(&.as_s?)
+        object = json.as_h?
+        return nil if object.nil?
+
+        tag = object["tag_name"]?.try(&.as_s?)
         return nil if tag.nil? || tag.empty?
 
         assets = [] of Asset
-        json["assets"]?.try(&.as_a?).try &.each do |raw|
-          name = raw["name"]?.try(&.as_s?)
-          url = raw["browser_download_url"]?.try(&.as_s?)
+        object["assets"]?.try(&.as_a?).try &.each do |raw|
+          fields = raw.as_h?
+          next if fields.nil?
+
+          name = fields["name"]?.try(&.as_s?)
+          url = fields["browser_download_url"]?.try(&.as_s?)
           assets << Asset.new(name, url) if name && url
         end
 
@@ -286,9 +300,17 @@ module Smith
     #
     # And this *must* follow the redirect from github.com to
     # objects.githubusercontent.com, which `WebFetch` deliberately refuses as a
-    # cross-host hop. So the hop count is capped and every hop is put back
-    # through the guard from scratch.
-    def self.https_reason(raw : String) : String?
+    # cross-host hop. So the hop count is capped, and the allow-list below
+    # replaces the same-host rule `WebFetch` uses to bound where a redirect can
+    # take a request. Every hop goes through all of it from scratch.
+    #
+    # The allow-list also covers the case the address check cannot: the URL is
+    # named by the API answer, so an answer shaped by whoever controls it would
+    # otherwise send the download to any public host that resolves cleanly.
+    ALLOWED_HOSTS       = %w[github.com api.github.com codeload.github.com]
+    ALLOWED_HOST_SUFFIX = ".githubusercontent.com"
+
+    def self.download_reason(raw : String) : String?
       uri = begin
         URI.parse(raw)
       rescue URI::Error
@@ -303,15 +325,35 @@ module Smith
       host = uri.host
       return "#{raw.inspect} has no host" if host.nil? || host.empty?
 
+      unless allowed_host?(host)
+        return "#{raw.inspect} points at #{host}; smith downloads releases only from #{ALLOWED_HOSTS.join(", ")} and *#{ALLOWED_HOST_SUFFIX}"
+      end
+
       nil
+    end
+
+    private def self.allowed_host?(host : String) : Bool
+      normalized = host.downcase
+      # The leading dot in the suffix is load-bearing: without it
+      # `evilgithubusercontent.com` would pass.
+      ALLOWED_HOSTS.includes?(normalized) || normalized.ends_with?(ALLOWED_HOST_SUFFIX)
+    end
+
+    # Where a redirect points. Split out so the hop policy can be driven
+    # without a server: the caller puts the result back through
+    # `download_reason`, which is what bounds where a redirect may lead.
+    def self.redirect_target(from : String, location : String) : String
+      URI.parse(from).resolve(location).to_s
     end
 
     # ------------------------------------------------------------ the network
 
     # The one seam the specs replace. Nothing else in this file opens a socket.
+    # `max_bytes` is the caller's, not the source's: a checksum file has no
+    # business being read under the archive's 64 MiB ceiling.
     abstract class Source
       abstract def latest_release : Release
-      abstract def fetch(asset : Asset) : Bytes
+      abstract def fetch(asset : Asset, max_bytes : Int32) : Bytes
     end
 
     class GitHubSource < Source
@@ -323,14 +365,14 @@ module Smith
         Release.from_json?(body) || raise Error.new("#{LATEST_ENDPOINT} did not answer with a readable release")
       end
 
-      def fetch(asset : Asset) : Bytes
-        get(asset.url, MAX_ARCHIVE)
+      def fetch(asset : Asset, max_bytes : Int32) : Bytes
+        get(asset.url, max_bytes)
       end
 
       private def get(url : String, max_bytes : Int32, redirects : Int32 = 0) : Bytes
         raise Error.new("too many redirects (more than #{MAX_REDIRECTS}) fetching #{url}") if redirects > MAX_REDIRECTS
 
-        if reason = Update.https_reason(url)
+        if reason = Update.download_reason(url)
           raise Error.new(reason)
         end
 
@@ -346,7 +388,7 @@ module Smith
                 location = response.headers["Location"]?
                 raise Error.new("#{url} answered #{response.status_code} without a Location header") if location.nil?
 
-                return get(uri.resolve(location).to_s, max_bytes, redirects + 1)
+                return get(Update.redirect_target(url, location), max_bytes, redirects + 1)
               end
 
               unless response.status.success?
@@ -408,12 +450,24 @@ module Smith
     # directory's location load-bearing: rename is only atomic within one
     # filesystem, so it has to sit next to the target rather than in /tmp.
     class Installer
+      STAGING_PREFIX = ".smith-update-"
+
+      # Old enough that no live run could still own it. A staging directory is
+      # only ever seconds old while it is in use.
+      STALE_AFTER = 1.hour
+
+      # Absolute rather than resolved through PATH. This runs at the moment
+      # smith is about to overwrite its own binary, so a `tar` shim earlier on
+      # PATH would get to decide what lands there.
+      TAR = "/usr/bin/tar"
+
       def initialize(@target : String)
       end
 
       def install(archive : Bytes) : Nil
         dir = File.dirname(@target)
-        staging = File.join(dir, ".smith-update-#{Random::Secure.hex(6)}")
+        sweep(dir)
+        staging = File.join(dir, "#{STAGING_PREFIX}#{Random::Secure.hex(6)}")
 
         begin
           FileUtils.mkdir_p(staging, mode: 0o700)
@@ -423,8 +477,23 @@ module Smith
           extract(archive_path, staging)
 
           binary = File.join(staging, "smith")
-          raise Error.new("the archive does not contain a 'smith' binary") unless File.file?(binary)
-          raise Error.new("the 'smith' binary in the archive is empty") if File.size(binary).zero?
+
+          # follow_symlinks: false is the whole of the defence here. A `smith`
+          # member that is a *symlink* would otherwise be chmod'ed and renamed
+          # through the link: 0755 lands on whatever it points at, anywhere on
+          # the filesystem (~/.ssh/id_ed25519 is the obvious target), and the
+          # user is left with a link where their binary was. `File.file?` and
+          # `File.size` follow links too, so neither can be the check.
+          info = begin
+            File.info(binary, follow_symlinks: false)
+          rescue File::Error
+            raise Error.new("the archive does not contain a 'smith' binary")
+          end
+
+          unless info.type.file?
+            raise Error.new("the 'smith' entry in the archive is a #{info.type.to_s.downcase}, not a regular file; refusing to install it")
+          end
+          raise Error.new("the 'smith' binary in the archive is empty") if info.size.zero?
 
           File.chmod(binary, 0o755)
           File.rename(binary, @target)
@@ -435,15 +504,42 @@ module Smith
         end
       end
 
-      # Only the `smith` member is unpacked, which is also what keeps a
-      # tampered archive from writing anywhere but the staging directory.
+      # The `ensure` above covers every ordinary exit, but not a SIGKILL
+      # between extract and rename — and nothing else would ever remove what
+      # that leaves behind. Age is the discriminator, so a concurrent run's
+      # directory is never taken out from under it.
+      private def sweep(dir : String) : Nil
+        cutoff = Time.utc - STALE_AFTER
+
+        Dir.children(dir).each do |entry|
+          next unless entry.starts_with?(STAGING_PREFIX)
+
+          stale = File.join(dir, entry)
+          next unless File.directory?(stale)
+          next unless File.info(stale).modification_time < cutoff
+
+          FileUtils.rm_rf(stale)
+        end
+      rescue
+        # Best effort. A leftover directory is untidy; it is never a reason to
+        # refuse an update.
+      end
+
+      # Only the `smith` member is unpacked, which bounds what the archive can
+      # name — `..` and absolute members are refused by tar, and the symlink
+      # case is caught above, after extraction, where it actually shows.
+      #
+      # --no-same-owner because both GNU tar and bsdtar restore the archived
+      # uid/gid when run as root, and the release archives carry the CI
+      # runner's. A root `smith update` would otherwise install a
+      # root-executed binary owned by an unprivileged uid.
       private def extract(archive : String, into : String) : Nil
         errors = IO::Memory.new
 
         status = begin
-          Process.run("tar", ["-xzf", archive, "-C", into, "smith"], output: Process::Redirect::Close, error: errors)
+          Process.run(TAR, ["--no-same-owner", "-xzf", archive, "-C", into, "smith"], output: Process::Redirect::Close, error: errors)
         rescue ex : IO::Error
-          raise Error.new("could not run tar to unpack the release archive: #{ex.message}")
+          raise Error.new("could not run #{TAR} to unpack the release archive: #{ex.message}")
         end
 
         return if status.success?
@@ -465,10 +561,14 @@ module Smith
     class Command
       def initialize(
         @check_only : Bool = false,
+        @allow_unverified : Bool = false,
         @source : Source = GitHubSource.new,
         @channel : String = Smith::BUILD_CHANNEL,
         @current : String = Smith::VERSION,
         @target : String? = nil,
+        # Injectable so the "no release for this platform" branch is reachable
+        # from a spec: on any machine that can run the suite this is non-nil.
+        @host_target : String? = Platform.host_target?,
         @io : IO = STDOUT,
         @err : IO = STDERR,
       )
@@ -490,6 +590,10 @@ module Smith
         if location
           @io.puts "   Installed at #{location.path}"
           @io.puts "   #{Update.advice(location.install, location.path)}" unless location.install.self_managed?
+        end
+
+        if @host_target.nil?
+          @io.puts "   Releases carry no binary for #{Platform::HOST_OS}/#{Platform::HOST_ARCH}; updating means building from source."
         end
 
         release = @source.latest_release
@@ -532,7 +636,7 @@ module Smith
           return 1
         end
 
-        target = Platform.host_target?
+        target = @host_target
         if target.nil?
           @err.puts "❌ Error: releases carry no binary for #{Platform::HOST_OS}/#{Platform::HOST_ARCH}."
           @err.puts "   Built targets are #{Platform::TARGETS.join(", ")}. Build from source instead."
@@ -563,18 +667,14 @@ module Smith
         end
 
         @io.puts "⬇️  Downloading #{asset.name} …"
-        archive = @source.fetch(asset)
+        archive = @source.fetch(asset, MAX_ARCHIVE)
         digest = Digest::SHA256.hexdigest(archive)
 
         sums_asset = release.asset?(CHECKSUM_ASSET)
         if sums_asset.nil?
-          # Releases cut before #96 have nothing to check against, and that
-          # will never change for them — so say so plainly instead of implying
-          # a verification that did not happen.
-          @err.puts "⚠️  Release #{release.tag} carries no #{CHECKSUM_ASSET}; this download cannot be verified."
-          @err.puts "   All that stands behind it is the HTTPS connection to #{URI.parse(asset.url).host}."
+          return 1 unless unverified_install_allowed?(release, asset, location)
         else
-          sums = Checksums.parse(String.new(@source.fetch(sums_asset)))
+          sums = Checksums.parse(String.new(@source.fetch(sums_asset, MAX_METADATA)))
           if reason = Checksums.verify(sums, asset.name, digest)
             @err.puts "❌ Error: #{reason}."
             @err.puts "   #{location.path} was left untouched."
@@ -590,8 +690,36 @@ module Smith
         0
       end
 
+      # A release with no SHA256SUMS. Up to and including v0.4.0 that is simply
+      # how those releases were cut and will always be; from the release that
+      # ships this command onward every one carries sums, so a missing file is
+      # a signal — an API answer that just omits the asset is all it would take
+      # to get an unverified install past the check, and a warning on stderr is
+      # invisible under 2>/dev/null. Stricter than #96 asks, deliberately.
+      private def unverified_install_allowed?(release : Release, asset : Asset, location : Location) : Bool
+        host = URI.parse(asset.url).host
+
+        legacy = SemVer.parse?(release.tag).try { |tag| tag <= LAST_UNSIGNED_TAG } || false
+        if legacy || @allow_unverified
+          @err.puts "⚠️  Release #{release.tag} carries no #{CHECKSUM_ASSET}; this download cannot be verified."
+          @err.puts "   All that stands behind it is the HTTPS connection to #{host}."
+          return true
+        end
+
+        @err.puts "❌ Error: release #{release.tag} carries no #{CHECKSUM_ASSET}, and every release after v#{LAST_UNSIGNED_TAG} does."
+        @err.puts "   Either that release is broken, or the answer describing it was shaped to get an unverified"
+        @err.puts "   install past this check. #{location.path} was left untouched."
+        @err.puts "   Pass --allow-unverified to install it anyway, once you have checked the release by hand."
+        false
+      end
+
+      # What `--check` may recommend. The platform belongs in here: without it,
+      # a linux-aarch64 build is told to run a command that then refuses.
       private def updatable?(location : Location?) : Bool
-        Update.release_build?(@channel) && !location.nil? && location.install.self_managed?
+        return false unless Update.release_build?(@channel)
+        return false if location.nil? || !location.install.self_managed?
+
+        !@host_target.nil?
       end
 
       # Where the running binary actually is, and whether it may be replaced.
