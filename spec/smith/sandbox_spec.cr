@@ -20,25 +20,14 @@ private def with_sandbox_exec(&)
   {% end %}
 end
 
-# Present, and applicable from here.
+# Present, and applicable from here — the same trial run `smith doctor`
+# performs, which is why it lives in src/ and not here any more.
 #
-# The second half is not paranoia: a sandbox cannot be nested. Inside one,
-# `sandbox-exec` fails with `sandbox_apply: Operation not permitted`, so these
-# specs have to stand down when the suite itself is being run confined —
-# which is exactly what someone testing this feature will try first.
-SANDBOX_EXEC_USABLE = begin
-  {% if flag?(:darwin) %}
-    File.exists?(Smith::Sandbox::MACOS_BINARY) &&
-      Process.run(
-        Smith::Sandbox::MACOS_BINARY,
-        ["-p", "(version 1)(allow default)", "/usr/bin/true"],
-        output: Process::Redirect::Close,
-        error: Process::Redirect::Close
-      ).success?
-  {% else %}
-    false
-  {% end %}
-end
+# A sandbox cannot be nested. Inside one, `sandbox-exec` fails with
+# `sandbox_apply: Operation not permitted`, so these specs have to stand down
+# when the suite itself is being run confined — which is exactly what someone
+# testing this feature will try first.
+SANDBOX_EXEC_USABLE = Smith::Sandbox.probe.usable?
 
 private def in_tempdir(&)
   dir = File.join(Dir.tempdir, "smith_sandbox_#{Random::Secure.hex(4)}")
@@ -260,5 +249,29 @@ describe "Smith::Sandbox.build" do
       strategy.active?.should be_false
       strategy.describe.should contain("macOS")
     {% end %}
+  end
+end
+
+describe ".probe" do
+  it "answers with a status and a reason on every platform" do
+    # Shape only: `sandbox-exec` exists on macOS and nowhere else, so a spec
+    # that asserted an outcome would be a spec that fails on the other CI leg.
+    probe = Smith::Sandbox.probe
+
+    probe.detail.should_not be_empty
+    Smith::Sandbox::Availability.values.should contain(probe.availability)
+    probe.usable?.should eq(probe.availability.usable?)
+
+    {% if !flag?(:darwin) %}
+      # Nothing here confines bash yet, and claiming otherwise is the one
+      # failure this check exists to prevent.
+      probe.usable?.should be_false
+    {% end %}
+  end
+
+  it "comes back well inside its deadline" do
+    started = Time.instant
+    Smith::Sandbox.probe
+    (Time.instant - started).should be < Smith::Sandbox::PROBE_TIMEOUT * 2
   end
 end

@@ -24,6 +24,7 @@ require "./sandbox"
 require "./tools/sandbox_approver"
 require "./mcp"
 require "./update"
+require "./doctor"
 require "./ui"
 
 module Smith
@@ -132,7 +133,8 @@ module Smith
           str.puts "  mcp list | tools <server>  Show the configured MCP servers and their tools"
           str.puts "  skills list                Show the skills catalog: name, origin and description"
           str.puts "  agents list                Show the agent definitions and the model and tools each asks for"
-          str.puts "  update [--check]           Replace this binary with the newest release binary\n"
+          str.puts "  update [--check]           Replace this binary with the newest release binary"
+          str.puts "  doctor                     Check providers, MCP, sandbox and config, then exit\n"
           str.puts "Options:"
         end
 
@@ -337,6 +339,8 @@ module Smith
         show_sandbox
       when "update"
         run_update
+      when "doctor"
+        run_doctor
       else
         prompt = @args.join(" ")
         if prompt.empty?
@@ -347,7 +351,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update doctor]
 
     private def sessions_export?(command : String) : Bool
       (command == "sessions" || command == "list") && @args[1]? == "export"
@@ -1598,6 +1602,25 @@ module Smith
     private def run_update : Nil
       code = Update::Command.new(check_only: @update_check, allow_unverified: @allow_unverified).run
       exit(code) unless code.zero?
+    end
+
+    # Every source a run depends on, checked before a session exists. No
+    # provider is built and no request is sent: build_provider exits on a
+    # missing key, and a missing key is precisely what this reports.
+    private def run_doctor : Nil
+      provider = effective_provider_name.downcase
+
+      report = Doctor::Runner.new(
+        config: @config,
+        provider: provider,
+        model: @model || @config.model_for(provider),
+        mode: effective_mode.to_s.downcase,
+        skills: @skills_catalog.skills.size,
+        agents: @agents_catalog.agents.size
+      ).run
+
+      Doctor.render(report, STDOUT)
+      exit(report.exit_code)
     end
 
     # What is actually in force, printable. A sandbox nobody can inspect is a

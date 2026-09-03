@@ -1401,6 +1401,30 @@ Resume a previous session (or latest session if ID is omitted):
 ./bin/smith resume [session_id]
 ```
 
+### Doctor
+
+Every source a run depends on fails somewhere else and late: an API key at the first request, an MCP server at session start, the sandbox never. `smith doctor` asks all of them up front, without a session and without an LLM call:
+
+```bash
+smith doctor
+```
+
+One block per check, each `ok`, `warn` or `fail`:
+
+| Check | What it answers |
+| --- | --- |
+| Provider | Which API keys are set, and whether the provider actually in use has one. Only `set`/`missing` — no key value is ever read, let alone printed |
+| Config | Which `config.toml` files were loaded, and the `[defaults]` provider, model and mode in force |
+| Ollama | Whether the host answers, and which models it has |
+| MCP | Which `mcp.json` was found, and a real handshake per server — the process starts and answers `initialize`, or the url is reachable |
+| web_search | The configured backend and whether its key is set |
+| Sandbox | Availability by a **trial run**, not by the presence of a binary. A sandbox cannot be nested, so this also says when smith is itself running confined |
+| Environment | Version, `SMITH_HOME` override, which `SMITH.md`/`AGENTS.md` was picked up and from where, and how many skills and agents were found |
+
+The exit code is 1 if any check failed and 0 otherwise; a warning never changes it, so `smith doctor` is usable as a precondition in a script.
+
+Every probe carries its own deadline and they all run at once, so an unreachable Ollama and a hanging MCP server cost the longest probe rather than their sum — a completely unreachable setup answers in about three seconds, and the probes together are capped at six. One thing sits outside that cap: Crystal does not bound `getaddrinfo` on Unix, so a *name lookup* that hangs — as opposed to a name that does not resolve — blocks the whole process for as long as the system resolver takes.
+
 ### Command Line Options
 
 ```text
@@ -1424,6 +1448,8 @@ Commands:
   skills list                Show the skills catalog: name, origin and description
   agents list                Show the agent definitions and the model and tools each asks for
   update [--check]           Replace this binary with the newest release binary
+  doctor                     Check providers, MCP, sandbox and config, then exit
+
 Options:
 
     -m MODEL, --model=MODEL          Specify the LLM model (defaults to provider's default model)
@@ -1474,6 +1500,7 @@ src/
     ├── output.cr            # Human & JSON Lines renderers for the event stream
     ├── presentation.cr      # Renderer, gates & stray-line output as one swappable seam
     ├── project_ctx.cr       # SMITH.md & AGENTS.md discovery
+    ├── doctor.cr            # smith doctor: the checks, and the bounded probes behind them
     ├── skills.cr            # Skill catalog discovery & $skill / /skill expansion
     ├── media.cr             # Magic-byte detection & base64 for image and PDF attachments
     ├── sandbox.cr           # bash confinement: SBPL profile generation & strategy selection
