@@ -84,6 +84,15 @@ describe Smith::Update::SemVer do
     Smith::Update::SemVer.parse?("v1.2.3.4").should be_nil
   end
 
+  it "refuses leading zeros, so one version has exactly one spelling" do
+    # v0.4.00 reading as 0.4.0 would put it on the legacy side of the
+    # --allow-unverified cutoff.
+    Smith::Update::SemVer.parse?("v0.4.00").should be_nil
+    Smith::Update::SemVer.parse?("v01.2.3").should be_nil
+    Smith::Update::SemVer.parse?("v1.02.3").should be_nil
+    Smith::Update::SemVer.parse?("v0.0.0").should eq(Smith::Update::SemVer.new(0, 0, 0))
+  end
+
   it "orders by major, then minor, then patch" do
     (Smith::Update::SemVer.new(0, 5, 0) > Smith::Update::SemVer.new(0, 4, 9)).should be_true
     (Smith::Update::SemVer.new(1, 0, 0) > Smith::Update::SemVer.new(0, 99, 99)).should be_true
@@ -337,6 +346,28 @@ describe "Smith::Update.redirect_target" do
   end
 end
 
+describe "Smith::Update.hop_reason" do
+  it "allows exactly MAX_REDIRECTS hops and refuses the one after" do
+    url = "https://github.com/webmatze/smith/releases/download/v1/a.tar.gz"
+
+    (0..Smith::Update::MAX_REDIRECTS).each do |hop|
+      Smith::Update.hop_reason(url, hop).should be_nil
+    end
+
+    Smith::Update.hop_reason(url, Smith::Update::MAX_REDIRECTS + 1)
+      .not_nil!.should contain("too many redirects")
+    # Pinned against the constant *and* against a number, so widening the cap
+    # cannot make this pass by moving the goalposts with it.
+    Smith::Update.hop_reason(url, 6).not_nil!.should contain("too many redirects")
+    Smith::Update.hop_reason(url, 50).not_nil!.should contain("too many redirects")
+  end
+
+  it "applies the URL policy on every hop, not only the first" do
+    Smith::Update.hop_reason("http://github.com/a.tar.gz", 3).not_nil!.should contain("https only")
+    Smith::Update.hop_reason("https://evil.example.com/a.tar.gz", 3).not_nil!.should contain("only from")
+  end
+end
+
 describe Smith::Update::GitHubSource do
   # These reach the real class, and none of them opens a socket: the URL policy
   # is applied before any connection is attempted.
@@ -438,6 +469,24 @@ describe Smith::Update::Installer do
       File.read(victim).should eq("secret key material")
       File.symlink?(target).should be_false
       File.read(target).should eq("the real binary")
+      Dir.children(dir).none?(&.starts_with?(".smith-update")).should be_true
+    end
+  end
+
+  # A zero-byte `smith` would install cleanly and leave the user with a binary
+  # that cannot be executed — and no old one to fall back to.
+  it "refuses an empty smith member and leaves the target alone" do
+    with_temp_dir do |dir|
+      target = File.join(dir, "smith")
+      File.write(target, "the real binary")
+      File.chmod(target, 0o755)
+
+      expect_raises(Smith::Update::Error, /empty/) do
+        Smith::Update::Installer.new(target).install(build_archive(dir, ""))
+      end
+
+      File.read(target).should eq("the real binary")
+      File.info(target).permissions.value.should eq(0o755)
       Dir.children(dir).none?(&.starts_with?(".smith-update")).should be_true
     end
   end
@@ -746,18 +795,47 @@ describe Smith::Update::Command do
     end
   end
 
+  # The target has to be a real, writable file: a path that does not exist
+  # classifies as ReadOnly, which would suppress the recommendation on its own
+  # and leave the platform guard untested.
   it "--check does not tell a platform with no release binary to run smith update" do
-    stdout = IO::Memory.new
-    code = Smith::Update::Command.new(
-      check_only: true, source: FakeSource.new(Smith::Update::Release.new("v0.5.0")),
-      channel: "release", current: "0.4.0", target: "/home/me/.local/bin/smith",
-      host_target: nil, io: stdout, err: IO::Memory.new
-    ).run
+    with_temp_dir do |dir|
+      target = File.join(dir, "smith")
+      File.write(target, "unchanged")
 
-    code.should eq(0)
-    stdout.to_s.should contain("v0.5.0 is available")
-    stdout.to_s.should contain("Releases carry no binary for")
-    stdout.to_s.should_not contain("Run `smith update`")
+      stdout = IO::Memory.new
+      code = Smith::Update::Command.new(
+        check_only: true, source: FakeSource.new(Smith::Update::Release.new("v0.5.0")),
+        channel: "release", current: "0.4.0", target: target,
+        host_target: nil, io: stdout, err: IO::Memory.new
+      ).run
+
+      code.should eq(0)
+      stdout.to_s.should contain("v0.5.0 is available")
+      stdout.to_s.should contain("Releases carry no binary for")
+      stdout.to_s.should_not contain("Run `smith update`")
+    end
+  end
+
+  # The same install, differing only in that a release binary exists for it —
+  # so this pins that the line above is the platform guard talking and not the
+  # install classification.
+  it "--check does tell that same install to run smith update once the platform is supported" do
+    with_temp_dir do |dir|
+      target = File.join(dir, "smith")
+      File.write(target, "unchanged")
+
+      stdout = IO::Memory.new
+      code = Smith::Update::Command.new(
+        check_only: true, source: FakeSource.new(Smith::Update::Release.new("v0.5.0")),
+        channel: "release", current: "0.4.0", target: target,
+        host_target: "linux-x86_64", io: stdout, err: IO::Memory.new
+      ).run
+
+      code.should eq(0)
+      stdout.to_s.should contain("Run `smith update`")
+      stdout.to_s.should_not contain("Releases carry no binary for")
+    end
   end
 
   it "refuses an update on a platform no release is built for" do

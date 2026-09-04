@@ -43,7 +43,10 @@ module Smith
     struct SemVer
       include Comparable(SemVer)
 
-      PATTERN = /\Av?(\d+)\.(\d+)\.(\d+)\z/
+      # No leading zeros: `v0.4.00` must not read as 0.4.0. Two spellings of
+      # one version are two chances for a comparison to land on the wrong side
+      # of a boundary — the `--allow-unverified` cutoff being the one here.
+      PATTERN = /\Av?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/
 
       getter major : Int32
       getter minor : Int32
@@ -341,9 +344,19 @@ module Smith
 
     # Where a redirect points. Split out so the hop policy can be driven
     # without a server: the caller puts the result back through
-    # `download_reason`, which is what bounds where a redirect may lead.
+    # `hop_reason`, which is what bounds where a redirect may lead.
     def self.redirect_target(from : String, location : String) : String
       URI.parse(from).resolve(location).to_s
+    end
+
+    # The whole of "may this request be made at all", consulted once per hop —
+    # nil to proceed, otherwise the reason not to. Keeping the count and the
+    # URL policy in one pure function is what lets a spec pin the cap; the
+    # download loop below has no judgement of its own left to get wrong.
+    def self.hop_reason(url : String, redirects : Int32) : String?
+      return "too many redirects (more than #{MAX_REDIRECTS}) fetching #{url}" if redirects > MAX_REDIRECTS
+
+      download_reason(url)
     end
 
     # ------------------------------------------------------------ the network
@@ -370,9 +383,7 @@ module Smith
       end
 
       private def get(url : String, max_bytes : Int32, redirects : Int32 = 0) : Bytes
-        raise Error.new("too many redirects (more than #{MAX_REDIRECTS}) fetching #{url}") if redirects > MAX_REDIRECTS
-
-        if reason = Update.download_reason(url)
+        if reason = Update.hop_reason(url, redirects)
           raise Error.new(reason)
         end
 

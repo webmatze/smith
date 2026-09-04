@@ -69,7 +69,7 @@ smith update           # download it and replace this binary
 
 `update` downloads the archive for this platform over HTTPS, verifies its SHA-256 against the release's `SHA256SUMS`, and swaps the binary in by renaming the new file over the old one — atomically, in the same directory, so an interrupted download can never leave a half-written executable behind. The downloaded file never carries a quarantine attribute, so the Gatekeeper dance above does not apply to updates.
 
-Only `github.com`, `api.github.com` and `*.githubusercontent.com` are ever downloaded from, re-checked on every redirect, on top of the post-DNS address guard `web_fetch` uses. The archive must contain a plain regular file called `smith`: a symlink under that name would be made executable and renamed *through* the link, so it is refused.
+Only `github.com`, `api.github.com`, `codeload.github.com` and `*.githubusercontent.com` are ever downloaded from, re-checked on every redirect, on top of the post-DNS address guard `web_fetch` uses. The archive must contain a plain regular file called `smith`: a symlink under that name would be made executable and renamed *through* the link, so it is refused.
 
 It refuses, and says what to run instead, when:
 
