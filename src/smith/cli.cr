@@ -918,6 +918,23 @@ module Smith
     end
 
     private def persist(session_data : Session::Data, agent : Agent) : Nil
+      # `/clear` starts the conversation over in the running context and leaves
+      # the record where it is: everything below is copied off the agent, and
+      # between a clear and the next turn none of it can have moved — messages,
+      # todos and the calibration ratio all change on a turn and nowhere else,
+      # while `/model` and `/rename` write themselves through `save`. So there
+      # is nothing to record, and recording anyway is what destroyed the
+      # abandoned session: `/clear` then `/resume` wrote the emptied
+      # conversation — and the emptied todo list, and a ratio measured against
+      # a history that is still on disk — over a saved session.
+      #
+      # Here rather than at the call sites, because there are five of them:
+      # `/resume` in both loops, the ^C handler, the second ^C in the
+      # fullscreen UI, and that loop's exit — which is why `/clear` then
+      # `/quit` was lost there but not in the plain loop, which does not
+      # persist on the way out.
+      return if agent.cleared?
+
       session_data.messages = agent.messages
       session_data.usage = agent.cumulative_usage
       session_data.todos = @todos.items
@@ -1331,10 +1348,10 @@ module Smith
       # Written now rather than when the turn ends: /quit leaves the plain loop
       # without persisting, and the switch has to survive that.
       #
-      # Through `save` rather than `persist`: persist copies the agent's live
-      # messages over the session's, which would let `/clear` followed by
-      # `/model` write an emptied transcript over a saved one. Only the model
-      # is meant to change here, and `save` rebuilds the index row from it.
+      # Through `save` rather than `persist`: only the model is meant to change
+      # here, and `save` rebuilds the index row from it. It is also what makes
+      # the switch survive a `/clear` — persist records nothing while the
+      # context is cleared, and the model has to be written either way.
       @session_store.save(session_data)
 
       chat_puts("🔀 Model: #{previous} → #{name} (#{session_data.provider}). In effect from the next request.")

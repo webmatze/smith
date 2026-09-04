@@ -1071,7 +1071,7 @@ The built-in commands, resolved before skill expansion (a skill of the same name
 | `/model [<name>]`   | Show the model in use, or switch to another one                       |
 | `/quit`             | End the session (same as `exit` or `quit`)                            |
 
-`/clear` wipes the conversation (and, in the fullscreen UI, the screen) but leaves the on-disk transcript alone — it is append-only. `/resume` saves the session you were in first, then clears the screen and resumes the target; the interrupt handlers and the todo list follow the switch.
+`/clear` wipes the conversation (and, in the fullscreen UI, the screen) and writes nothing: a `/resume`, a `/quit` or a `^C` straight afterwards leaves the session's record on disk exactly as it was, and it is the next turn — not the `/clear` — that writes the fresh conversation over it. The raw `transcript.jsonl` beside it is append-only and keeps everything either way. `/resume` saves the session you were in first, then clears the screen and resumes the target; the interrupt handlers and the todo list follow the switch.
 
 `/model` is the one built-in that works both bare and with an argument: on its own it reports the model and provider in use, and with a name it switches the model from the next request onward. Only the name on the wire changes — the provider client, its API key and its connection stay as they are, which is exactly what `-m` decides at startup. The new model is written to the session immediately, so `smith resume` comes back on it. Switching *provider* is not offered: that needs a different client and a different API key, so it stays a restart with `--provider`.
 
