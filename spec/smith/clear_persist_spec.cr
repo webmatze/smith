@@ -21,10 +21,10 @@ private class StubProvider < Smith::LLM::Provider
 end
 
 # The loop's write-back is private, and it is the whole seam this fix lives in:
-# all five places that persist — `/resume` in either loop, the ^C handler, the
-# second ^C in the fullscreen UI and that loop's exit — call this one method.
-# Reopening the class is what lets the spec drive the real thing; a copy of
-# `persist` written out in the spec would pass whatever the CLI did.
+# every place that persists calls this one method, which is why the guard is
+# here and not at whichever call site was noticed first. Reopening the class is
+# what lets the spec drive the real thing; a copy of `persist` written out in
+# the spec would pass whatever the CLI did.
 class Smith::CLI
   def persist_for_spec(session_data : Smith::Session::Data, agent : Smith::Agent) : Nil
     persist(session_data, agent)
@@ -151,8 +151,8 @@ end
 
 describe "Agent#cleared?" do
   it "is false until /clear, true after it, and false again from the next turn" do
-    # Deliberately not `messages.empty?`: a rewind can cut a transcript back to
-    # nothing too, and that empty list is meant to reach disk.
+    # Deliberately not `messages.empty?`: a session that was never used is
+    # empty too, and the guard has to tell that apart from a cleared one.
     agent = Smith::Agent.new(provider: StubProvider.new, model: "claude-sonnet-5")
     agent.cleared?.should be_false
 

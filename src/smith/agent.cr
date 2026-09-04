@@ -47,9 +47,11 @@ module Smith
     # this: a cleared context has nothing to record, so the session keeps what
     # is on disk until the next turn writes the fresh conversation over it.
     #
-    # A flag rather than `messages.empty?`, because emptiness has a second
-    # cause that means the opposite: a rewind can cut a transcript back to
-    # nothing, and *that* empty list is meant to be written.
+    # A flag rather than `messages.empty?`: emptiness is a state and the guard
+    # needs the reason for it. A session that was never used is empty too, and
+    # those two have to persist differently — the cleared one is protecting a
+    # record, the new one has none yet. `clear!` is the only thing that knows
+    # a clear happened, so it is what says so.
     getter? cleared : Bool = false
 
     # What compaction has done to this session so far. `smith context` reports

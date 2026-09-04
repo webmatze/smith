@@ -928,11 +928,13 @@ module Smith
       # conversation — and the emptied todo list, and a ratio measured against
       # a history that is still on disk — over a saved session.
       #
-      # Here rather than at the call sites, because there are five of them:
+      # Here rather than at the call sites: nine of them persist, and the ways
+      # a `/clear` can reach one are not a list worth keeping accurate —
       # `/resume` in both loops, the ^C handler, the second ^C in the
-      # fullscreen UI, and that loop's exit — which is why `/clear` then
-      # `/quit` was lost there but not in the plain loop, which does not
-      # persist on the way out.
+      # fullscreen UI, that loop's exit, and a prompt a `user_prompt_submit`
+      # hook blocks, which comes back through here having added nothing. That
+      # last loop exit is why `/clear` then `/quit` was lost in the fullscreen
+      # UI but not in the plain loop, which does not persist on the way out.
       return if agent.cleared?
 
       session_data.messages = agent.messages
