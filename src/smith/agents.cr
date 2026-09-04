@@ -22,6 +22,11 @@ module Smith::Agents
     getter model : String?
     getter provider : String?
     getter mode : Subagents::Mode
+    # The `mode:` line as the file wrote it, nil where the file wrote none.
+    # Kept because `mode` alone cannot say whether it was read or chosen: a
+    # listing has to be able to quote what was declared, not only what took
+    # effect, or it presents smith's fallback as the author's configuration.
+    getter declared_mode : String?
     getter system_prompt : String
     getter path : String
     # Set only for a definition that came from an installed plugin.
@@ -39,6 +44,7 @@ module Smith::Agents
       @model : String? = nil,
       @provider : String? = nil,
       @mode : Subagents::Mode = Subagents::Mode::Work,
+      @declared_mode : String? = nil,
       @plugin : String? = nil,
       @marketplace : String? = nil,
       bare_name : String? = nil,
@@ -52,6 +58,27 @@ module Smith::Agents
 
     def tool_names : Array(String)
       @tools || (mode.inspect? ? INSPECT_TOOLS : WORK_TOOLS)
+    end
+
+    # True where the declared `mode:` named no mode smith knows, so `mode` is
+    # smith's own conservative choice rather than the author's. Derived rather
+    # than stored: the declared string is the one fact, and two fields that
+    # could disagree about it would be one too many.
+    def mode_fallback? : Bool
+      declared = @declared_mode
+      return false if declared.nil?
+
+      Subagents::Mode.from_string?(declared).nil?
+    end
+
+    # The mode in effect — and, where that is not the one declared, the value
+    # that did not read, so a listing shows a fallback as a fallback instead of
+    # passing it off as configuration.
+    def mode_label : String
+      effective = @mode.to_s.downcase
+      return effective unless mode_fallback?
+
+      "#{effective} (fallback; '#{@declared_mode}' is not a mode)"
     end
   end
 
@@ -413,6 +440,27 @@ module Smith::Agents
         end
       end
 
+      # `mode:` is a security statement, so a value smith cannot read costs the
+      # agent its tools rather than the reader the promise: an unreadable mode
+      # falls back to `inspect`, never to `work`. The definition still loads —
+      # a typo should make an agent careful, not unusable — and the value that
+      # did not read is kept on the definition so the listing can show the
+      # fallback as one.
+      #
+      # On the plugin channel like every other problem here, and for the same
+      # reason it is safe to be: after the fallback an unknown mode is a loss of
+      # capability, not a grant of one. It belongs where configuration is read
+      # — `smith agents list`, `smith doctor`, `smith plugin install` — not in
+      # front of every command forever. A file the reader wrote has no plugin
+      # and so still says so at startup, and the listing's `mode:` line marks
+      # the fallback whatever the origin.
+      declared_mode = document["mode"]
+      mode = declared_mode ? Subagents::Mode.from_string?(declared_mode) : Subagents::Mode::Work
+      if mode.nil?
+        @problems << Problem.new(name, path, "'#{declared_mode}' is not a mode; smith knows work and inspect, and read this one as inspect rather than hand out the tools the file never asked for.", source)
+        mode = Subagents::Mode::Inspect
+      end
+
       Definition.new(
         name: name,
         description: description || "No description provided.",
@@ -421,7 +469,8 @@ module Smith::Agents
         tools: document.list("tools"),
         model: document["model"],
         provider: document["provider"],
-        mode: Subagents::Mode.from_string(document["mode"] || "work"),
+        mode: mode,
+        declared_mode: declared_mode,
         plugin: plugin,
         marketplace: marketplace,
         bare_name: bare

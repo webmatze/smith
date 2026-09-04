@@ -213,6 +213,22 @@ describe "the agent tool with agent_type" do
     provider.systems.first.should contain("inspection subagent")
   end
 
+  # The schema declares an enum, but not every provider enforces one — and a
+  # string the model invented used to arrive here and leave as `work`, which is
+  # bash and write_file for a value that may well have been meant as `inspect`.
+  it "reports an unknown mode as a tool error rather than running work" do
+    provider = CaptureProvider.new
+    tool = agent_tool(catalog_with(definition), provider)
+
+    result = tool.run(JSON.parse(%({"prompt": "x", "mode": "readonly"})))
+
+    result.should start_with("Error:")
+    result.should contain("readonly")
+    result.should contain("work, inspect")
+    # Nothing ran: an error the model can act on beats a child it did not ask for.
+    provider.systems.should be_empty
+  end
+
   it "lists the available agents in its description" do
     tool = agent_tool(catalog_with(definition))
 

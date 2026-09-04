@@ -1977,7 +1977,10 @@ module Smith
         puts "      description: #{agent.description}"
         puts "      provider:    #{agent.provider || "(inherited)"}"
         puts "      model:       #{agent.model || "(inherited)"}"
-        puts "      mode:        #{mode}"
+        # `mode_label`, not `mode`: where the file's `mode:` did not read, the
+        # listing that exists to make configuration visible must not present
+        # smith's fallback as the configuration.
+        puts "      mode:        #{agent.mode_label}"
         puts "      tools:       #{tools}"
         # Which source won a name clash is otherwise nowhere visible, and a
         # warning on stderr may name the file that lost.

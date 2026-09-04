@@ -83,8 +83,16 @@ module Smith::Tools
         end
       end
 
+      # Rejected rather than defaulted, and rejected rather than downgraded.
+      # The schema declares an enum, but not every provider enforces one, so a
+      # value the model invented used to arrive here and leave as `work` — the
+      # full tool set for a string that may well have been meant as `inspect`.
+      # An error naming the two modes is what an unknown `agent_type` already
+      # gets, and it is the answer a model can act on: silently handing it the
+      # read-only set would fail later, in the child, over a missing `bash`.
       mode_str = args["mode"]?.try(&.as_s?) || "work"
-      mode = Smith::Subagents::Mode.from_string(mode_str)
+      mode = Smith::Subagents::Mode.from_string?(mode_str)
+      return "Error: unknown mode '#{mode_str}'. Available: work, inspect." if mode.nil?
 
       report = @supervisor.run_child(
         prompt: prompt,
