@@ -1324,7 +1324,7 @@ A plugin **without** a `skills/` directory but **with** a `SKILL.md` at its root
 
 #### The namespace rule
 
-A plugin skill is `<plugin>:<skill>` and a plugin agent is `<plugin>:<agent>`. **That namespaced name is the stable, guaranteed address** — it can neither shadow a local skill nor be shadowed by one.
+A plugin skill is `<plugin>:<skill>` and a plugin agent is `<plugin>:<agent>`. **That namespaced name is the address to rely on** — it can neither shadow a local skill nor be shadowed by one, and it is unambiguous across every plugin a marketplace ships. (One edge, listed under [known limitations](#known-limitations): two *different* marketplaces shipping a plugin of the same name produce the same key.)
 
 The bare name works **as well**, but only where nothing else claims it:
 
