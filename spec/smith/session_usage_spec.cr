@@ -140,8 +140,12 @@ describe "a session's lifetime usage across resumes" do
   it "writes the same total however many times a run persists" do
     # persist runs after *every* turn, and `cumulative_usage` is the run's
     # running total rather than the turn's increment — so `usage +=
-    # cumulative_usage` double-counts from turn two onward, and a two-turn
-    # spec would not notice on turn one. Three turns, checked after each.
+    # cumulative_usage` is right on a run's first persist and wrong on every
+    # one after it. What such a bug survives is a run persisted once, not a
+    # run of one turn: the second persist is already enough to catch it, and
+    # the example above catches it on a two-turn run. Three turns and then a
+    # persist with no turn between are here to pin the shape down — the answer
+    # has to be the same however often it is written.
     with_cli do |cli|
       session, agent = new_session(cli)
 
@@ -191,6 +195,44 @@ describe "a session's lifetime usage across resumes" do
       # The session left behind keeps its own, and gains nothing from the
       # other one's counter.
       saved_tokens(cli, first.id).should eq(120)
+    end
+  end
+
+  it "keeps a lifetime intact across a switch away and back" do
+    # The combination the other examples divide between them: several turns in
+    # one run *and* a resume. Going away and coming back rebuilds the agent
+    # twice, so A's second run has to start from what A's first run left on
+    # disk — not from zero, and not from anything B spent in between.
+    with_cli do |cli|
+      a, a_agent = new_session(cli)
+      3.times do |i|
+        a_agent.send("a#{i}")
+        cli.persist_for_spec(a, a_agent)
+      end
+      saved_tokens(cli, a.id).should eq(360)
+
+      # Switching the way the loop does: persist the session being left, then
+      # build an agent for the target.
+      cli.persist_for_spec(a, a_agent)
+      b_id = cli.store_for_spec.create(model: "claude-sonnet-5", provider: "anthropic").id
+      b, b_agent = resume(cli, b_id)
+      b_agent.send("b0")
+      cli.persist_for_spec(b, b_agent)
+
+      # …and back to A, on a third agent whose counter starts at zero again.
+      cli.persist_for_spec(b, b_agent)
+      a, a_agent = resume(cli, a.id)
+      2.times do |i|
+        a_agent.send("a again #{i}")
+        cli.persist_for_spec(a, a_agent)
+      end
+
+      saved_tokens(cli, a.id).should eq(600)
+      indexed_tokens(cli, a.id).should eq(600)
+      # This run's counter is still only this run's, and B kept its own.
+      a_agent.cumulative_usage.total_tokens.should eq(240)
+      saved_tokens(cli, b.id).should eq(120)
+      indexed_tokens(cli, b.id).should eq(120)
     end
   end
 

@@ -117,11 +117,19 @@ module Smith::Session
     #
     # Not written to disk, and defaulted so a `Data` that never met an agent —
     # anything the store loads for a listing, an export or a rename — behaves
-    # as it always did. It rides on the session rather than on the CLI because
-    # every path that persists is handed the pair it belongs to: a `^C` during
-    # a `/resume` runs an interrupt handler still holding the session being
-    # left, and a single baseline slot on the CLI would by then hold the
-    # incoming session's.
+    # as it always did.
+    #
+    # It rides on the session rather than on the CLI because every path that
+    # persists is handed the pair it belongs to. `/resume` inside a running
+    # loop rebuilds the agent before it re-points the interrupt handler, and
+    # replaces the todo list in between — which writes, so it can yield. A
+    # `^C` dispatched in that window can therefore still reach a handler
+    # holding the session being *left*, and that session has to be written
+    # against its own baseline. A single slot on the CLI would by then hold
+    # the incoming session's. The window needs the main fiber to yield and a
+    # `^C` dispatched after the handler is re-pointed uses the new one, so
+    # this is a narrow race rather than a certainty — but it costs nothing to
+    # close, and the pair a persisting path holds is the honest place for it.
     @[JSON::Field(ignore: true)]
     property usage_before_run : Smith::LLM::Usage = Smith::LLM::Usage.new(0, 0, 0)
 
