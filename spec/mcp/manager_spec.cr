@@ -216,6 +216,10 @@ describe Smith::MCP::Manager do
 
       handle.error.to_s.should contain("TOKEN-from-the-child")
       handle.error_summary.to_s.should_not contain("TOKEN-from-the-child")
+
+      # The argument list is not the server's words at all — it is smith's own
+      # configuration file — so it is out of both lines, not just the shared one.
+      handle.error.to_s.should_not contain("ARGSECRET")
       handle.error_summary.to_s.should_not contain("ARGSECRET")
     ensure
       File.delete(script) if File.exists?(script)
