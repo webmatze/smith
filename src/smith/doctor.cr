@@ -391,17 +391,11 @@ module Smith
       Check.new("Environment", catalog_notes.empty? ? Status::Ok : Status::Warn, details)
     end
 
-    # What both catalogs found wrong while loading. The skills catalog keeps
-    # its problems; the agents catalog reports and clears them in its
-    # constructor, which runs before the CLI knows which command was asked
-    # for — so its files are read once more here rather than going unmentioned
-    # in the one command whose job is to mention them.
-    def self.catalog_notes(start_dir : String = Dir.current) : Array(String)
-      collected = IO::Memory.new
-      Agents::Catalog.discover(start_dir, warn_io: collected)
-
-      Skills::Catalog.discover(start_dir).warnings +
-        collected.to_s.lines.map(&.strip).reject(&.empty?)
+    # What both catalogs found wrong while loading, from catalogs already
+    # built. Both keep their problems after reporting them, so this costs no
+    # second walk of the same directories.
+    def self.catalog_notes(skills : Skills::Catalog, agents : Agents::Catalog) : Array(String)
+      skills.warnings + agents.warnings
     end
 
     # --- Rendering ---------------------------------------------------------
@@ -486,6 +480,14 @@ module Smith
     end
 
     # What `mcp.json` says, read without starting anything.
+    #
+    # This runs before the clock starts, which is what lets a report that ran
+    # out of time still name every server. The cost of that choice: the reads
+    # themselves sit outside every deadline, so a `~/.smith` on a hung network
+    # mount blocks here rather than being capped at `DEADLINE`. Worth it —
+    # every other command reads the same files just as unbounded, and a
+    # diagnostic that cannot say which servers were configured is worth less
+    # than one that is slow on a broken filesystem.
     def self.plan_mcp(config : Config, start_dir : String = Dir.current) : McpPlan
       sources = [MCP::ServerConfig.global_path, MCP::ServerConfig.project_path(start_dir)]
         .compact
@@ -634,7 +636,7 @@ module Smith
         @ollama_probe : OllamaProbeFn = ->(host : String) { Doctor.probe_ollama(host) },
         @mcp_probe : McpProbeFn? = nil,
         @sandbox_probe : SandboxProbeFn = -> { Smith::Sandbox.probe },
-        @catalog_notes : Array(String)? = nil,
+        @catalog_notes : Array(String) = Array(String).new,
       )
       end
 
@@ -663,7 +665,7 @@ module Smith
             ProjectContext.project_files(@start_dir),
             @skills,
             @agents,
-            @catalog_notes || Doctor.catalog_notes(@start_dir)
+            @catalog_notes
           ),
         ])
       end

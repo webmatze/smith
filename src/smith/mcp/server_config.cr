@@ -57,6 +57,12 @@ module Smith::MCP
     #
     # `env` and `headers` are not here at all — those are expanded from the
     # environment, which is where the keys live.
+    #
+    # What this does *not* cover: the command path itself, which is printed in
+    # full and on purpose, because it is what identifies the server once the
+    # arguments are gone. Someone who writes a secret into a path has written
+    # it into a filename, and there is nothing left to tell two servers apart
+    # by if that goes too.
     def safe_description : String
       url = @url
       return ServerSpec.safe_url(url) unless url.nil?
@@ -84,6 +90,11 @@ module Smith::MCP
     # Any url inside a message smith did not compose itself — an exception
     # from the HTTP client, a warning that quotes the config — cut back the
     # same way.
+    #
+    # A url filter, and only that. It does nothing to text that is not
+    # url-shaped, so it is not a general redactor and must not be treated as
+    # one: text that could carry anything — a server's stderr, an HTTP error
+    # body — has to be kept out of a message rather than run through this.
     def self.scrub_urls(text : String) : String
       text.gsub(/\b[a-zA-Z][a-zA-Z0-9+.\-]*:\/\/[^\s'"<>]+/) do |match|
         # A url runs up to whitespace, so the punctuation that ends the

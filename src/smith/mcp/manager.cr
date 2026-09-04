@@ -17,6 +17,11 @@ module Smith::MCP
     getter name : String
 
     getter tools : Array(ToolDefinition)
+
+    # How long a stdio server gets between SIGTERM and SIGKILL. Zero belongs
+    # to callers on a deadline; a session keeps the patient default.
+    getter grace : Time::Span
+
     getter error : String?
 
     # The same failure without the server's own stderr and without whatever
@@ -60,8 +65,8 @@ module Smith::MCP
       connect
       true
     rescue ex : Exception
-      @error = failure_message(ex, @spec.description, with_stderr: true)
-      @error_summary = failure_message(ex, @spec.safe_description, with_stderr: false)
+      @error = failure_message(ex, @spec.description, with_server_output: true)
+      @error_summary = failure_message(ex, @spec.safe_description, with_server_output: false)
       stop_client
       false
     end
@@ -131,8 +136,8 @@ module Smith::MCP
         connect
       rescue ex : Exception
         lose!(
-          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.description, with_stderr: true)}",
-          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.safe_description, with_stderr: false)}"
+          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.description, with_server_output: true)}",
+          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.safe_description, with_server_output: false)}"
         )
         raise cause
       end
@@ -169,19 +174,37 @@ module Smith::MCP
       @transport.try &.close
     end
 
-    private def failure_message(ex : Exception, what : String, with_stderr : Bool) : String
+    # `with_server_output` decides whether anything the *server* wrote may be
+    # repeated: a subprocess's stderr, an HTTP body. Both can hold whatever the
+    # server was sent — a child inherits smith's environment, and a gateway can
+    # echo an Authorization header into an error page — so the summary form
+    # carries only what smith composed itself.
+    private def failure_message(ex : Exception, what : String, with_server_output : Bool) : String
       base = case ex
              when File::NotFoundError then "command not found: #{what}"
              when TimeoutError        then "no response to the MCP handshake — is #{what} an MCP server?"
              else                          ex.message || ex.class.name
              end
 
-      # `ex.message` quotes the url too, so the sanitised form has to be put
-      # back over it rather than only used for the messages built here.
-      return ServerSpec.scrub_urls(base) unless with_stderr
+      unless with_server_output
+        # `scrub_urls` is a url filter and nothing more — it cuts a url back
+        # to its host and leaves every other kind of text alone. It is here
+        # because the messages smith composes quote the url; it is not, and
+        # cannot be, a general redactor for arbitrary exception text. That is
+        # why the server's own output is excluded above rather than filtered.
+        return ServerSpec.scrub_urls(base)
+      end
+
+      parts = [base]
 
       tail = stderr_tail.last(3).map(&.strip).reject(&.empty?)
-      tail.empty? ? base : "#{base} (stderr: #{tail.join(" / ")})"
+      parts << "(stderr: #{tail.join(" / ")})" unless tail.empty?
+
+      if body = @transport.try(&.failure_body)
+        parts << "(response: #{body})"
+      end
+
+      parts.join(" ")
     end
   end
 

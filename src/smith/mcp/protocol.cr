@@ -131,6 +131,16 @@ module Smith::MCP
       nil
     end
 
+    # What an HTTP server put in the body of a failing answer. Kept apart from
+    # `failure_hint` for the same reason a subprocess's stderr is kept apart
+    # from the message smith composes: it is *the server's* text, it can hold
+    # anything the server was sent — a gateway echoing an Authorization header
+    # back is not hypothetical — and only the caller knows whether repeating
+    # it is the answer being looked for or a secret being published.
+    def failure_body : String?
+      nil
+    end
+
     # A subprocess's own stderr, kept so a failed handshake can say what the
     # process actually complained about. Only stdio has one.
     def stderr_tail : Array(String)

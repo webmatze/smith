@@ -90,19 +90,26 @@ module Smith::Agents
       end
     end
 
-    # Everything worth saying about the files just read, on the channel agent
-    # warnings have always used. Called once, after the last source, so a line
-    # can name the file that won whenever the file it warns about lost.
-    def report(warn_io : IO = STDERR) : Nil
-      @problems.each do |problem|
+    # Everything worth saying about the files just read. Built once the last
+    # source has been read, so a line can name the file that won whenever the
+    # file it warns about lost.
+    #
+    # Kept rather than consumed by `report`, so a later reader — `smith doctor`
+    # gathers these into its Environment block — does not have to discover the
+    # whole catalog a second time to see them.
+    def warnings : Array(String)
+      @problems.map do |problem|
         line = "⚠️  Agent '#{problem.name}' (#{problem.path}): #{problem.reason}"
         winner = @agents[problem.name]?
-        line += " The '#{problem.name}' in this catalog comes from #{winner.path} instead." if winner && winner.path != problem.path
+        next line if winner.nil? || winner.path == problem.path
 
-        warn_io.puts line
+        "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
       end
+    end
 
-      @problems.clear
+    # The same lines, on the channel agent warnings have always used.
+    def report(warn_io : IO = STDERR) : Nil
+      warnings.each { |line| warn_io.puts line }
     end
 
     # A source directory that is absent is the ordinary case, and one that

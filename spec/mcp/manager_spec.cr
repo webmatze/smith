@@ -145,6 +145,14 @@ describe Smith::MCP::Manager do
     end
   end
 
+  it "gives a session's servers the patient shutdown by default" do
+    # The zero grace is `smith doctor`'s alone. A session's servers get the
+    # chance to exit on TERM that they have always had, and nothing but this
+    # pins that the default did not travel with the new parameter.
+    Smith::MCP::Manager.build([spec_for("fs")]).handles.first.grace
+      .should eq(Smith::MCP::StdioTransport::GRACE)
+  end
+
   it "kills a server that ignores SIGTERM when the caller cannot wait" do
     # `smith doctor` builds its manager with a zero grace: it promises to be
     # quick, and waiting twice over for a server that will not leave is how

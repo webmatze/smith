@@ -117,6 +117,49 @@ describe "Smith::Doctor.probe_mcp" do
     end
   end
 
+  it "keeps an http server's error body out of the report" do
+    in_home do |home, workdir|
+      # A gateway that echoes the Authorization header it was sent back into
+      # its error page. Not exotic — a proxy error page, a debug endpoint, or
+      # simply a server nobody here controls. The status is smith's
+      # diagnosis; the body is the server's own text.
+      secret = "sk-gateway-#{Random::Secure.hex(6)}"
+      previous = ENV["OPENROUTER_API_KEY"]?
+      ENV["OPENROUTER_API_KEY"] = secret
+
+      server = HTTP::Server.new do |context|
+        context.response.status = HTTP::Status::INTERNAL_SERVER_ERROR
+        context.response.print "upstream rejected; sent #{context.request.headers["Authorization"]?}"
+      end
+      address = server.bind_unused_port("127.0.0.1")
+      spawn { server.listen }
+
+      begin
+        mcp_json(home, <<-JSON)
+          {"gateway": {
+            "url": "http://127.0.0.1:#{address.port}/mcp",
+            "headers": {"Authorization": "Bearer ${OPENROUTER_API_KEY}"}
+          }}
+          JSON
+
+        probe = Smith::Doctor.probe_mcp(Smith::Config.load(workdir), workdir)
+        output = rendered(probe)
+
+        probe.servers.first.ok?.should be_false
+        # The status still has to reach the report — it is the diagnosis.
+        output.should contain("HTTP 500")
+        output.should_not contain(secret)
+      ensure
+        server.close
+        if previous
+          ENV["OPENROUTER_API_KEY"] = previous
+        else
+          ENV.delete("OPENROUTER_API_KEY")
+        end
+      end
+    end
+  end
+
   it "leaves no child process behind when a server has to be killed" do
     in_home do |home, workdir|
       pid_file = File.join(home, "server.pid")
@@ -293,7 +336,10 @@ describe "Smith::Doctor.catalog_notes" do
       File.write(File.join(home, "skills", "broken", "SKILL.md"), "---\nname: halfopen\n")
       File.write(File.join(home, "agents", "bare.md"), "---\nname: bare\n---\n\nNo description.\n")
 
-      notes = Smith::Doctor.catalog_notes(workdir)
+      notes = Smith::Doctor.catalog_notes(
+        Smith::Skills::Catalog.discover(workdir),
+        Smith::Agents::Catalog.discover(workdir, warn_io: IO::Memory.new)
+      )
 
       notes.size.should eq(2)
       # Named by its directory, because the frontmatter that would have given
@@ -307,7 +353,25 @@ describe "Smith::Doctor.catalog_notes" do
 
   it "finds nothing to say about catalogs that loaded cleanly" do
     in_home do |_home, workdir|
-      Smith::Doctor.catalog_notes(workdir).should be_empty
+      Smith::Doctor.catalog_notes(
+        Smith::Skills::Catalog.discover(workdir),
+        Smith::Agents::Catalog.discover(workdir, warn_io: IO::Memory.new)
+      ).should be_empty
+    end
+  end
+
+  it "still has its warnings after the catalog has reported them" do
+    in_home do |home, workdir|
+      FileUtils.mkdir_p(File.join(home, "agents"))
+      File.write(File.join(home, "agents", "bare.md"), "---\nname: bare\n---\n\nNo description.\n")
+
+      # `discover` reports to stderr in the CLI constructor, before the CLI
+      # knows which command was asked for. Doctor reads them afterwards, and
+      # would otherwise have to walk the same directories a second time.
+      catalog = Smith::Agents::Catalog.discover(workdir, warn_io: IO::Memory.new)
+
+      catalog.warnings.size.should eq(1)
+      catalog.warnings.first.should contain("Agent 'bare'")
     end
   end
 end

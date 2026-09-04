@@ -1616,7 +1616,10 @@ module Smith
         model: @model || @config.model_for(provider),
         mode: effective_mode.to_s.downcase,
         skills: @skills_catalog.skills.size,
-        agents: @agents_catalog.agents.size
+        agents: @agents_catalog.agents.size,
+        # From the catalogs already built, not a second walk of the same
+        # directories: a count on its own hides the file that failed to load.
+        catalog_notes: Doctor.catalog_notes(@skills_catalog, @agents_catalog)
       ).run
 
       Doctor.render(report, STDOUT)
