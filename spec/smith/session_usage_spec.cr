@@ -30,6 +30,10 @@ end
 # back up. A spec that built an `Agent` by hand would have to set the baseline
 # by hand too — which is the fix rewritten in the spec, proving nothing about
 # the CLI. Reopening the class drives the real pair.
+#
+# `persist_for_spec` and `store_for_spec` are the same two lines
+# `clear_persist_spec.cr` reopens the class for, written out again rather
+# than shared so that either file still runs on its own.
 class Smith::CLI
   # The `@session_id =` is not spec scaffolding around the seam: every call
   # site sets it before building an agent, because hooks and the background-job
@@ -162,9 +166,10 @@ describe "a session's lifetime usage across resumes" do
 
   it "gives a session switched to mid-run its own history, and leaves the one left alone" do
     # `/resume` inside the running loop: `activate_session` builds a new agent,
-    # so the counter restarts — and the baseline has to restart with it. A
-    # baseline taken once at process start would write B's total as B's history
-    # plus A's leftover counter.
+    # so the counter restarts — and the baseline has to restart with it. Taken
+    # once at process start instead, the session switched *to* keeps a baseline
+    # of zero while its counter starts again, so its whole history is written
+    # away by the first turn after the switch.
     with_cli do |cli|
       first, first_agent = new_session(cli)
       first_agent.send("in the first session")
