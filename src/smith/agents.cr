@@ -233,7 +233,6 @@ module Smith::Agents
       "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
     end
 
-
     # The `agent_type` values that work: every key, plus every bare name
     # unambiguous enough to stand for one.
     def invocation_names : Array(String)
