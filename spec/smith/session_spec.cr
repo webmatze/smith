@@ -596,6 +596,195 @@ describe "pruning sessions" do
   end
 end
 
+describe "a damaged session index" do
+  it "costs the damaged entry and no other session" do
+    with_store do |store|
+      good = session_with(store, "still here")
+      broken = JSON.parse(%({"id": "session-broken", "updated_at": "not-a-timestamp"}))
+      File.write(store.index_path, ([broken] + JSON.parse(File.read(store.index_path)).as_a).to_json)
+
+      entries, damage = store.read_index
+
+      entries.map(&.id).should eq([good.id])
+      damage.size.should eq(1)
+      damage.first.should contain("index entry 1")
+      # The listing, resume-by-name, delete and stats all read this.
+      store.list.map(&.id).should eq([good.id])
+      store.resolve_id(good.name.not_nil!).should eq(good.id)
+    end
+  end
+
+  it "reports an index that is not a list of sessions at all" do
+    with_store do |store|
+      session_with(store, "still here")
+      File.write(store.index_path, "{ not even an array")
+
+      entries, damage = store.read_index
+
+      entries.should be_empty
+      damage.first.should contain("not a readable list of sessions")
+    end
+  end
+end
+
+describe "a session reference" do
+  it "is a name or an id, never a path" do
+    with_store do |store|
+      session_with(store, "a real session")
+
+      # `File.join` defuses an absolute path but carries `..` through, so this
+      # used to resolve — and read, or with `sessions delete` remove — a
+      # directory outside the sessions tree entirely.
+      ["../elsewhere", "../../etc", "sessions/x", "/etc/passwd", "..", ".", ""].each do |reference|
+        expect_raises(ArgumentError, /is not a session reference/) do
+          store.resolve_id(reference)
+        end
+      end
+    end
+  end
+
+  it "cannot be renamed into one either" do
+    with_store do |store|
+      session = session_with(store, "a real session")
+
+      expect_raises(ArgumentError, /is not a session reference/) do
+        store.rename(session.id, "../evil")
+      end
+    end
+  end
+
+  it "still resolves a slash-shaped name an earlier release allowed" do
+    with_store do |store|
+      # `rename` accepted this before the guard existed, and the name is in
+      # both index.json and session.json of every session named that way.
+      # Refusing to resolve it would strand a session that is still listed.
+      session = session_with(store, "a branch-shaped name")
+      session.name = "feat/export"
+      store.save(session, derive_name: false, check_name: false)
+
+      store.resolve_id("feat/export").should eq(session.id)
+      store.resolve("feat/export").id.should eq(session.id)
+      store.list.first.name.should eq("feat/export")
+    end
+  end
+
+  it "deletes such a session by its name without touching anything else" do
+    with_store do |store|
+      session = session_with(store, "a branch-shaped name")
+      session.name = "feat/export"
+      store.save(session, derive_name: false, check_name: false)
+
+      store.delete("feat/export").try(&.id).should eq(session.id)
+      Dir.exists?(store.session_dir(session.id)).should be_false
+      # Never `sessions/feat`, which is what a path-shaped name would name.
+      Dir.exists?(File.join(store.sessions_dir, "feat")).should be_false
+    end
+  end
+
+  it "refuses to remove anything a path could reach, even from a hand-edited index" do
+    with_store do |store|
+      session_with(store, "a real session")
+      outside = File.join(store.base_dir, "victim")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "keepme.txt"), "secret")
+
+      expect_raises(ArgumentError, /is not a session reference/) { store.delete("../victim") }
+
+      # An id is only ever a generated one — unless someone writes their own.
+      File.write(store.index_path, %([{"id": "../victim", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0}]))
+      expect_raises(ArgumentError, /is not a session reference/) { store.delete("../victim") }
+
+      File.exists?(File.join(outside, "keepme.txt")).should be_true
+    end
+  end
+
+  it "does not resolve an id the index carries that is really a path" do
+    with_store do |store|
+      # Resolution's promise: what comes back can be a directory name under
+      # sessions/, whatever the index says. An entry edited to `../victim`
+      # would otherwise be read — by export, resume and context alike.
+      File.write(store.index_path, %([{"id": "../victim", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0, "name": "innocent"}]))
+
+      expect_raises(ArgumentError, /is not a session reference/) { store.resolve_id("../victim") }
+      # And not by the back door either: the name matches, the id is the path.
+      expect_raises(ArgumentError, /is a path rather than a session id/) { store.resolve_id("innocent") }
+    end
+  end
+
+  it "refuses to build a session path out of anything but a session id" do
+    with_store do |store|
+      # The seam. `resolve_id` guarantees this for what the user types, but
+      # `latest`, `load` and the checkpoint commands reach a session by an id
+      # straight out of the index or off the command line — so the promise
+      # has to hold here, or it holds nowhere.
+      ["../victim", "../../etc", "sessions/x", "/etc/passwd", "..", ".", ""].each do |hostile|
+        expect_raises(ArgumentError, /is not a session reference/) { store.session_dir(hostile) }
+        expect_raises(ArgumentError, /is not a session reference/) { store.load(hostile) }
+      end
+
+      # And a real session still goes through all of it.
+      session = session_with(store, "a real session")
+      store.session_dir(session.id).should eq(File.join(store.sessions_dir, session.id))
+      store.load(session.id).id.should eq(session.id)
+    end
+  end
+
+  it "skips a poisoned newest entry rather than making it the default session" do
+    with_store do |store|
+      # `smith resume` and `smith context` with no argument go through
+      # `latest`, which never touched resolution at all.
+      warnings = IO::Memory.new
+      store = Smith::Session::Store.new(base_dir: store.base_dir, warn_io: warnings)
+      real = session_with(store, "the real session")
+
+      entries = JSON.parse(File.read(store.index_path)).as_a
+      rogue = JSON.parse(%({"id": "../victim", "created_at": "2030-01-01T00:00:00Z", "updated_at": "2030-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0}))
+      File.write(store.index_path, ([rogue] + entries).to_json)
+      store.list.first.id.should eq("../victim") # it really is the newest
+
+      store.latest.try(&.id).should eq(real.id)
+      warnings.to_s.should contain("Skipping index entry '../victim'")
+    end
+  end
+
+  it "prunes past a path-shaped id instead of taking the session down with it" do
+    with_store do |store|
+      # `prune` runs at the start of every session and never goes through
+      # resolution, so raising here would turn one bad line in a file into
+      # chat, run and resume refusing to start.
+      warnings = IO::Memory.new
+      store = Smith::Session::Store.new(base_dir: store.base_dir, warn_io: warnings)
+      outside = File.join(store.base_dir, "victim")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "keepme.txt"), "secret")
+
+      keeper = session_with(store, "the newest session")
+      entries = JSON.parse(File.read(store.index_path)).as_a
+      rogue = JSON.parse(%({"id": "../victim", "created_at": "2020-01-01T00:00:00Z", "updated_at": "2020-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0}))
+      File.write(store.index_path, (entries + [rogue]).to_json)
+
+      doomed = store.prune(older_than: 30.days)
+
+      doomed.map(&.id).should eq(["../victim"])
+      warnings.to_s.should contain("Not deleting '../victim'")
+      # The entry is gone, the directory outside the tree is not.
+      store.list.map(&.id).should eq([keeper.id])
+      File.exists?(File.join(outside, "keepme.txt")).should be_true
+    end
+  end
+
+  it "tells a reference that names nothing from one that is refused" do
+    with_store do |store|
+      # A caller that means to fall back when a session is gone must not also
+      # fall back when the reference was refused.
+      expect_raises(Smith::Session::NotFound) { store.resolve_id("no-such-session") }
+
+      refused = expect_raises(ArgumentError) { store.resolve_id("../elsewhere") }
+      refused.class.should eq(ArgumentError)
+    end
+  end
+end
+
 describe Smith::Session::Retention do
   it "parses days, hours and minutes" do
     Smith::Session::Retention.parse("30d").should eq(30.days)

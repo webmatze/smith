@@ -306,6 +306,47 @@ smith sessions prune --older-than 7d --keep-last 10   # and keep the 10 most rec
 
 On top of that, smith quietly prunes at startup, the same way checkpoints are pruned: `[sessions] retention_days` in `config.toml` (90 by default) drops anything last touched longer ago, always leaving the newest one. The session being resumed is protected, so a resume never expires itself.
 
+#### Taking a run with you
+
+`smith sessions export` turns a saved run into something you can read, paste into an issue or feed to another tool:
+
+```bash
+smith sessions export my-refactor                  # Markdown on stdout
+smith sessions export my-refactor --out run.md     # …or into a file
+smith sessions export my-refactor --json           # the structured log instead
+```
+
+The reference is a name or an id, resolved by the same helper `smith resume` and `smith sessions delete` go through — with one addition of its own: a session directory that has lost its `session.json` but still holds its raw transcript is exportable by id, because the record is exactly what an export is after. The Markdown carries the session name, the provider and model, the timestamps, the token counts, the cost and the todo list, then every message in order — roles, text, thinking, tool calls and their results:
+
+````markdown
+# why-does-the-paths-spec
+
+- **Session:** `session-1788470325-17ad7f`
+- **Provider / model:** anthropic / claude-opus-5
+- **Cost:** $1.22
+- **Exported from:** `transcript.jsonl` (the untouched record; 9 message(s); session file: 7)
+
+### 2 · Assistant
+
+Let me run the spec and look at the failure.
+
+**Tool call: `bash`** (`call-1`)
+
+```json
+{"command":"crystal spec spec/smith/paths_spec.cr"}
+```
+````
+
+Five things the format is careful about:
+
+- **Which record it read.** A session keeps two: `transcript.jsonl`, appended before compaction can touch it, and the working history in `session.json` that compaction shortens. The export prefers the raw transcript because it is the fuller record, falls back to the session file when there is none — and names its source with both message counts, so a disagreement is visible rather than hidden. A transcript log that could not be written is given up on mid-run, so it can be the *shorter* of the two; when it is, the export says so on stderr.
+- **Loss is counted, not swallowed.** A transcript line that will not parse is skipped so the rest stays readable, but the number of skipped lines goes into the source note and onto stderr. A record that lost a line otherwise looks exactly like an intact one — and a lost `tool_result` reads as a tool call that never returned.
+- **Attachments are named, not inlined.** An image or PDF renders as a one-line placeholder naming the file, its media type and the digest the bytes are stored under — never as the base64 that would turn a screenshot into megabytes of noise.
+- **The output is text.** Tool output is bytes from someone else's program: invalid UTF-8 becomes replacement characters, NUL, BEL and raw ANSI escapes are stripped, and a code fence a message never closed — backtick or tilde — gets closed. Otherwise the `.md` file is binary to `grep` and a `cat` of it is a terminal effect. Tool arguments, tool results and thinking are abbreviated to 800 characters, and fences grow past any backticks inside them. `--json` is the lossless form: one JSON object with the metadata and every message, unabbreviated.
+- **Cost follows the same rule as everywhere else.** `[pricing]` overrides apply, and an unknown rate prints `n/a` (`null` in JSON) rather than a guess.
+
+Damage degrades instead of aborting: a damaged index entry costs its own session and no other, an unreadable line in the transcript is skipped and counted, a session file that is gone or will not parse falls back to the raw transcript, and a directory that has lost everything says so and exits 1. `--out` writes atomically at 0600 and refuses a directory that does not exist rather than building one. Nothing on this path builds a provider, needs an API key or touches the network.
+
 `smith stats` aggregates what `smith sessions` shows per row across everything ever saved — total cost, total tokens split into prompt, completion and cache, and a per-model breakdown:
 
 ```bash
@@ -1371,6 +1412,7 @@ Commands:
   continue [<prompt>]        Continue the latest session; same as -c
   sessions, list             List all saved local chat sessions
   sessions delete <ref>…     Delete sessions (name or id), files and all
+  sessions export <ref>      Write a session as Markdown (--json, --out <path>)
   sessions prune             Drop sessions older than --older-than (30d), keeping --keep-last
   stats                      Total cost and tokens across all saved sessions
   rename <session> <name>    Give a session a name you can resume by
@@ -1396,6 +1438,7 @@ Options:
         --allow-unverified           update: install a release that carries no SHA256SUMS anyway
         --older-than SPAN            sessions prune: drop sessions last updated longer ago (e.g. 30d, 12h, 15m; default 30d)
         --keep-last N                sessions prune: keep the N most recent regardless of age
+        --out PATH                   sessions export: write the export to this file instead of stdout
         --agent NAME                 Run the main thread as the agent defined in .smith/agents/NAME.md
         --think                      Enable extended thinking (Anthropic)
         --no-think                   Disable extended thinking
@@ -1403,7 +1446,7 @@ Options:
         --max-budget-usd USD         Stop the run once the estimated cost reaches this (exit code 2)
         --trust-hooks                Trust this project's hooks without asking (they run arbitrary commands)
         --plan                       Start in plan mode: research only, until you approve a plan
-        --json                       Emit JSON Lines on stdout (headless 'run' only)
+        --json                       Emit JSON on stdout: JSON Lines for headless 'run', one document for 'sessions export'
         --no-stream                  Wait for the complete response instead of streaming it
         --tui                        Force the fullscreen terminal UI (interactive sessions)
         --no-tui                     Use the plain line renderer instead of the fullscreen UI
@@ -1445,6 +1488,7 @@ src/
     ├── hooks.cr             # Hook definitions & subprocess runner (both response protocols)
     ├── trust.cr             # Trust store & prompt for project-defined hooks
     ├── session.cr           # Session persistence store (~/.smith/sessions/<id>/) & transcript trimming
+    ├── session_export.cr    # A saved run as Markdown or one JSON document, for 'sessions export'
     ├── checkpoints.cr       # File snapshots before mutating calls, and rewind
     ├── subagents.cr         # Child agent supervisor & report handling
     ├── llm.cr               # Requires all LLM provider adapters

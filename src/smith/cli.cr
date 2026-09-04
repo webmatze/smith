@@ -3,6 +3,7 @@ require "./llm"
 require "./tools"
 require "./agent"
 require "./session"
+require "./session_export"
 require "./stats"
 require "./transcript_log"
 require "./project_ctx"
@@ -61,6 +62,7 @@ module Smith
     @force : Bool = false
     @older_than : String? = nil
     @keep_last : Int32 = 0
+    @out_path : String? = nil
     @mode : Mode? = nil
     @plan : PlanSession? = nil
     @real_approver : Tools::Approver? = nil
@@ -119,6 +121,7 @@ module Smith
           str.puts "  continue [<prompt>]        Continue the latest session; same as -c"
           str.puts "  sessions, list             List all saved local chat sessions"
           str.puts "  sessions delete <ref>…     Delete sessions (name or id), files and all"
+          str.puts "  sessions export <ref>      Write a session as Markdown (--json, --out <path>)"
           str.puts "  sessions prune             Drop sessions older than --older-than (30d), keeping --keep-last"
           str.puts "  stats                      Total cost and tokens across all saved sessions"
           str.puts "  rename <session> <name>    Give a session a name you can resume by"
@@ -186,6 +189,10 @@ module Smith
           @keep_last = count
         end
 
+        opts.on("--out PATH", "sessions export: write the export to this file instead of stdout") do |value|
+          @out_path = value
+        end
+
         opts.on("--agent NAME", "Run the main thread as the agent defined in .smith/agents/NAME.md") do |name|
           @agent_name = name
         end
@@ -219,7 +226,7 @@ module Smith
           @mode = Mode::Plan
         end
 
-        opts.on("--json", "Emit JSON Lines on stdout (headless 'run' only)") do
+        opts.on("--json", "Emit JSON on stdout: JSON Lines for headless 'run', one document for 'sessions export'") do
           @json_output = true
         end
 
@@ -253,6 +260,7 @@ module Smith
           puts "  • Plan Mode: --plan (or [defaults] mode = \"plan\") researches first and asks before changing anything."
           puts "    In chat, /plan and /normal switch at runtime; these built-ins win over a skill of the same name."
           puts "  • Sessions: /rename <name> and /context work in chat; costs are shown when the model's price is known."
+          puts "    'smith sessions export <ref>' writes a run as Markdown (or --json), to stdout or --out <path>."
           exit
         end
       end
@@ -262,9 +270,11 @@ module Smith
       command = @args.first? || "chat"
 
       # JSON Lines only make sense for a single headless run; anything else
-      # would silently do something other than what was asked.
-      if @json_output && !headless?(command)
-        STDERR.puts "❌ Error: --json is only supported for headless runs ('smith run')."
+      # would silently do something other than what was asked. `sessions
+      # export` is the exception — it answers in JSON too, as one document
+      # rather than a stream of events.
+      if @json_output && !headless?(command) && !sessions_export?(command)
+        STDERR.puts "❌ Error: --json is only supported for headless runs ('smith run') and 'smith sessions export'."
         exit(1)
       end
 
@@ -298,6 +308,8 @@ module Smith
         case @args[1]?
         when "delete"
           delete_sessions(@args[2..-1]?)
+        when "export"
+          export_session(@args[2..-1]?)
         when "prune"
           prune_sessions
         else
@@ -336,6 +348,10 @@ module Smith
     end
 
     KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update]
+
+    private def sessions_export?(command : String) : Bool
+      (command == "sessions" || command == "list") && @args[1]? == "export"
+    end
 
     # `run <prompt>`, or a bare prompt with no subcommand — both end up in
     # run_headless.
@@ -1499,10 +1515,17 @@ module Smith
       end
     end
 
-    # Both commands work on a saved session, so they resolve the id the same
-    # way `resume` does.
-    private def resolve_session(session_id : String?) : Session::Data
-      data = session_id ? @session_store.load(session_id) : @session_store.latest
+    # Both commands work on a saved session, so they resolve the reference the
+    # same way `resume` does — through the store, which is what makes a name
+    # work here as well as an id, and what refuses a reference that is really
+    # a path. It used to call `load` directly, so it did neither.
+    private def resolve_session(reference : String?) : Session::Data
+      data = begin
+        reference ? @session_store.resolve(reference) : @session_store.latest
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
 
       if data.nil?
         STDERR.puts "❌ No sessions found."
@@ -2032,6 +2055,8 @@ module Smith
         exit(1)
       end
 
+      warn_about_index_damage
+
       doomed = Array(String).new
       errors = Array(String).new
 
@@ -2053,9 +2078,77 @@ module Smith
       exit(1) unless errors.empty?
     end
 
+    # `smith sessions export <ref>` — a run you can take with you: Markdown to
+    # read, `--json` for the structured log, `--out` for a file (#95).
+    #
+    # Nothing on this path builds a provider or needs an API key: an export is
+    # a view over files that are already on disk.
+    private def export_session(references : Array(String)?) : Nil
+      reference = references.try(&.first?)
+
+      if reference.nil?
+        STDERR.puts "Error: 'smith sessions export' needs a session (name or id)."
+        STDERR.puts "Example: smith sessions export my-refactor --out run.md"
+        exit(1)
+      end
+
+      # One session per export: silently ignoring the rest would export
+      # something other than what was asked for.
+      if references && references.size > 1
+        STDERR.puts "Error: 'smith sessions export' takes one session, got #{references.size}: #{references.join(", ")}."
+        STDERR.puts "Export them one at a time, each with its own --out."
+        exit(1)
+      end
+
+      document = begin
+        SessionExport.build(@session_store, reference, @config.pricing)
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
+
+      # Damage goes to stderr so stdout stays the document and can be piped.
+      document.warnings.each { |warning| STDERR.puts "⚠️  #{warning}" }
+
+      content = @json_output ? document.to_json_document : document.to_markdown
+
+      if path = @out_path
+        # AtomicFile creates the directories its own callers need; an export
+        # goes where the user pointed, so a typo has to be an error rather
+        # than a tree of empty directories.
+        parent = File.dirname(path)
+        unless Dir.exists?(parent)
+          STDERR.puts "❌ Could not write the export to #{path}: the directory #{parent} does not exist."
+          exit(1)
+        end
+
+        begin
+          # Atomic, like everything else smith writes: half an export is worse
+          # than none.
+          AtomicFile.write(path, content)
+        rescue ex : File::Error | IO::Error
+          STDERR.puts "❌ Could not write the export to #{path}: #{ex.message}"
+          exit(1)
+        end
+        puts "📄 Exported #{document.reference} (#{document.messages.size} message(s)) to #{path}"
+      else
+        begin
+          # Unbuffered, so a closed pipe surfaces here with nothing left to
+          # flush at exit. `smith sessions export … | head -1` is how a long
+          # export gets read, and it must not end in a stack trace.
+          STDOUT.sync = true
+          STDOUT.puts content
+        rescue IO::Error
+          # The reader went away. The export is fine; there is nobody to
+          # hand it to.
+        end
+      end
+    end
+
     # `smith sessions prune` — drops every session last updated before the
     # cutoff, but never the newest one and never the --keep-last most recent.
     private def prune_sessions : Nil
+      warn_about_index_damage
       input = @older_than || "30d"
 
       older_than = begin
@@ -2087,8 +2180,27 @@ module Smith
       puts "   #{remaining} session(s) #{(@dry_run ? "would remain" : "left")}; the newest one is never pruned."
     end
 
+    # The index entries, with anything unreadable in the file named on stderr.
+    #
+    # A listing or a total that is quietly one session short is worse than an
+    # error, because nothing about it looks wrong. The store already knows
+    # what it could not parse; every command built on the index says so.
+    private def index_entries : Array(Session::IndexEntry)
+      entries, damage = @session_store.read_index
+      damage.each { |problem| STDERR.puts "⚠️  The session index is damaged: #{problem}." }
+      entries
+    end
+
+    # For the commands that work through the store and never hold the entries
+    # themselves. `delete` and `prune` need this most of all: they are the
+    # destructive ones, and a purge that quietly drops what it could not read
+    # is the worst version of a silent index.
+    private def warn_about_index_damage : Nil
+      index_entries
+    end
+
     private def list_sessions
-      entries = @session_store.list
+      entries = index_entries
       if entries.empty?
         puts "No saved sessions found under #{@session_store.sessions_dir}"
         return
@@ -2113,7 +2225,7 @@ module Smith
     # `smith stats` — totals across every saved session, built from the
     # index alone. Read-only by construction: nothing here writes (#85).
     private def show_stats
-      entries = @session_store.list
+      entries = index_entries
       if entries.empty?
         puts "No sessions found under #{@session_store.sessions_dir}"
         puts "Start a chat (`smith chat`) or a headless run, and the totals land here."

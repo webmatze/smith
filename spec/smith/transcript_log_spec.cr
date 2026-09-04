@@ -65,6 +65,29 @@ describe Smith::TranscriptLog do
     end
   end
 
+  it "counts the lines it skipped, so a shortened record cannot pass for an intact one" do
+    with_log do |log, _dir|
+      log.append([Smith::LLM::Message.user("first")])
+      File.open(log.path, "a") { |f| f.puts "{not json" }
+      File.open(log.path, "a") { |f| f.puts %({"role":"assistant","content":[{"type":) }
+      log.append([Smith::LLM::Message.user("fourth")])
+
+      messages, skipped = log.read
+
+      messages.size.should eq(2)
+      skipped.should eq(2)
+    end
+  end
+
+  it "reports no damage for an intact log, and none for a log that is not there" do
+    with_log do |log, _dir|
+      log.read.should eq({[] of Smith::LLM::Message, 0})
+
+      log.append([Smith::LLM::Message.user("first")])
+      log.read[1].should eq(0)
+    end
+  end
+
   it "reports a log it cannot write once, then stops trying" do
     # A record of the session must not be able to take the session down.
     warnings = IO::Memory.new

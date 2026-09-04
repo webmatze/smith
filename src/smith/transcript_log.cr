@@ -52,17 +52,32 @@ module Smith
 
     # Only for reporting and tests — nothing on the normal path reads the log.
     def messages : Array(LLM::Message)
-      return [] of LLM::Message unless exists?
+      read[0]
+    end
 
-      File.read_lines(@path).compact_map do |line|
+    # The messages, and how many lines could not be read.
+    #
+    # One unreadable line must not make the rest unreachable — but it must not
+    # pass unnoticed either. A record eight messages long that was nine is
+    # indistinguishable from an intact one unless the loss is counted, and a
+    # dropped `tool_result` leaves a tool call that appears never to have
+    # returned. So the count comes back with the messages and the caller says
+    # so out loud.
+    def read : {Array(LLM::Message), Int32}
+      return {[] of LLM::Message, 0} unless exists?
+
+      skipped = 0
+      messages = File.read_lines(@path).compact_map do |line|
         next if line.blank?
         begin
           LLM::Message.from_json(line)
         rescue
-          # One unreadable line must not make the rest unreachable.
+          skipped += 1
           nil
         end
       end
+
+      {messages, skipped}
     end
   end
 end
