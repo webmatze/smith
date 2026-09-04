@@ -214,7 +214,7 @@ module Smith::Session
     getter sessions_dir : String
     getter index_path : String
 
-    def initialize(base_dir : String? = nil)
+    def initialize(base_dir : String? = nil, @warn_io : IO = STDERR)
       @base_dir = base_dir || Smith.home_dir
       @sessions_dir = File.join(@base_dir, "sessions")
       @index_path = File.join(@sessions_dir, "index.json")
@@ -392,14 +392,19 @@ module Smith::Session
       wanted = reference.strip
       entries = list
 
-      # Matching an id or a name is a string compare against something the
-      # index already holds, and cannot leave the sessions directory. The
-      # filesystem probe can — `File.join` defuses an absolute path but
-      # carries `..` straight through — so the guard sits on that branch
-      # alone. In front of all three it would also strand a session named
-      # `feat/export` by an earlier release, which `rename` used to allow.
-      return wanted if entries.any? { |e| e.id == wanted }
-      return wanted if plain_reference?(wanted) && session_file?(wanted)
+      # Both of these hand the reference back as an id, and an id is what
+      # everything downstream turns into a path — so both are guarded. The
+      # index is a plain file: an `id` in it has been through no resolution
+      # at all, and one edited to `../victim` would otherwise resolve.
+      #
+      # The *name* is not guarded, and must not be: an earlier release let
+      # `rename` write `feat/export`, and refusing that would strand a session
+      # that is still listed. What the name branch returns is checked instead,
+      # so that this method's promise holds whatever the index says — it
+      # returns something that can be a directory name, or it raises.
+      if plain_reference?(wanted)
+        return wanted if entries.any? { |e| e.id == wanted } || session_file?(wanted)
+      end
 
       matches = entries.select { |e| e.name == wanted }
 
@@ -410,7 +415,11 @@ module Smith::Session
         assert_plain_reference(wanted)
         raise NotFound.new("Session '#{wanted}' not found. Run 'smith sessions' to see what there is.")
       when 1
-        matches.first.id
+        id = matches.first.id
+        unless plain_reference?(id)
+          raise ArgumentError.new("Session '#{wanted}' has '#{id}' as its id in the index, which is a path rather than a session id. Fix or remove that entry in #{@index_path}.")
+        end
+        id
       else
         # Only reachable if session files were edited by hand, but picking one
         # silently would resume the wrong conversation.
@@ -509,15 +518,23 @@ module Smith::Session
     end
 
     private def remove(id : String) : Nil
-      # Checked once more at the point of no return: everything that reaches
-      # here becomes an `rm -rf`, and an id read back from a hand-edited index
-      # has been through no resolution at all.
-      assert_plain_reference(id)
-
       # Index first: interrupted before the files go, what is left is an
       # invisible orphan directory; the other way round the index would keep
       # naming a session that is no longer there.
       write_index(list.reject { |e| e.id == id })
+
+      # Everything below becomes an `rm -rf`, and `prune` reaches it without
+      # going through `resolve_id` at all — straight from an id in the index,
+      # which has been through no resolution and can say anything.
+      #
+      # Reported and skipped rather than raised: `prune` runs at the start of
+      # every session, so raising here would turn one bad line in a file into
+      # `chat`, `run` and `resume` refusing to start. The entry is gone from
+      # the index either way; what is refused is following it out of the tree.
+      unless plain_reference?(id)
+        @warn_io.puts "⚠️  Not deleting '#{id}': that is a path, not a session id. Its index entry is gone; if a directory was meant, remove it yourself."
+        return
+      end
 
       dir = session_dir(id)
       FileUtils.rm_rf(dir) if Dir.exists?(dir)

@@ -698,6 +698,45 @@ describe "a session reference" do
     end
   end
 
+  it "does not resolve an id the index carries that is really a path" do
+    with_store do |store|
+      # Resolution's promise: what comes back can be a directory name under
+      # sessions/, whatever the index says. An entry edited to `../victim`
+      # would otherwise be read — by export, resume and context alike.
+      File.write(store.index_path, %([{"id": "../victim", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0, "name": "innocent"}]))
+
+      expect_raises(ArgumentError, /is not a session reference/) { store.resolve_id("../victim") }
+      # And not by the back door either: the name matches, the id is the path.
+      expect_raises(ArgumentError, /is a path rather than a session id/) { store.resolve_id("innocent") }
+    end
+  end
+
+  it "prunes past a path-shaped id instead of taking the session down with it" do
+    with_store do |store|
+      # `prune` runs at the start of every session and never goes through
+      # resolution, so raising here would turn one bad line in a file into
+      # chat, run and resume refusing to start.
+      warnings = IO::Memory.new
+      store = Smith::Session::Store.new(base_dir: store.base_dir, warn_io: warnings)
+      outside = File.join(store.base_dir, "victim")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "keepme.txt"), "secret")
+
+      keeper = session_with(store, "the newest session")
+      entries = JSON.parse(File.read(store.index_path)).as_a
+      rogue = JSON.parse(%({"id": "../victim", "created_at": "2020-01-01T00:00:00Z", "updated_at": "2020-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0}))
+      File.write(store.index_path, (entries + [rogue]).to_json)
+
+      doomed = store.prune(older_than: 30.days)
+
+      doomed.map(&.id).should eq(["../victim"])
+      warnings.to_s.should contain("Not deleting '../victim'")
+      # The entry is gone, the directory outside the tree is not.
+      store.list.map(&.id).should eq([keeper.id])
+      File.exists?(File.join(outside, "keepme.txt")).should be_true
+    end
+  end
+
   it "tells a reference that names nothing from one that is refused" do
     with_store do |store|
       # A caller that means to fall back when a session is gone must not also

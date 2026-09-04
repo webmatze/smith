@@ -2048,6 +2048,8 @@ module Smith
         exit(1)
       end
 
+      warn_about_index_damage
+
       doomed = Array(String).new
       errors = Array(String).new
 
@@ -2139,6 +2141,7 @@ module Smith
     # `smith sessions prune` — drops every session last updated before the
     # cutoff, but never the newest one and never the --keep-last most recent.
     private def prune_sessions : Nil
+      warn_about_index_damage
       input = @older_than || "30d"
 
       older_than = begin
@@ -2179,6 +2182,14 @@ module Smith
       entries, damage = @session_store.read_index
       damage.each { |problem| STDERR.puts "⚠️  The session index is damaged: #{problem}." }
       entries
+    end
+
+    # For the commands that work through the store and never hold the entries
+    # themselves. `delete` and `prune` need this most of all: they are the
+    # destructive ones, and a purge that quietly drops what it could not read
+    # is the worst version of a silent index.
+    private def warn_about_index_damage : Nil
+      index_entries
     end
 
     private def list_sessions

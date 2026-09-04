@@ -233,6 +233,19 @@ describe Smith::SessionExport do
     end
   end
 
+  it "will not read outside the sessions tree, whatever the index claims an id is" do
+    with_store do |store|
+      outside = File.join(store.base_dir, "victim")
+      FileUtils.mkdir_p(outside)
+      Smith::TranscriptLog.new(outside).append([Smith::LLM::Message.user("I am outside the sessions dir")])
+      File.write(store.index_path, %([{"id": "../victim", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "first_prompt": "x", "message_count": 1}]))
+
+      expect_raises(ArgumentError, /is not a session reference/) do
+        Smith::SessionExport.build(store, "../victim")
+      end
+    end
+  end
+
   it "exports a session whose name an earlier release let contain a slash" do
     with_store do |store|
       session = seed_session(store)
