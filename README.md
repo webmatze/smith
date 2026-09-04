@@ -1275,7 +1275,7 @@ smith plugin marketplace update [name]     # all of them when no name is given
 smith plugin install <plugin>@<marketplace>
 smith plugin uninstall <plugin>[@<marketplace>]
 smith plugin list
-smith plugin update [plugin]
+smith plugin update [plugin][@<marketplace>]
 ```
 
 Every subcommand is headless: clear `❌ Error: …` messages, never a question.

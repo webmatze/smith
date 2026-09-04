@@ -1089,7 +1089,7 @@ module Smith::Marketplace
          smith plugin install <plugin>@<marketplace>
          smith plugin uninstall <plugin>[@<marketplace>]
          smith plugin list
-         smith plugin update [plugin]
+         smith plugin update [plugin][@<marketplace>]
       TEXT
 
     # One stream on purpose. Everything below is a subcommand's account of the
