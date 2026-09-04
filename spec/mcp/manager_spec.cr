@@ -145,6 +145,83 @@ describe Smith::MCP::Manager do
     end
   end
 
+  it "gives a session's servers the patient shutdown by default" do
+    # The zero grace is `smith doctor`'s alone. A session's servers get the
+    # chance to exit on TERM that they have always had, and nothing but this
+    # pins that the default did not travel with the new parameter.
+    Smith::MCP::Manager.build([spec_for("fs")]).handles.first.grace
+      .should eq(Smith::MCP::StdioTransport::GRACE)
+  end
+
+  it "kills a server that ignores SIGTERM when the caller cannot wait" do
+    # `smith doctor` builds its manager with a zero grace: it promises to be
+    # quick, and waiting twice over for a server that will not leave is how
+    # it would break that promise — or leave the server behind.
+    script = File.tempname("smith-mcp-stubborn", ".sh")
+    pid_file = File.tempname("smith-mcp-stubborn-pid")
+
+    begin
+      File.write(script, <<-SH)
+        #!/bin/bash
+        trap '' TERM INT HUP PIPE
+        printf '%s' "$$" > "#{pid_file}"
+        while :; do IFS= read -r line || sleep 3600; done
+        SH
+      File.chmod(script, 0o755)
+
+      manager = Smith::MCP::Manager.build(
+        [Smith::MCP::ServerSpec.new(name: "stubborn", command: script)],
+        timeout: 1.second,
+        startup_timeout: 1.second,
+        grace: Time::Span.zero
+      )
+      manager.start_all(IO::Memory.new)
+
+      pid = File.read(pid_file).strip.to_i
+      started = Time.instant
+      manager.shutdown
+      elapsed = Time.instant - started
+
+      # The patient default would spend two full graces here.
+      elapsed.should be < Smith::MCP::StdioTransport::GRACE
+
+      50.times do
+        break unless Process.exists?(pid)
+        sleep 20.milliseconds
+      end
+      Process.exists?(pid).should be_false
+    ensure
+      File.delete(script) if File.exists?(script)
+      File.delete(pid_file) if File.exists?(pid_file)
+    end
+  end
+
+  it "keeps the server's own stderr out of the summary a diagnostic prints" do
+    # A stdio server inherits smith's environment. `error` keeps what it said
+    # because "why will this not start" is what `smith mcp list` answers;
+    # `error_summary` cannot, because that is the line meant to be shared.
+    script = File.tempname("smith-mcp-chatty", ".sh")
+
+    begin
+      File.write(script, "#!/bin/sh\necho 'TOKEN-from-the-child' >&2\nexit 1\n")
+      File.chmod(script, 0o755)
+
+      handle = Smith::MCP::ServerHandle.new(
+        Smith::MCP::ServerSpec.new(name: "chatty", command: script, args: ["--api-key", "ARGSECRET"]),
+        "chatty",
+        1.second,
+        1.second
+      )
+      handle.start.should be_false
+
+      handle.error.to_s.should contain("TOKEN-from-the-child")
+      handle.error_summary.to_s.should_not contain("TOKEN-from-the-child")
+      handle.error_summary.to_s.should_not contain("ARGSECRET")
+    ensure
+      File.delete(script) if File.exists?(script)
+    end
+  end
+
   describe "naming" do
     it "prefixes tools with the server so they never collide with built-ins" do
       Smith::MCP::Manager.tool_name("filesystem", "read_file").should eq("mcp__filesystem__read_file")

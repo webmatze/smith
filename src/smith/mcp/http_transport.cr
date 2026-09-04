@@ -21,6 +21,7 @@ module Smith::MCP
     CLOSE_TIMEOUT = 2.seconds
 
     getter failure_hint : String?
+    getter failure_body : String?
 
     @session_id : String?
     @client : HTTP::Client
@@ -36,6 +37,7 @@ module Smith::MCP
       @session_id = nil
       @closed = false
       @failure_hint = nil
+      @failure_body = nil
       @lock = Mutex.new
       @state_lock = Mutex.new
       @client = build_client
@@ -101,7 +103,10 @@ module Smith::MCP
             die!("the MCP server at #{@url} no longer recognises this session (HTTP 404) — it may have restarted")
           else
             body = response.body_io.gets_to_end
-            die!("the MCP server at #{@url} answered HTTP #{response.status_code}: #{snippet(body)}")
+            # The status is smith's diagnosis; the body is the server's own
+            # words. They travel separately so a caller that must not repeat
+            # the second still gets the first.
+            die!("the MCP server at #{@url} answered HTTP #{response.status_code}", snippet(body))
           end
         end
       end
@@ -190,9 +195,10 @@ module Smith::MCP
     # Connection-level failure: remember the reason, end the stream. Everyone
     # still waiting is abandoned by the reader and sees this message — the same
     # shape a dead stdio pipe produces.
-    private def die!(message : String) : Nil
+    private def die!(message : String, body : String? = nil) : Nil
       @state_lock.synchronize do
         @failure_hint ||= message
+        @failure_body ||= body
         unless @closed
           @closed = true
           @inbox.send(nil)

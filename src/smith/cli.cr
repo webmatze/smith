@@ -24,6 +24,7 @@ require "./sandbox"
 require "./tools/sandbox_approver"
 require "./mcp"
 require "./update"
+require "./doctor"
 require "./ui"
 
 module Smith
@@ -132,7 +133,8 @@ module Smith
           str.puts "  mcp list | tools <server>  Show the configured MCP servers and their tools"
           str.puts "  skills list                Show the skills catalog: name, origin and description"
           str.puts "  agents list                Show the agent definitions and the model and tools each asks for"
-          str.puts "  update [--check]           Replace this binary with the newest release binary\n"
+          str.puts "  update [--check]           Replace this binary with the newest release binary"
+          str.puts "  doctor                     Check providers, MCP, sandbox and config, then exit\n"
           str.puts "Options:"
         end
 
@@ -337,6 +339,8 @@ module Smith
         show_sandbox
       when "update"
         run_update
+      when "doctor"
+        run_doctor
       else
         prompt = @args.join(" ")
         if prompt.empty?
@@ -347,7 +351,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update doctor]
 
     private def sessions_export?(command : String) : Bool
       (command == "sessions" || command == "list") && @args[1]? == "export"
@@ -1600,6 +1604,28 @@ module Smith
       exit(code) unless code.zero?
     end
 
+    # Every source a run depends on, checked before a session exists. No
+    # provider is built and no request is sent: build_provider exits on a
+    # missing key, and a missing key is precisely what this reports.
+    private def run_doctor : Nil
+      provider = effective_provider_name.downcase
+
+      report = Doctor::Runner.new(
+        config: @config,
+        provider: provider,
+        model: @model || @config.model_for(provider),
+        mode: effective_mode.to_s.downcase,
+        skills: @skills_catalog.skills.size,
+        agents: @agents_catalog.agents.size,
+        # From the catalogs already built, not a second walk of the same
+        # directories: a count on its own hides the file that failed to load.
+        catalog_notes: Doctor.catalog_notes(@skills_catalog, @agents_catalog)
+      ).run
+
+      Doctor.render(report, STDOUT)
+      exit(report.exit_code)
+    end
+
     # What is actually in force, printable. A sandbox nobody can inspect is a
     # claim, and the value of this feature is that the claim can be relied on.
     private def show_sandbox
@@ -1773,10 +1799,16 @@ module Smith
           handle.name,
           handle.running? ? "ready" : "failed",
           handle.tools.size.to_s,
-          handle.spec.description
+          # An `--api-key` in the argument list and a token in a url are both
+          # ordinary ways to configure a server, and this listing is one of
+          # the things people paste into a bug report.
+          handle.spec.safe_description
       end
 
       puts "--------------------------------------------------------------------------------"
+      # The full error, stderr and all: here the question is why a server will
+      # not start, and its own complaint is the answer. `smith doctor` takes
+      # the summary instead.
       manager.handles.reject(&.running?).each { |handle| puts "   #{handle.name}: #{handle.error}" }
       puts "Inspect one with: smith mcp tools <server>"
     end

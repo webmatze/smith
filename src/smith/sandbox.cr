@@ -316,4 +316,123 @@ module Smith::Sandbox
 
     MacOS.new(policy, workdir)
   end
+
+  # What a real trial run says about this machine.
+  #
+  # `MacOS.available?` only asks whether the binary is there, and that is not
+  # the same question: `sandbox-exec` is present and still refuses inside
+  # another sandbox, because a sandbox cannot be nested. #80 names the same
+  # trap for a future Linux strategy, where unprivileged user namespaces may
+  # be switched off. Reporting protection that is not actually in force is the
+  # one failure mode this feature cannot afford, so the check runs a command.
+  enum Availability
+    Usable
+    Missing
+    Blocked
+    Unsupported
+  end
+
+  struct Probe
+    getter availability : Availability
+    getter detail : String
+
+    def initialize(@availability : Availability, @detail : String)
+    end
+
+    def usable? : Bool
+      @availability.usable?
+    end
+  end
+
+  # The trial costs about 5 ms; anything near this deadline is a machine that
+  # has already answered the question.
+  PROBE_TIMEOUT = 3.seconds
+
+  def self.probe(timeout : Time::Span = PROBE_TIMEOUT) : Probe
+    {% if flag?(:darwin) %}
+      return Probe.new(Availability::Missing, "#{MACOS_BINARY} is not installed") unless File.exists?(MACOS_BINARY)
+
+      status, stderr = trial_run(timeout)
+
+      if status.nil?
+        Probe.new(Availability::Blocked, "#{MACOS_BINARY} did not answer within #{timeout.total_seconds.round.to_i}s")
+      elsif status.success?
+        Probe.new(Availability::Usable, "#{MACOS_BINARY} confined a trial command")
+      else
+        Probe.new(Availability::Blocked, refusal(stderr))
+      end
+    {% elsif flag?(:linux) %}
+      Probe.new(Availability::Unsupported, "smith has no sandbox for Linux yet (#80)#{namespace_note}")
+    {% else %}
+      Probe.new(Availability::Unsupported, "smith only confines bash on macOS")
+    {% end %}
+  end
+
+  {% if flag?(:darwin) %}
+    # The smallest profile that still proves confinement can be applied.
+    private def self.trial_run(timeout : Time::Span) : {Process::Status?, String}
+      process = Process.new(
+        MACOS_BINARY,
+        ["-p", "(version 1)(allow default)", "/usr/bin/true"],
+        input: Process::Redirect::Close,
+        output: Process::Redirect::Close,
+        error: Process::Redirect::Pipe
+      )
+
+      done = Channel({Process::Status, String}).new(1)
+      spawn do
+        begin
+          captured = process.error.gets_to_end
+          done.send({process.wait, captured})
+        rescue
+          # A spawned fiber must not raise out; the deadline below covers it.
+        end
+      end
+
+      select
+      when result = done.receive
+        result
+      when timeout(timeout)
+        begin
+          process.terminate(graceful: false)
+        rescue
+        end
+        {nil, ""}
+      end
+    end
+
+    # The one refusal worth naming: whoever tests this feature runs smith
+    # inside a sandbox first, and `sandbox_apply: Operation not permitted`
+    # means the nesting, not a broken machine.
+    private def self.refusal(stderr : String) : String
+      tail = stderr.lines.map(&.strip).reject(&.empty?).last(2).join(" / ")
+      base = tail.empty? ? "#{MACOS_BINARY} refused a trial command" : "#{MACOS_BINARY} refused: #{tail}"
+
+      return base unless stderr.includes?("Operation not permitted")
+      "#{base} — a sandbox cannot be nested, so this is what it looks like when smith itself runs confined"
+    end
+  {% end %}
+
+  {% if flag?(:linux) %}
+    # #80 picks bubblewrap or Landlock; the first needs unprivileged user
+    # namespaces, which several distributions switch off. Saying so costs
+    # three file reads and saves the next person the investigation.
+    private def self.namespace_note : String
+      locked = {
+        "/proc/sys/kernel/unprivileged_userns_clone"             => "0",
+        "/proc/sys/user/max_user_namespaces"                     => "0",
+        "/proc/sys/kernel/apparmor_restrict_unprivileged_userns" => "1",
+      }.any? { |path, blocked| sysctl(path) == blocked }
+
+      locked ? " — and unprivileged user namespaces are locked down here, so a bubblewrap sandbox could not work on this machine either" : ""
+    end
+
+    # nil for a knob this kernel does not have, which is not the same as one
+    # that is switched off.
+    private def self.sysctl(path : String) : String?
+      File.read(path).strip
+    rescue
+      nil
+    end
+  {% end %}
 end

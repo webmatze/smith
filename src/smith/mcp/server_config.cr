@@ -45,6 +45,69 @@ module Smith::MCP
 
       ([@command || "?"] + @args).join(" ")
     end
+
+    # The same, cut back to what identifies a server without carrying a
+    # secret with it.
+    #
+    # Both halves of `description` are places a token is routinely written:
+    # `--api-key X` is an ordinary way to configure a stdio server, and a url
+    # can hide one in its userinfo, its path, its query or its fragment. The
+    # server's own name, which is printed beside this, is what tells two
+    # entries apart; the argument list only ever confirmed it.
+    #
+    # `env` and `headers` are not here at all — those are expanded from the
+    # environment, which is where the keys live.
+    #
+    # What this does *not* cover: the command path itself, which is printed in
+    # full and on purpose, because it is what identifies the server once the
+    # arguments are gone. Someone who writes a secret into a path has written
+    # it into a filename, and there is nothing left to tell two servers apart
+    # by if that goes too.
+    def safe_description : String
+      url = @url
+      return ServerSpec.safe_url(url) unless url.nil?
+
+      command = @command || "?"
+      @args.empty? ? command : "#{command} (#{@args.size} argument#{@args.size == 1 ? "" : "s"})"
+    end
+
+    # Scheme, host and port. Everything else a url can carry is somewhere a
+    # credential has been found before.
+    def self.safe_url(url : String) : String
+      uri = URI.parse(url)
+      host = uri.host
+      return "(url)" if host.nil? || host.empty?
+
+      String.build do |str|
+        str << uri.scheme << "://" if uri.scheme
+        str << host
+        str << ':' << uri.port if uri.port
+      end
+    rescue
+      "(url)"
+    end
+
+    # Any url inside a message smith did not compose itself — an exception
+    # from the HTTP client, a warning that quotes the config — cut back the
+    # same way.
+    #
+    # A url filter, and only that. It does nothing to text that is not
+    # url-shaped, so it is not a general redactor and must not be treated as
+    # one: text that could carry anything — a server's stderr, an HTTP error
+    # body — has to be kept out of a message rather than run through this.
+    def self.scrub_urls(text : String) : String
+      text.gsub(/\b[a-zA-Z][a-zA-Z0-9+.\-]*:\/\/[^\s'"<>]+/) do |match|
+        # A url runs up to whitespace, so the punctuation that ends the
+        # sentence around it is part of the match. Handing that back keeps the
+        # message readable — "at <url>: connection refused" rather than the
+        # colon disappearing into the url.
+        if tail = match.match(/^(.*?)([.,;:!?)\]}'"]+)$/)
+          "#{safe_url(tail[1])}#{tail[2]}"
+        else
+          safe_url(match)
+        end
+      end
+    end
   end
 
   # Discovery and parsing of `mcp.json`.
@@ -179,7 +242,10 @@ module Smith::MCP
 
       uri = URI.parse(url)
       unless uri.scheme.in?("http", "https")
-        warn_io.puts "⚠️  Skipping MCP server '#{name}' in #{source}: '#{url}' is not an http(s) url."
+        # Sanitised, not verbatim: this line reaches stderr at session start
+        # and `smith doctor`'s output, and a rejected url is still a url that
+        # may carry a token.
+        warn_io.puts "⚠️  Skipping MCP server '#{name}' in #{source}: '#{ServerSpec.safe_url(url)}' is not an http(s) url."
         return nil
       end
 
