@@ -765,7 +765,7 @@ Focus on correctness before style, and name the file and line for every finding.
 | `tools` | no | Comma list. Defaults to whatever `mode` implies. Unknown names are warned about and dropped. |
 | `model` | no | Defaults to the parent's |
 | `provider` | no | Defaults to the parent's |
-| `mode` | no | `work` (default) or `inspect`; sets the default tool list |
+| `mode` | no | `work` (default) or `inspect`; sets the default tool list. Case does not matter. A value that is neither is warned about — by path and by the value — and falls back to **`inspect`**, never to `work`: a mode is a security statement, so a typo costs the agent tools rather than costing you the promise. The definition still loads. |
 
 The body is the system prompt.
 
@@ -777,7 +777,7 @@ The `agent` tool gains an `agent_type` parameter, and its description lists what
 {"prompt": "Review the diff on the current branch", "agent_type": "reviewer"}
 ```
 
-Without `agent_type` the old `mode` behaviour is unchanged. An unknown name comes back as a tool error naming the ones that exist, so the model can correct itself.
+Without `agent_type` the old `mode` behaviour is unchanged. An unknown name comes back as a tool error naming the ones that exist, so the model can correct itself — and so does an unknown `mode`, which is refused rather than read as `work`: the parameter declares an enum, but not every provider enforces one.
 
 #### Running one directly
 
@@ -794,7 +794,7 @@ smith agents list         # name, file, description, provider, model, mode and t
 smith skills list         # the same for the skills catalog, warnings included
 ```
 
-`smith agents list` prints the *effective* tool list, so a definition that names no `tools` shows the set its `mode` implies rather than a blank, and one that declares an empty `tools:` shows `(none)`.
+`smith agents list` prints the *effective* tool list, so a definition that names no `tools` shows the set its `mode` implies rather than a blank, and one that declares an empty `tools:` shows `(none)`. Where a `mode:` did not read, the `mode:` line shows the fallback as a fallback — `inspect (fallback; 'inspekt' is not a mode)` — rather than passing smith's own choice off as what the file asked for.
 
 Both add a `shadows:` line wherever two sources define the same name, so which file is actually in effect is visible rather than inferred — and a warning about a file that lost the clash says which file won, instead of reading as though the one you are using were broken. Below the list, `smith skills list` names every `SKILL.md` that did not read as written (agent definitions get the same check, on stderr):
 

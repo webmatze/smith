@@ -315,6 +315,29 @@ describe "plugin agents" do
       warnings.to_s.should_not contain("Agent 'local'")
     end
   end
+
+  # A mode smith cannot read is on the plugin channel like every other problem
+  # here, and it is safe to be: after the fallback it is a loss of capability,
+  # not a grant of one. The listing carries it, and the listing's own `mode:`
+  # line marks the fallback whatever the definition's origin.
+  it "keeps a plugin's unreadable mode out of startup, and still falls back to inspect" do
+    with_plugins(
+      plugins: {"fixture/agents-demo" => {"agents/auditor.md" => agent("auditor", "mode: readonly\n")}},
+      global: {"local" => agent("local", "mode: inspekt\n")}
+    ) do |dir|
+      startup = IO::Memory.new
+      catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: startup)
+
+      catalog.agents["agents-demo:auditor"].mode.should eq(Smith::Subagents::Mode::Inspect)
+      catalog.agents["agents-demo:auditor"].mode_label.should contain("readonly")
+
+      text = catalog.warnings.join("\n")
+      text.should contain("'readonly' is not a mode")
+      # A definition the reader wrote themselves still says so at startup.
+      startup.to_s.should contain("'inspekt' is not a mode")
+      startup.to_s.should_not contain("readonly")
+    end
+  end
 end
 
 # The reason the two channels are separate at all. A marketplace ships agent

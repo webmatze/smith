@@ -10,10 +10,15 @@ module Smith::Subagents
     Work
     Inspect
 
-    def self.from_string(str : String) : Mode
+    # nil rather than a default, deliberately. A mode is a security statement,
+    # and the method that silently turned every unreadable value into `Work`
+    # handed the full tool set to anyone who mistyped `inspect`. Each caller
+    # now says for itself what an unknown value costs — see `Agents::Catalog#parse`
+    # and `Tools::AgentTool#run`.
+    def self.from_string?(str : String) : Mode?
       case str.downcase
+      when "work"    then Work
       when "inspect" then Inspect
-      else                Work
       end
     end
   end

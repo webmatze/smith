@@ -71,13 +71,20 @@ describe Smith::Agents::Catalog do
   end
 
   it "defaults the name to the filename and the mode to work" do
+    warnings = IO::Memory.new
     with_agents(project: {"tester" => "---\ndescription: Runs tests.\n---\nYou run tests."}) do |dir|
-      agent = Smith::Agents::Catalog.discover(dir).agents["tester"]
+      agent = Smith::Agents::Catalog.discover(dir, warn_io: warnings).agents["tester"]
 
       agent.name.should eq("tester")
       agent.mode.should eq(Smith::Subagents::Mode::Work)
       agent.tools.should be_nil
       agent.model.should be_nil
+      # A file that declares no mode is not a file that got one wrong: the
+      # documented default has to stay silent, or the warning means nothing.
+      agent.declared_mode.should be_nil
+      agent.mode_fallback?.should be_false
+      agent.mode_label.should eq("work")
+      warnings.to_s.should be_empty
     end
   end
 
@@ -206,6 +213,85 @@ describe "the tools an agent definition resolves to" do
 
       names.should contain("bash")
       names.should contain("write_file")
+    end
+  end
+end
+
+# `mode:` is the one field in a definition that is a security statement, and an
+# unreadable value used to resolve to `work` — the full tool set, silently, for
+# a file whose author wrote the opposite. The typo costs the agent tools now,
+# rather than costing the reader the promise.
+describe "an agent definition with a mode smith cannot read" do
+  it "warns with the path and the value, and falls back to inspect" do
+    warnings = IO::Memory.new
+    with_agents(project: {"auditor" => "---\ndescription: Audits.\nmode: inspekt\n---\nP"}) do |dir|
+      agent = Smith::Agents::Catalog.discover(dir, warn_io: warnings).agents["auditor"]
+
+      agent.mode.should eq(Smith::Subagents::Mode::Inspect)
+      agent.tool_names.should_not contain("bash")
+      agent.tool_names.should_not contain("write_file")
+      agent.tool_names.should_not contain("edit_file")
+
+      warnings.to_s.should contain("inspekt")
+      warnings.to_s.should contain(File.join(dir, ".smith", "agents", "auditor.md"))
+      warnings.to_s.should contain("inspect")
+    end
+  end
+
+  # The definition is not rejected: an unreadable mode should make an agent
+  # careful, not unusable.
+  it "keeps the definition, with everything else it declared" do
+    with_agents(project: {"auditor" => "---\ndescription: Audits.\nmode: read-only\nmodel: m\n---\nThe prompt."}) do |dir|
+      agent = Smith::Agents::Catalog.discover(dir, warn_io: IO::Memory.new).agents["auditor"]
+
+      agent.description.should eq("Audits.")
+      agent.model.should eq("m")
+      agent.system_prompt.should eq("The prompt.")
+    end
+  end
+
+  # The second half of the issue: `smith agents list` prints `mode_label`, and
+  # the view that exists to make configuration visible must not pass smith's own
+  # fallback off as the author's configuration.
+  it "marks the fallback as a fallback where the listing reads the mode" do
+    with_agents(project: {"auditor" => "---\ndescription: Audits.\nmode: inspekt\n---\nP"}) do |dir|
+      agent = Smith::Agents::Catalog.discover(dir, warn_io: IO::Memory.new).agents["auditor"]
+
+      agent.declared_mode.should eq("inspekt")
+      agent.mode_fallback?.should be_true
+      agent.mode_label.should contain("inspect")
+      agent.mode_label.should contain("fallback")
+      agent.mode_label.should contain("inspekt")
+    end
+  end
+
+  it "reads a declared mode back as itself, whatever its case" do
+    warnings = IO::Memory.new
+    with_agents(project: {
+      "loud"   => "---\ndescription: d\nmode: Inspect\n---\nP",
+      "louder" => "---\ndescription: d\nmode: WORK\n---\nP",
+    }) do |dir|
+      catalog = Smith::Agents::Catalog.discover(dir, warn_io: warnings)
+
+      catalog.agents["loud"].mode.should eq(Smith::Subagents::Mode::Inspect)
+      catalog.agents["loud"].mode_fallback?.should be_false
+      catalog.agents["loud"].mode_label.should eq("inspect")
+      catalog.agents["louder"].mode.should eq(Smith::Subagents::Mode::Work)
+      catalog.agents["louder"].mode_fallback?.should be_false
+      warnings.to_s.should be_empty
+    end
+  end
+
+  # `mode:` with nothing after it is "configured as empty", which the header
+  # parser hands back as no value at all — the documented default, not a typo.
+  it "treats an empty mode as none at all" do
+    warnings = IO::Memory.new
+    with_agents(project: {"blank" => "---\ndescription: d\nmode:\n---\nP"}) do |dir|
+      agent = Smith::Agents::Catalog.discover(dir, warn_io: warnings).agents["blank"]
+
+      agent.mode.should eq(Smith::Subagents::Mode::Work)
+      agent.mode_fallback?.should be_false
+      warnings.to_s.should_not contain("is not a mode")
     end
   end
 end
