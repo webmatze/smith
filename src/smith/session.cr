@@ -111,6 +111,28 @@ module Smith::Session
     # across a resume so the first turn back is not blind about a long history.
     property context_ratio : Float64 = 1.0
 
+    # What `usage` stood at when the running agent was built. `Agent` counts a
+    # *run*, this record holds a *lifetime*, and this is the offset between the
+    # two: `CLI#persist` writes `usage_before_run + agent.cumulative_usage`.
+    #
+    # Not written to disk, and defaulted so a `Data` that never met an agent —
+    # anything the store loads for a listing, an export or a rename — behaves
+    # as it always did.
+    #
+    # It rides on the session rather than on the CLI because every path that
+    # persists is handed the pair it belongs to. `/resume` inside a running
+    # loop rebuilds the agent before it re-points the interrupt handler, and
+    # replaces the todo list in between — which writes, so it can yield. A
+    # `^C` dispatched in that window can therefore still reach a handler
+    # holding the session being *left*, and that session has to be written
+    # against its own baseline. A single slot on the CLI would by then hold
+    # the incoming session's. The window needs the main fiber to yield and a
+    # `^C` dispatched after the handler is re-pointed uses the new one, so
+    # this is a narrow race rather than a certainty — but it costs nothing to
+    # close, and the pair a persisting path holds is the honest place for it.
+    @[JSON::Field(ignore: true)]
+    property usage_before_run : Smith::LLM::Usage = Smith::LLM::Usage.new(0, 0, 0)
+
     def initialize(
       @id : String,
       @cwd : String,

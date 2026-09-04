@@ -788,6 +788,14 @@ module Smith
         end
       end
 
+      # The run's token counter is born at zero on the next line, so the
+      # session's total to date is taken on this one — the two are the same
+      # event, which is why the baseline is captured here and not at any of the
+      # five call sites. A run start, `smith resume`, `smith -c` and the
+      # `/resume` inside either loop all reach a new agent through here, and
+      # the last of those is the one a baseline taken at process start misses.
+      session_data.try { |data| data.usage_before_run = data.usage }
+
       agent = Agent.new(
         provider: provider,
         registry: registry,
@@ -938,7 +946,17 @@ module Smith
       return if agent.cleared?
 
       session_data.messages = agent.messages
-      session_data.usage = agent.cumulative_usage
+      # `cumulative_usage` counts the *run*; this record holds the session's
+      # lifetime. Assigning the counter straight across is what made the first
+      # turn of a resumed session overwrite everything earlier runs had spent,
+      # so `smith sessions`, `smith stats` and `smith sessions export` reported
+      # the last run as though it were the whole session.
+      #
+      # A sum rather than a `+=`: persist runs after *every* turn and the
+      # counter is the run's running total, not the turn's increment, so adding
+      # it in would count turn one again on turn two, and again on turn three.
+      # Against a baseline it is the same answer however often it is written.
+      session_data.usage = session_data.usage_before_run + agent.cumulative_usage
       session_data.todos = @todos.items
       session_data.context_ratio = agent.context_ratio
       @session_store.save(session_data)
