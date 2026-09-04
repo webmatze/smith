@@ -684,6 +684,12 @@ module Smith::Marketplace
       end
 
       def unreachable : Error
+        # Reachable without a pin too — an empty repository has nothing to
+        # check out — and "the pinned ref nil" is not a sentence.
+        unless pinned?
+          return Error.new("the repository has no commit to check out; an empty repository holds nothing to install.")
+        end
+
         what = @sha ? "commit #{@sha}" : "ref #{@ref.inspect}"
         Error.new("the repository does not contain the pinned #{what}. That is a refusal, not a reason to install its default branch instead: a pin that has become unreachable means the history was rewritten, or the source is no longer the one that was audited.")
       end
@@ -1565,7 +1571,10 @@ module Smith::Marketplace
     # would keep showing up as a provenance directory.
     private def prune_marketplace_dir(name : String) : Nil
       dir = File.join(Marketplace.installed_dir, name)
-      FileUtils.rm_rf(dir) if Dir.exists?(dir) && Dir.children(dir).empty?
+      # Through the guarded pair like every other listing here: the raw calls
+      # are the ones the readdir fix existed to remove, and leaving the last of
+      # them invites the next reader to think it is fine in this spot.
+      FileUtils.rm_rf(dir) if Marketplace.directory?(dir) && Marketplace.children(dir).empty?
     end
 
     private def report_manifest(manifest : Manifest) : Nil

@@ -58,6 +58,11 @@ module Smith::Agents
   class Catalog
     DIRECTORY_NAME = "agents"
 
+    # Stands in for a plugin name where the failure is above any single plugin
+    # — the plugin tree itself. Never rendered; only ever tested for nil-ness,
+    # which is what routes a plugin-tree problem away from the startup channel.
+    PLUGIN_TREE = "plugins"
+
     # A definition that did not read the way its author meant it to. Held
     # rather than announced on the spot, because whether the file is the one in
     # effect is only known once every source has been read — and a warning
@@ -65,7 +70,14 @@ module Smith::Agents
     # broken".
     # `plugin` is set when the file came from an installed plugin, and that is
     # the whole of the difference in where it is reported: see #report.
-    private record Problem, name : String, path : String, reason : String, plugin : String? = nil
+    # `directory` marks a failure to *list* a directory rather than to read a
+    # definition — it has no name and is not an agent, so it renders as itself.
+    private record Problem,
+      name : String,
+      path : String,
+      reason : String,
+      plugin : String? = nil,
+      directory : Bool = false
 
     getter agents = Hash(String, Definition).new
 
@@ -122,7 +134,7 @@ module Smith::Agents
     def load_plugins_dir(base : String = Smith.installed_plugins_dir) : Nil
       return unless directory?(base)
 
-      children(base, base).each do |marketplace|
+      children(base, base, PLUGIN_TREE).each do |marketplace|
         # An install stages its copy under a dot-prefixed name and renames it
         # into place, so a dot-prefixed entry is a half-written plugin.
         next if marketplace.starts_with?('.')
@@ -210,6 +222,10 @@ module Smith::Agents
     end
 
     private def render(problem : Problem) : String
+      # A directory smith could not read is not an agent, and calling it one
+      # made the line read as though a definition were broken.
+      return "⚠️  #{problem.path}: #{problem.reason}" if problem.directory
+
       line = "⚠️  Agent '#{problem.name}' (#{problem.path}): #{problem.reason}"
       winner = @agents[problem.name]?
       return line if winner.nil? || winner.path == problem.path
@@ -293,7 +309,8 @@ module Smith::Agents
     private def children(name : String, path : String, plugin : String? = nil) : Array(String)
       Dir.children(path).sort
     rescue ex : File::Error
-      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", plugin)
+      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.",
+        plugin, directory: true)
       Array(String).new
     end
 

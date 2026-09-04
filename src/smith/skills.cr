@@ -38,7 +38,10 @@ module Smith::Skills
     # A file that did not read the way its author meant it to. Held as data
     # rather than as a finished line because whether the file is the one in
     # effect is only known once every source has been read.
-    private record Problem, name : String, path : String, reason : String
+    # `directory` marks a failure to *list* a directory rather than to read a
+    # SKILL.md: it has no skill name and is not a skill, so it renders as
+    # itself. The agents catalog draws the same distinction.
+    private record Problem, name : String, path : String, reason : String, directory : Bool = false
 
     getter skills = Hash(String, Skill).new
 
@@ -107,6 +110,10 @@ module Smith::Skills
     # broken".
     def warnings : Array(String)
       lines = @problems.map do |problem|
+        # A directory smith could not read is not a skill, and calling it one
+        # made the line read as though a working skill were broken.
+        next "⚠️  #{problem.path}: #{problem.reason}" if problem.directory
+
         line = "⚠️  Skill '#{problem.name}' (#{problem.path}): #{problem.reason}"
         winner = @skills[problem.name]?
         next line if winner.nil? || winner.path == problem.path
@@ -206,7 +213,7 @@ module Smith::Skills
     private def children(name : String, path : String) : Array(String)
       Dir.children(path).sort
     rescue ex : File::Error
-      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", directory: true)
       Array(String).new
     end
 

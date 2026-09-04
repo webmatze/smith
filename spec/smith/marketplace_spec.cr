@@ -498,6 +498,18 @@ describe Smith::Marketplace do
       end
     end
 
+    it "says something sensible about a repository with nothing in it" do
+      with_home do |temp_dir|
+        empty = File.join(temp_dir, "empty.git")
+        MarketplaceFixture.git(["init", "-q", "--bare", empty])
+
+        # Refusing was never in doubt; "the pinned ref nil" was not a sentence.
+        expect_raises(Smith::Marketplace::Error, /no commit to check out/) do
+          Smith::Marketplace::Git.materialize(empty, File.join(temp_dir, "from-empty"))
+        end
+      end
+    end
+
     it "resolves a pin the repository does contain" do
       with_fixture do |temp_dir, repo|
         head = MarketplaceFixture.head(repo.work)

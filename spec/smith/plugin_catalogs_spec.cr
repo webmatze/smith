@@ -405,6 +405,39 @@ describe "where a plugin's problems are said" do
     end
   end
 
+  # The plugin *tree* is still the plugin tree. A listing failure above any
+  # single plugin used to arrive on the startup channel labelled as an "Agent",
+  # named by its own full path — which broke the invariant the rest of this
+  # block establishes, and made the two catalogs disagree.
+  it "says nothing at startup when the plugin tree itself cannot be listed" do
+    with_plugins({"mkt/p" => {"agents/a.md" => agent("a"), "skills/s/SKILL.md" => skill("s")}}) do |dir|
+      base = Smith.installed_plugins_dir
+      File.chmod(base, 0o000)
+
+      begin
+        startup = IO::Memory.new
+        agents = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: startup)
+        startup.to_s.should be_empty
+
+        skills_io = IO::Memory.new
+        skills = Smith::Skills::Catalog.discover(workspace_dir: dir, warn_io: skills_io)
+        skills_io.to_s.should be_empty
+
+        # Reachable in the listings, and reading as a directory rather than as
+        # a broken agent or skill.
+        [agents.warnings, skills.warnings].each do |lines|
+          lines.size.should eq(1)
+          lines.first.should contain("could not be listed")
+          lines.first.should contain(base)
+          lines.first.should_not contain("Agent '")
+          lines.first.should_not contain("Skill '")
+        end
+      ensure
+        File.chmod(base, 0o755)
+      end
+    end
+  end
+
   it "says nothing at startup for a plugin file it cannot read at all" do
     with_plugins({"big/pm-like" => {"agents/fine.md" => agent("fine")}}) do |dir|
       loop_path = File.join(Smith.installed_plugins_dir, "big", "pm-like", "agents", "looping.md")
