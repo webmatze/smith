@@ -33,6 +33,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
 - **💬 Chat Commands & Autocomplete (`Smith::ChatCommands`)**: Slash commands (`/help`, `/clear`, `/sessions`, `/resume`, `/rename`, `/model`, `/rewind`, `/context`, `/plan`, `/normal`, `/quit`) resolved before skill expansion, with a popup that filters and completes them — arrow keys select, Tab fills, Enter runs.
+- **⬆️ Self-Update (`Smith::Update`)**: `smith update` replaces a release binary with the newest one — SHA-256 verified against the release's `SHA256SUMS`, swapped in by an atomic rename. A dev build, a Homebrew or distro install, or a directory the user cannot write is refused with the command to run instead.
 - **⚡ Native Performance**: Compiles to a lightweight native binary; the test suite runs in well under a second.
 
 ---
@@ -48,6 +49,7 @@ Every [release](https://github.com/webmatze/smith/releases) carries signed relea
 | `smith-vX.Y.Z-linux-x86_64.tar.gz` | Linux, x86_64 |
 | `smith-vX.Y.Z-darwin-arm64.tar.gz` | macOS, Apple Silicon |
 | `smith-vX.Y.Z-darwin-x86_64.tar.gz` | macOS, Intel |
+| `SHA256SUMS` | SHA-256 of the three archives |
 
 ```bash
 tar -xzf smith-vX.Y.Z-linux-x86_64.tar.gz
@@ -55,6 +57,29 @@ install -m 755 smith ~/.local/bin/smith
 ```
 
 On macOS the binaries are ad-hoc signed, so Gatekeeper will not recognise the developer; on first launch allow it explicitly (right-click → Open, or `xattr -d com.apple.quarantine ~/.local/bin/smith`).
+
+### Self-update
+
+A binary installed from a release replaces itself with the newest one:
+
+```bash
+smith update --check   # is there a newer release? changes nothing
+smith update           # download it and replace this binary
+```
+
+`update` downloads the archive for this platform over HTTPS, verifies its SHA-256 against the release's `SHA256SUMS`, and swaps the binary in by renaming the new file over the old one — atomically, in the same directory, so an interrupted download can never leave a half-written executable behind. The downloaded file never carries a quarantine attribute, so the Gatekeeper dance above does not apply to updates.
+
+Only `github.com`, `api.github.com`, `codeload.github.com` and `*.githubusercontent.com` are ever downloaded from, re-checked on every redirect, on top of the post-DNS address guard `web_fetch` uses. The archive must contain a plain regular file called `smith`: a symlink under that name would be made executable and renamed *through* the link, so it is refused.
+
+It refuses, and says what to run instead, when:
+
+- **this is not a release binary.** Release builds are stamped at compile time by CI; a `make build` or `crystal build` from a working tree is not, and `smith update` will not overwrite a build nothing can reproduce.
+- **a package manager owns the binary** — Homebrew (`brew upgrade smith`), the Nix store, or a distribution directory like `/usr/bin`. Replacing those behind the package manager's back is undone by its next command.
+- **the directory is not writable** by the current user. smith does not ask for privileges it was not started with.
+- **the platform has no release binary**, or the newest tag cannot be compared against this version. A build that is *newer* than the newest release is left alone rather than downgraded.
+- **the release carries no `SHA256SUMS`.** Every release from this one on attaches one, so a release without it is either broken or an answer shaped to slip an unverified binary past the check. v0.4.0 and earlier genuinely have none and are still installed with a loud warning; for anything newer, `--allow-unverified` says you have checked it by hand.
+
+One caveat rather than a refusal: if the binary is a **symlink**, the file it resolves to is what gets replaced, and the link keeps pointing at it. With a versioned layout (`smith -> smith-0.4.0`) that leaves the new version living under the old version's name.
 
 ### Building from source
 
@@ -1356,6 +1381,7 @@ Commands:
   mcp list | tools <server>  Show the configured MCP servers and their tools
   skills list                Show the skills catalog: name, origin and description
   agents list                Show the agent definitions and the model and tools each asks for
+  update [--check]           Replace this binary with the newest release binary
 Options:
 
     -m MODEL, --model=MODEL          Specify the LLM model (defaults to provider's default model)
@@ -1366,6 +1392,8 @@ Options:
         --files-only                 rewind: restore files but leave the transcript alone
         --dry-run                    rewind / sessions: show what would change, change nothing
         --force                      rewind: overwrite files changed outside smith since the snapshot
+        --check                      update: report whether a newer release exists, change nothing
+        --allow-unverified           update: install a release that carries no SHA256SUMS anyway
         --older-than SPAN            sessions prune: drop sessions last updated longer ago (e.g. 30d, 12h, 15m; default 30d)
         --keep-last N                sessions prune: keep the N most recent regardless of age
         --agent NAME                 Run the main thread as the agent defined in .smith/agents/NAME.md
@@ -1421,7 +1449,8 @@ src/
     ├── subagents.cr         # Child agent supervisor & report handling
     ├── llm.cr               # Requires all LLM provider adapters
     ├── mcp.cr               # Requires the MCP client
-    ├── version.cr           # VERSION, reachable without the CLI entrypoint
+    ├── version.cr           # VERSION and BUILD_CHANNEL, reachable without the CLI entrypoint
+    ├── update.cr            # smith update: release lookup, checksums & atomic binary replacement
     ├── tools.cr             # Requires all tool implementations
     ├── llm/
     │   ├── types.cr         # Provider-neutral Request, Response, Message & ToolSpec

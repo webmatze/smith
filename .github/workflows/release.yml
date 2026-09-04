@@ -48,6 +48,12 @@ jobs:
         run: shards install
 
       - name: Build the release binary
+        env:
+          # Read at compile time by src/smith/version.cr and set nowhere else.
+          # It is what lets `smith update` tell a binary CI attached to a
+          # release from one somebody built out of a working tree — and refuse
+          # to overwrite the latter.
+          SMITH_BUILD_CHANNEL: release
         run: mkdir -p bin && crystal build src/smith.cr --release -o bin/smith
 
       - name: Ad-hoc sign the binary (macOS)
@@ -86,10 +92,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: smith-${{ github.ref_name }}-*
+          # Flattened into dist/ so the checksums below name the assets exactly
+          # as the release serves them; one archive per subdirectory would put
+          # the directory into the file and `smith update` would never match it.
+          merge-multiple: true
           path: dist
+
+      - name: Checksum the archives
+        working-directory: dist
+        # `smith update` verifies the archive it downloaded against this before
+        # it replaces anything. This job runs on ubuntu, so it is sha256sum —
+        # macOS would need `shasum -a 256`, and the output formats differ.
+        run: |
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Attach them to the release
         uses: softprops/action-gh-release@v2
         with:
           body_path: release_notes.md
-          files: dist/*/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
