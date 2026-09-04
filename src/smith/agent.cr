@@ -42,6 +42,18 @@ module Smith
     getter? stream : Bool
     getter hooks : Hooks::Runner
 
+    # Whether the conversation the agent is holding is the one `/clear` left
+    # behind — cleared, with nothing said since. The loop's write-back reads
+    # this: a cleared context has nothing to record, so the session keeps what
+    # is on disk until the next turn writes the fresh conversation over it.
+    #
+    # A flag rather than `messages.empty?`: emptiness is a state and the guard
+    # needs the reason for it. A session that was never used is empty too, and
+    # those two have to persist differently — the cleared one is protecting a
+    # record, the new one has none yet. `clear!` is the only thing that knows
+    # a clear happened, so it is what says so.
+    getter? cleared : Bool = false
+
     # What compaction has done to this session so far. `smith context` reports
     # it; a session read back from disk has no such history to report.
     getter compactions : Int32 = 0
@@ -108,6 +120,10 @@ module Smith
       @messages = Array(LLM::Message).new
       @context_ratio = 1.0
       @transcript_logged = 0
+      # The fresh array only keeps the session's own list from being emptied in
+      # place; it does not stop the *next* save from assigning this empty one
+      # over it. Saying so here is what does — see `CLI#persist`.
+      @cleared = true
     end
 
     private def emit(event : Events::Event)
@@ -118,6 +134,8 @@ module Smith
       blocks = [LLM::ContentBlock.text(user_text)] of LLM::ContentBlock
       blocks.concat(attachments.map { |block| carryable(block) })
 
+      # There is a conversation again, so the record takes it from here.
+      @cleared = false
       @messages << LLM::Message.new(LLM::Role::User, blocks)
       run_loop
     ensure
