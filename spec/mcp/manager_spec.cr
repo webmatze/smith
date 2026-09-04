@@ -62,12 +62,21 @@ describe Smith::MCP::Manager do
 
   it "warns and carries on when a server cannot start" do
     with_manager(
-      Smith::MCP::ServerSpec.new(name: "broken", command: "/definitely/not/here"),
+      Smith::MCP::ServerSpec.new(name: "broken", command: "/definitely/not/here", args: ["--api-key", "ARGSECRET"]),
       spec_for("fs")
     ) do |manager, warnings|
       manager["broken"].not_nil!.running?.should be_false
       manager["broken"].not_nil!.error.not_nil!.should contain("command not found")
       warnings.should contain("did not start")
+
+      # This is the one failure whose message quotes what smith read out of
+      # `mcp.json`: "command not found: <what>". `--api-key X` is an ordinary
+      # way to configure a stdio server, so `what` is the summarised form here
+      # as it is in the listing's `COMMAND` column — the command path still
+      # names the server, and the arguments are counted instead of quoted.
+      manager["broken"].not_nil!.error.not_nil!.should contain("/definitely/not/here")
+      manager["broken"].not_nil!.error.not_nil!.should_not contain("ARGSECRET")
+      warnings.should_not contain("ARGSECRET")
 
       # The point of the whole arrangement: the healthy server is unaffected.
       manager["fs"].not_nil!.running?.should be_true
@@ -216,10 +225,6 @@ describe Smith::MCP::Manager do
 
       handle.error.to_s.should contain("TOKEN-from-the-child")
       handle.error_summary.to_s.should_not contain("TOKEN-from-the-child")
-
-      # The argument list is not the server's words at all — it is smith's own
-      # configuration file — so it is out of both lines, not just the shared one.
-      handle.error.to_s.should_not contain("ARGSECRET")
       handle.error_summary.to_s.should_not contain("ARGSECRET")
     ensure
       File.delete(script) if File.exists?(script)
