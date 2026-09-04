@@ -25,6 +25,7 @@ require "./tools/sandbox_approver"
 require "./mcp"
 require "./update"
 require "./doctor"
+require "./marketplace"
 require "./ui"
 
 module Smith
@@ -90,7 +91,7 @@ module Smith
 
       definition = @agents_catalog[name]
       if definition.nil?
-        known = @agents_catalog.agents.keys
+        known = @agents_catalog.invocation_names
         STDERR.puts "❌ Error: unknown agent '#{name}'."
         STDERR.puts(known.empty? ? "   No agents are defined in .smith/agents/ or ~/.smith/agents/." : "   Known agents: #{known.join(", ")}")
         exit(1)
@@ -133,6 +134,8 @@ module Smith
           str.puts "  mcp list | tools <server>  Show the configured MCP servers and their tools"
           str.puts "  skills list                Show the skills catalog: name, origin and description"
           str.puts "  agents list                Show the agent definitions and the model and tools each asks for"
+          str.puts "  plugin …                   Marketplaces and plugins: marketplace add|list|remove|update,"
+          str.puts "                             install|uninstall|list|update"
           str.puts "  update [--check]           Replace this binary with the newest release binary"
           str.puts "  doctor                     Check providers, MCP, sandbox and config, then exit\n"
           str.puts "Options:"
@@ -335,6 +338,8 @@ module Smith
         run_skills(@args[1]?)
       when "agents"
         run_agents(@args[1]?)
+      when "plugin", "plugins"
+        run_plugin(@args[1..-1]? || Array(String).new)
       when "sandbox"
         show_sandbox
       when "update"
@@ -351,7 +356,7 @@ module Smith
       end
     end
 
-    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents sandbox stats update doctor]
+    KNOWN_COMMANDS = %w[run chat interactive resume continue sessions list checkpoints rewind rename fork context mcp skills agents plugin plugins sandbox stats update doctor]
 
     private def sessions_export?(command : String) : Bool
       (command == "sessions" || command == "list") && @args[1]? == "export"
@@ -1840,6 +1845,23 @@ module Smith
       end
     end
 
+    # `smith plugin …` — marketplaces and the plugins installed from them. The
+    # work is in Smith::Marketplace; what belongs here is the verb, the exit
+    # code and the one place a refusal is printed.
+    private def run_plugin(arguments : Array(String)) : Nil
+      Marketplace::Commands.new.dispatch(arguments)
+    rescue ex : Marketplace::Error
+      STDERR.puts "❌ Error: #{ex.message}"
+      exit(1)
+    rescue ex : IO::Error | JSON::Error
+      # Everything below here reaches for the filesystem and the network, and
+      # a third-party marketplace decides much of what it finds. A Crystal
+      # backtrace is not the "klare Fehlermeldung" this command promises.
+      # `File::Error` is an `IO::Error`, so both arrive here.
+      STDERR.puts "❌ Error: #{ex.message}"
+      exit(1)
+    end
+
     private def run_skills(subcommand : String?) : Nil
       case subcommand
       when nil, "list"
@@ -1876,6 +1898,14 @@ module Smith
         puts
         puts "   #{skill.name}"
         puts "      path:        #{skill.path}"
+        # Where a skill came from, for the ones that did not come from a
+        # directory the reader chose: a plugin skill is invoked by its
+        # namespaced name, and the bare form only works when nothing else
+        # claims it.
+        if plugin = skill.plugin
+          puts "      origin:      plugin #{plugin}@#{skill.marketplace}"
+          puts "      also:        /#{skill.bare_name}, $#{skill.bare_name}" if catalog.bare_aliases[skill.bare_name]? == skill.name
+        end
         puts "      description: #{skill.description}"
         # Which source won a name clash is otherwise nowhere visible, and the
         # warnings below refer to files that may be the ones that lost.
@@ -1888,8 +1918,8 @@ module Smith
       end
 
       puts
-      puts "Read from .smith/skills/, .gemini/skills/, .agents/skills/ and #{File.join(Smith.home_dir, "skills")}/."
-      puts "Invoke one in chat with /<name>, or reference it in a prompt as $<name>."
+      puts "Read from .smith/skills/, .gemini/skills/, .agents/skills/, #{File.join(Smith.home_dir, "skills")}/ and installed plugins."
+      puts "Invoke one in chat with /<name>, or reference it in a prompt as $<name>. A plugin skill is always /<plugin>:<name>."
     end
 
     private def run_agents(subcommand : String?) : Nil
@@ -1908,8 +1938,13 @@ module Smith
     # implies — printing only what the file said would hide the difference.
     private def list_agents : Nil
       catalog = @agents_catalog
+      # Everything a plugin brought with it. Deliberately not on stderr at
+      # startup — a marketplace ships dozens of definitions written for another
+      # harness, and a line per file would sit in front of every command — so
+      # this listing is where they are said.
+      warnings = catalog.warnings
 
-      if catalog.agents.empty?
+      if catalog.agents.empty? && warnings.empty?
         puts "No agent definitions found."
         puts "   Add one at .smith/agents/<name>.md, or globally at #{File.join(Smith.home_dir, Agents::Catalog::DIRECTORY_NAME)}/<name>.md."
         return
@@ -1935,6 +1970,10 @@ module Smith
         puts
         puts "   #{agent.name}"
         puts "      path:        #{agent.path}"
+        if plugin = agent.plugin
+          puts "      origin:      plugin #{plugin}@#{agent.marketplace}"
+          puts "      also:        #{agent.bare_name}" if catalog.bare_aliases[agent.bare_name]? == agent.name
+        end
         puts "      description: #{agent.description}"
         puts "      provider:    #{agent.provider || "(inherited)"}"
         puts "      model:       #{agent.model || "(inherited)"}"
@@ -1943,6 +1982,11 @@ module Smith
         # Which source won a name clash is otherwise nowhere visible, and a
         # warning on stderr may name the file that lost.
         catalog.shadowed[agent.name]?.try(&.each { |lost| puts "      shadows:     #{lost}" })
+      end
+
+      unless warnings.empty?
+        puts
+        warnings.each { |warning| puts warning }
       end
 
       puts

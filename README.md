@@ -32,6 +32,7 @@ It is inspired by and built according to the policy-free agent loop principles o
 - **🧭 Plan Mode (`Smith::PlanSession`)**: Research first, change nothing, then present a plan for approval. Every mutating tool is hard-blocked until you say yes — including through subagents.
 - **📋 Todo List (`Smith::TodoList`)**: A `todo_write` tool that forces the model to keep the plan of a multi-step run as a structured artifact instead of only implicitly in the transcript — where context compaction would drop it first.
 - **💾 Atomic Session Persistence (`Smith::Session`)**: Saves local conversation history and token metrics under `~/.smith/sessions/` with seamless resume capabilities.
+- **🧩 Plugins & Marketplaces**: Reads Claude Code's plugin marketplaces unchanged — `smith plugin marketplace add owner/repo`, `smith plugin install <plugin>@<marketplace>` — and loads their `skills/` and `agents/`. A plugin skill is `<plugin>:<skill>`, and answers to its bare name only where nothing else claims it. Hooks, MCP servers and LSP servers are named in a warning rather than loaded; `npm` and `command` sources are refused outright.
 - **💬 Chat Commands & Autocomplete (`Smith::ChatCommands`)**: Slash commands (`/help`, `/clear`, `/sessions`, `/resume`, `/rename`, `/model`, `/rewind`, `/context`, `/plan`, `/normal`, `/quit`) resolved before skill expansion, with a popup that filters and completes them — arrow keys select, Tab fills, Enter runs.
 - **⬆️ Self-Update (`Smith::Update`)**: `smith update` replaces a release binary with the newest one — SHA-256 verified against the release's `SHA256SUMS`, swapped in by an atomic rename. A dev build, a Homebrew or distro install, or a directory the user cannot write is refused with the command to run instead.
 - **⚡ Native Performance**: Compiles to a lightweight native binary; the test suite runs in well under a second.
@@ -1262,6 +1263,152 @@ timeout = 60      # seconds per call; MCP_TOOL_TIMEOUT wins over this
 
 A fake MCP server, two of them. The concurrency — responses that overtake each other and still have to reach the caller that asked — is driven through an in-memory transport, where the timing is repeatable. Orphans, restarts and a command that is not a server at all are driven against a real subprocess: a bash script under `spec/mcp/support/`. No Node, no external server, nothing to install.
 
+### Plugins & Marketplaces
+
+Claude Code already distributes skills and agents through **plugin marketplaces**: a git repository (or a local directory) with a `.claude-plugin/marketplace.json` listing plugins, each plugin a directory of components. That market exists, so smith reads it rather than inventing a second format — compatible on the *reading* side, smith's own surface on the *installing* side.
+
+```bash
+smith plugin marketplace add <source>      # owner/repo[@ref], https://…[#ref], ./path
+smith plugin marketplace list
+smith plugin marketplace remove <name>     # also uninstalls the plugins that came from it
+smith plugin marketplace update [name]     # all of them when no name is given
+smith plugin install <plugin>@<marketplace>
+smith plugin uninstall <plugin>[@<marketplace>]
+smith plugin list
+smith plugin update [plugin][@<marketplace>]
+```
+
+Every subcommand is headless: clear `❌ Error: …` messages, never a question.
+
+#### What a marketplace looks like
+
+```json
+{
+  "name": "my-plugins",
+  "owner": { "name": "Your Name" },
+  "metadata": { "pluginRoot": "./plugins" },
+  "renames": { "old-name": "new-name", "withdrawn": null },
+  "plugins": [
+    { "name": "quality-review", "source": "./plugins/quality-review",
+      "description": "…", "version": "1.0.0" },
+    { "name": "deployment-tools",
+      "source": { "source": "github", "repo": "company/deploy-plugin", "ref": "v2.0.0" } }
+  ]
+}
+```
+
+`name`, `owner` and `plugins` are required. A source path is relative to the **marketplace root** — the directory holding `.claude-plugin/` — not to the JSON file, and `../` is not allowed. A bare source name resolves under `metadata.pluginRoot`; a plugin entry with no `source` at all means a directory named after the plugin. `renames` redirects a name that moved, or refuses one that was withdrawn.
+
+| Source | Form | Fields | Status |
+|---|---|---|---|
+| Relative path | `"./plugins/foo"` | – | ✅ |
+| `github` | object | `repo` (owner/repo), `ref?`, `sha?` | ✅ |
+| `url` | object | `url` (**https only**), `ref?`, `sha?` | ✅ |
+| `git-subdir` | object | `url`, `path`, `ref?`, `sha?` | Phase 2 |
+| `archive` | object | `url`, `sha256?` | Phase 2 |
+| `npm`, `command` | object | … | ❌ refused, permanently |
+
+A `sha` is the effective pin when both are given. `owner/repo` without a host expands to `https://github.com/owner/repo`.
+
+#### What a plugin looks like
+
+```text
+plugin-dir/
+├── .claude-plugin/plugin.json     # name, description, version, author — optional
+├── skills/<name>/SKILL.md         # 0..n skills
+├── SKILL.md                       # OR: a single skill at the plugin root
+└── agents/*.md                    # 0..n agent definitions
+```
+
+A plugin **without** a `skills/` directory but **with** a `SKILL.md` at its root is one skill; its frontmatter `name` decides what it is called, falling back to the plugin's directory name. The frontmatter format is the same flat `key: value` header [skills and agents](#custom-agents) already use.
+
+#### The namespace rule
+
+A plugin skill is `<plugin>:<skill>` and a plugin agent is `<plugin>:<agent>`. **That namespaced name is the address to rely on** — it can neither shadow a local skill nor be shadowed by one, and it is unambiguous across every plugin a marketplace ships. (One edge, listed under [known limitations](#known-limitations): two *different* marketplaces shipping a plugin of the same name produce the same key.)
+
+The bare name works **as well**, but only where nothing else claims it:
+
+- unique across every source → `/alpha`, `$alpha` and `agent_type: "alpha"` all resolve to the plugin's;
+- claimed by a local or global file too → the bare name keeps meaning the file, and only `/plugin:alpha` reaches the plugin's;
+- claimed by two plugins → the bare name resolves to **neither**, and each is reachable only by its full name.
+
+Every refusal is reported once, in `smith skills list` and on the agent warning channel. `expand_prompt` matches in exactly that order: the exact namespaced name, then an unambiguous bare name, then nothing — a colliding bare name never matches. In the autocomplete popup a plugin skill appears as `plugin:skill`, and the prefix filter reaches across the colon.
+
+`smith skills list` and `smith agents list` show where each entry came from:
+
+```text
+   skills-demo:alpha
+      path:        ~/.smith/plugins/installed/fixture/skills-demo/skills/alpha/SKILL.md
+      origin:      plugin skills-demo@fixture
+      also:        /alpha, $alpha
+      description: A skill whose bare name nothing else claims.
+```
+
+#### Where things live
+
+| Path | What |
+|---|---|
+| `~/.smith/plugins/marketplaces.json` | the registry: name, source as added, resolved commit, timestamps |
+| `~/.smith/plugins/cache/<marketplace>/` | the shallow checkout of a cloned marketplace |
+| `~/.smith/plugins/installed/<marketplace>/<plugin>/` | the installed plugin, plus a `plugin.json.meta` sidecar |
+
+All of it honours `SMITH_HOME`. Adding a marketplace under a name that is already registered **replaces** the entry, the way Claude Code does. The two path segments under `installed/` *are* the provenance, which is why startup discovery reads the directory tree and never a JSON file, never git and never the network.
+
+**Version** is the `version` from `plugin.json`, else the one on the marketplace entry, else the resolved commit SHA. `smith plugin update` compares that: an unchanged version reports "up to date" instead of copying again.
+
+#### What is deliberately not loaded
+
+A plugin may carry more than smith has a home for. Those components are **named**, in a warning and in the install summary, rather than dropped in silence:
+
+```text
+⚠️  Not loaded from this plugin: hooks, lspServers, mcpServers.
+   smith reads skills/ and agents/ only. Hooks are code execution outside the approval
+   gate and stay out until they can be digest-pinned; MCP servers, LSP servers,
+   commands, themes and monitors are later phases.
+```
+
+`hooks` is the one that matters: a hook is code execution outside the [approval gate](#approval-mode), and it needs the [trust store's](#hooks) digest model before it may be loaded at all. `headersHelper` — a command run to produce auth headers — is not supported and will not be.
+
+Agent frontmatter written for another harness (`maxTurns`, `disallowedTools`, `memory`, `isolation`) is ignored, with one line per file naming the fields — for plugin definitions only, since a local file's extra keys are its author's own business.
+
+**Where a plugin's problems are said matters as much as that they are said.** A definition *you* wrote warns on stderr at startup, as it always has: it is your file and you can fix it in a second. A definition a *plugin* brought does not — a marketplace ships them by the dozen, written for another harness, so unread fields are the normal case rather than the exception, and a line per file would sit in front of every `smith` command forever about files you do not own. Those are said twice instead, both times on purpose: once by `smith plugin install`, where you are deciding about the plugin, and then on demand in `smith skills list` and `smith agents list`, the commands that exist to show catalog state. Nothing is dropped. `smith doctor` follows the same distinction for the same reason, applied to volume rather than channel: your own broken files in full, because those are what a diagnosis can tell you to go and fix, and a plugin's counted by the reason they share — `18 plugin skills in 3 plugins: …` — because eighteen copies of one sentence about somebody else's files buries the provider, MCP and sandbox findings the command exists for.
+
+**A name clash is the exception**, and it is an exception about *kind*, not about source. The lines above are informational — a field was not read. A clash changes what a bare `/name` **does**, right now, for someone who never typed the plugin's name. That is said at startup, once, in both catalogs, whoever caused it.
+
+#### What it refuses, and why
+
+- **`npm` and `command` sources** are refused permanently. One needs a package manager smith does not ship, manage or sandbox; the other *is* arbitrary code execution, outside every gate smith has.
+- **Only `https://`, `owner/repo` and local paths** are accepted as marketplace sources. `git@…`, `ssh://`, `git://`, `file://` and `ext::` are refused — `ext::` alone is remote code execution, and a URL that smuggles `--upload-pack=` is argument injection into the clone.
+- **A source that leaves the marketplace root** — with `../`, an absolute path, a NUL byte or a symlink pointing out of the tree — is refused. A marketplace is third-party data.
+- **Symlinks are never followed while copying** a plugin: a `skills` entry linked to `/` or to `~/.ssh` would otherwise copy the filesystem, or your keys, into a directory whose contents are read into a prompt.
+- **A name that could not be a directory** — containing `/`, `..`, a leading `-` or a NUL — is refused for marketplaces and skipped for plugins, with a line saying so.
+- Every git call runs with a timeout, closed stdin and `GIT_TERMINAL_PROMPT=0`, so a private repo cannot stop a headless command on a credential prompt.
+
+#### A local marketplace
+
+A local path is used **where it lies** when it holds `.claude-plugin/marketplace.json`, which makes developing a marketplace a matter of editing files:
+
+```bash
+smith plugin marketplace add ./my-marketplace
+smith plugin install my-plugin@my-marketplace
+```
+
+A local path *without* a manifest is treated as a git repository to clone — which is what a bare repository is, and what smith's own specs run against so that no test ever reaches the network.
+
+#### A pin is a pin
+
+When a source names a `sha`, or a `ref`, that is the only thing smith will install. If the remote no longer serves it — the history was rewritten, the repository changed hands — the install **fails**, with the reason. It does not fall back to whatever the remote calls `HEAD` today, which would install an unaudited tree, record it as the version, and report "up to date" from then on.
+
+#### Known limitations
+
+Honest about the edges rather than quiet about them:
+
+- Two marketplaces shipping a plugin of the **same name** produce the same `<plugin>:<name>` key. The last one read wins, `smith skills list` shows the `shadows:` line, and `smith plugin install` warns — but there is no `<marketplace>:<plugin>:<name>` form to address the loser by.
+- Re-adding a marketplace under a name already registered **replaces** the entry, as Claude Code does, but prints no "the source changed" line.
+- On a case-insensitive filesystem (macOS by default), `Case@evil` and `case@evil` collide where they would not on ext4.
+- Nothing locks the registry, so two `smith plugin` commands running at once can lose one another's write.
+- `installed/<marketplace>/<plugin>` being replaced by a **symlink** after installation is followed. The copy never creates one; this is about the directory afterwards.
+
 ### Background Commands
 
 A synchronous `bash` makes three everyday things painful: starting a dev server, following a log, waiting out a long build. All three block the agent until the timeout, and then the command is killed and everything it printed is lost.
@@ -1448,6 +1595,8 @@ Commands:
   rewind [<session_id>]      Undo a session's file changes
   mcp list | tools <server>  Show the configured MCP servers and their tools
   skills list                Show the skills catalog: name, origin and description
+  plugin …                   Marketplaces and plugins: marketplace add|list|remove|update,
+                             install|uninstall|list|update
   agents list                Show the agent definitions and the model and tools each asks for
   update [--check]           Replace this binary with the newest release binary
   doctor                     Check providers, MCP, sandbox and config, then exit
@@ -1510,6 +1659,7 @@ src/
     ├── pricing.cr           # Token counts to dollars, per provider/model
     ├── agents.cr            # Custom agent definitions in .smith/agents/<name>.md
     ├── frontmatter.cr       # Shared --- header parser for skills and agents
+    ├── marketplace.cr       # Claude-Code plugin marketplaces: manifests, checkouts, install/update
     ├── todos.cr             # Todo list state, validation & change callback
     ├── mode.cr              # Normal / plan mode enum
     ├── plan.cr              # Plan session state & approval gates (prompt/auto/halting)

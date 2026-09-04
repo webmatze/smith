@@ -394,8 +394,36 @@ module Smith
     # What both catalogs found wrong while loading, from catalogs already
     # built. Both keep their problems after reporting them, so this costs no
     # second walk of the same directories.
+    #
+    # Split by who can act on it. A file the reader wrote is actionable and is
+    # spelled out: it is the thing a diagnosis exists to point at. A file an
+    # installed plugin brought is not — they did not write it and cannot fix it
+    # — and three real marketplaces made that difference stark: thirty of this
+    # block's lines were about somebody else's plugins, eighteen of them the
+    # same sentence, burying the provider, MCP, sandbox and config findings the
+    # command is actually for. Those are counted instead, grouped by the reason
+    # they share, with the full list one command away.
     def self.catalog_notes(skills : Skills::Catalog, agents : Agents::Catalog) : Array(String)
-      skills.warnings + agents.warnings
+      notes = skills.own_warnings + agents.own_warnings
+      notes.concat(plugin_notes(skills.plugin_reasons, "skill", "smith skills list"))
+      notes.concat(plugin_notes(agents.plugin_reasons, "agent", "smith agents list"))
+      notes
+    end
+
+    # One line per distinct reason: eighteen files sharing a broken header is
+    # one finding, and saying how many files across how many plugins is more
+    # informative than the same sentence eighteen times.
+    private def self.plugin_notes(reasons : Array({String, String}), noun : String, command : String) : Array(String)
+      return Array(String).new if reasons.empty?
+
+      reasons.group_by { |(reason, _)| reason }.map do |reason, entries|
+        plugins = entries.map { |(_, plugin)| plugin }.uniq.size
+        "⚠️  #{plural(entries.size, "plugin #{noun}")} in #{plural(plugins, "plugin")}: #{reason} (see '#{command}')"
+      end.sort
+    end
+
+    private def self.plural(count : Int32, noun : String) : String
+      "#{count} #{noun}#{count == 1 ? "" : "s"}"
     end
 
     # --- Rendering ---------------------------------------------------------
