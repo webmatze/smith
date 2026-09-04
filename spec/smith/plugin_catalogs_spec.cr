@@ -250,7 +250,11 @@ describe "plugin agents" do
       catalog["agents-demo:reviewer"].not_nil!.plugin.should eq("agents-demo")
       catalog.bare_aliases.should be_empty
       catalog.invocation_names.sort.should eq(["agents-demo:reviewer", "reviewer"])
-      warnings.to_s.should contain("Agent 'reviewer' is defined outside any plugin")
+
+      # A clash a plugin caused belongs in the listing, not in front of every
+      # command.
+      warnings.to_s.should be_empty
+      catalog.warnings.join("\n").should contain("Agent 'reviewer' is defined outside any plugin")
     end
   end
 
@@ -263,12 +267,12 @@ describe "plugin agents" do
       catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: warnings)
 
       catalog["shared"].should be_nil
-      warnings.to_s.lines.count { |line| line.includes?("'shared'") }.should eq(1)
+      warnings.to_s.should be_empty
+      catalog.warnings.count { |line| line.includes?("'shared'") }.should eq(1)
 
-      # A second report must not repeat a clash that has already been said.
-      again = IO::Memory.new
-      catalog.report(again)
-      again.to_s.should be_empty
+      # Rendered on demand, so asking twice says the same thing rather than
+      # twice as much.
+      catalog.warnings.should eq(catalog.warnings)
     end
   end
 
@@ -278,13 +282,80 @@ describe "plugin agents" do
       global: {"local" => agent("local", "maxTurns: 12\n")}
     ) do |dir|
       warnings = IO::Memory.new
-      Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: warnings)
+      catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: warnings)
 
-      text = warnings.to_s
+      text = catalog.warnings.join("\n")
       text.should contain("smith does not act on isolation, maxTurns")
       text.should contain("agents-demo:auditor")
       # A local definition's extra keys are its author's own business.
       text.should_not contain("Agent 'local'")
+      warnings.to_s.should_not contain("Agent 'local'")
+    end
+  end
+end
+
+# The reason the two channels are separate at all. A marketplace ships agent
+# definitions by the dozen, written for another harness, so unread fields are
+# the normal case rather than the exception — and `report` runs in the CLI's
+# constructor, in front of *every* command. A plugin the reader installed must
+# not be able to make `smith -v` noisy; a file the reader wrote must stay as
+# loud as it has always been.
+describe "where a plugin's problems are said" do
+  it "says nothing at startup for a plugin whose definitions smith cannot fully read" do
+    noisy = {} of String => String
+    %w[planner writer reviewer estimator groomer].each do |name|
+      noisy["agents/#{name}.md"] = agent(name, "memory: project\nmaxTurns: 20\n")
+    end
+    # A header that never closes: the other half of what a marketplace ships.
+    noisy["agents/broken.md"] = "---\nname: broken\ndescription: Never closed\n\nThe broken prompt."
+
+    with_plugins({"big/pm-like" => noisy}) do |dir|
+      startup = IO::Memory.new
+      catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: startup)
+
+      catalog.agents.size.should eq(6)
+      startup.to_s.should be_empty
+
+      # Not dropped — reachable, in the command that exists to show it.
+      listed = catalog.warnings
+      listed.size.should eq(6)
+      listed.join("\n").should contain("smith does not act on maxTurns, memory")
+      listed.join("\n").should contain("pm-like:broken")
+    end
+  end
+
+  it "keeps a definition the reader wrote themselves on the startup channel" do
+    with_plugins(
+      plugins: {"big/pm-like" => {"agents/plugin-one.md" => agent("plugin-one", "maxTurns: 20\n")}},
+      global: {"mine" => "---\nname: mine\n---\nNo description here."}
+    ) do |dir|
+      startup = IO::Memory.new
+      catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: startup)
+
+      startup.to_s.should contain("Agent 'mine'")
+      startup.to_s.should contain("no description")
+      startup.to_s.should_not contain("pm-like")
+
+      # And the plugin's is still on the other channel, not lost between them.
+      catalog.warnings.join("\n").should contain("pm-like:plugin-one")
+      # A second report does not repeat what has already been said.
+      again = IO::Memory.new
+      catalog.report(again)
+      again.to_s.should be_empty
+    end
+  end
+
+  it "says nothing at startup for a plugin file it cannot read at all" do
+    with_plugins({"big/pm-like" => {"agents/fine.md" => agent("fine")}}) do |dir|
+      loop_path = File.join(Smith.installed_plugins_dir, "big", "pm-like", "agents", "looping.md")
+      File.symlink("looping.md", loop_path)
+
+      startup = IO::Memory.new
+      catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: startup)
+
+      catalog.agents.keys.should eq(["pm-like:fine"])
+      startup.to_s.should be_empty
+      catalog.warnings.join("\n").should contain("could not be read")
     end
   end
 end

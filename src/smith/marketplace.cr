@@ -1187,7 +1187,9 @@ module Smith::Marketplace
         version, description, Time.utc.to_rfc3339, ignored)
       AtomicFile.write(File.join(target, META_FILE), meta.to_pretty_json)
 
-      skills, agents = components(marketplace_name, entry.name, target)
+      skill_catalog, agent_catalog = catalogs_for(marketplace_name, entry.name, target)
+      skills = skill_catalog.skills.keys.sort
+      agents = agent_catalog.agents.keys.sort
 
       @out.puts "✅ Installed #{entry.name}@#{marketplace_name} #{version}"
       @out.puts "   path:    #{target}"
@@ -1211,6 +1213,17 @@ module Smith::Marketplace
       if skills.empty? && agents.empty?
         @out.puts "   Nothing smith can load was found — the plugin holds no skills/ and no agents/."
       end
+
+      # Said here, once, while the reader is deciding about this plugin, rather
+      # than on stderr in front of every later command — which is what a
+      # marketplace's worth of definitions written for another harness would
+      # otherwise come to. `smith skills list` and `smith agents list` say it
+      # again on demand.
+      notes = skill_catalog.warnings + agent_catalog.warnings
+      return if notes.empty?
+
+      @out.puts "ℹ️  #{count(notes.size, "note")} about what this plugin declares (again later in 'smith skills list' / 'smith agents list'):"
+      notes.each { |note| @out.puts "   #{note}" }
     end
 
     private def uninstall(reference : String?) : Nil
@@ -1322,13 +1335,18 @@ module Smith::Marketplace
     # Exactly what discovery will see, built with the catalogs themselves so the
     # summary cannot drift from what actually loads.
     private def components(marketplace : String, plugin : String, dir : String) : {Array(String), Array(String)}
+      catalogs = catalogs_for(marketplace, plugin, dir)
+      {catalogs[0].skills.keys.sort, catalogs[1].agents.keys.sort}
+    end
+
+    private def catalogs_for(marketplace : String, plugin : String, dir : String) : {Skills::Catalog, Agents::Catalog}
       skills = Skills::Catalog.new
       skills.load_plugin_dir(marketplace, plugin, dir)
 
       agents = Agents::Catalog.new
       agents.load_plugin_dir(marketplace, plugin, dir)
 
-      {skills.skills.keys.sort, agents.agents.keys.sort}
+      {skills, agents}
     end
 
     # An empty `installed/<marketplace>/` left behind after the last uninstall

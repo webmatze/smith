@@ -1371,6 +1371,8 @@ A plugin may carry more than smith has a home for. Those components are **named*
 
 Agent frontmatter written for another harness (`maxTurns`, `disallowedTools`, `memory`, `isolation`) is ignored, with one line per file naming the fields — for plugin definitions only, since a local file's extra keys are its author's own business.
 
+**Where a plugin's problems are said matters as much as that they are said.** A definition *you* wrote warns on stderr at startup, as it always has: it is your file and you can fix it in a second. A definition a *plugin* brought does not — a marketplace ships them by the dozen, written for another harness, so unread fields are the normal case rather than the exception, and a line per file would sit in front of every `smith` command forever about files you do not own. Those are said twice instead, both times on purpose: once by `smith plugin install`, where you are deciding about the plugin, and then on demand in `smith skills list` and `smith agents list`, the commands that exist to show catalog state. Nothing is dropped.
+
 #### What it refuses, and why
 
 - **`npm` and `command` sources** are refused permanently. One needs a package manager smith does not ship, manage or sandbox; the other *is* arbitrary code execution, outside every gate smith has.

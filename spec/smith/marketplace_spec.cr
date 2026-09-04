@@ -446,6 +446,19 @@ describe Smith::Marketplace do
       end
     end
 
+    it "says what a plugin's own definitions declare, at install time" do
+      with_fixture do |temp_dir, repo|
+        run("marketplace", "add", repo.work)
+        output = run("install", "agents-demo@fixture")
+
+        # The fixture's auditor carries `maxTurns` and `isolation`. Said here,
+        # where the reader is deciding about this plugin — and, from this
+        # release on, nowhere near the startup path of every later command.
+        output.should contain("1 note about what this plugin declares")
+        output.should contain("smith does not act on isolation, maxTurns")
+      end
+    end
+
     it "names the components it will not load, loudly" do
       with_fixture do |temp_dir, repo|
         run("marketplace", "add", repo.work)

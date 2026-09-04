@@ -63,7 +63,9 @@ module Smith::Agents
     # effect is only known once every source has been read — and a warning
     # about a file that lost a name clash reads as "the agent you are using is
     # broken".
-    private record Problem, name : String, path : String, reason : String
+    # `plugin` is set when the file came from an installed plugin, and that is
+    # the whole of the difference in where it is reported: see #report.
+    private record Problem, name : String, path : String, reason : String, plugin : String? = nil
 
     getter agents = Hash(String, Definition).new
 
@@ -78,7 +80,10 @@ module Smith::Agents
     # the last one and dropped whenever another is added.
     @aliases : Hash(String, String)? = nil
     @collisions : Array(String)? = nil
-    @collisions_reported = false
+    # Whether `report` has already said its piece. A flag rather than consuming
+    # `@problems`, so `warnings` stays the complete view every other reader
+    # depends on.
+    @reported = false
 
     # Global first, then plugins, then project, so a project definition
     # overwrites a global one of the same name — the rule skills and config
@@ -140,7 +145,7 @@ module Smith::Agents
         next unless child.ends_with?(".md")
 
         path = File.join(dir, child)
-        next unless regular_file?(File.basename(child, ".md"), path)
+        next unless regular_file?(File.basename(child, ".md"), path, plugin)
 
         register(parse(path, File.basename(child, ".md"), marketplace, plugin))
       end
@@ -161,29 +166,51 @@ module Smith::Agents
     # file it warns about lost.
     #
     # Kept rather than consumed by `report`, so a later reader — `smith doctor`
-    # gathers these into its Environment block — does not have to discover the
-    # whole catalog a second time to see them.
+    # gathers these into its Environment block, `smith agents list` prints it
+    # below the listing — does not have to discover the whole catalog a second
+    # time to see them. Complete on purpose: it is the only view that is.
     def warnings : Array(String)
-      @problems.map do |problem|
-        line = "⚠️  Agent '#{problem.name}' (#{problem.path}): #{problem.reason}"
-        winner = @agents[problem.name]?
-        next line if winner.nil? || winner.path == problem.path
-
-        "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
-      end
+      @problems.map { |problem| render(problem) } + collisions
     end
 
-    # The same lines, on the channel agent warnings have always used — plus
-    # every name clash, which is said once per catalog because a clash repeated
-    # on each call would read as several clashes.
+    # What the reader wrote themselves, plus every name clash, on the channel
+    # agent warnings have always used.
+    #
+    # Definitions from an installed plugin are deliberately **not** on this
+    # channel. This runs in the CLI's constructor, so every line here lands in
+    # front of every command — `smith -v` included — forever. That is the right
+    # trade for a file the reader owns and can fix in a second. It is the wrong
+    # one for a plugin: those arrive by the dozen, are written for another
+    # harness (so unread fields are the normal case, not the exception), and
+    # belong to somebody else. They wait for `warnings`, which
+    # `smith agents list` and `smith doctor` print, and `smith plugin install`
+    # says them once for the plugin being installed.
+    #
+    # A name clash is the exception among exceptions, and it is an exception
+    # about kind rather than source: it changes what a bare name *does*, right
+    # now, for someone who never typed the plugin's name.
+    #
+    # Said once per catalog rather than once per call, and without consuming
+    # anything — `warnings` has to stay complete for the readers above.
     def report(warn_io : IO = STDERR) : Nil
-      warnings.each { |line| warn_io.puts line }
+      return if @reported
 
-      unless @collisions_reported
-        collisions.each { |line| warn_io.puts line }
-        @collisions_reported = true
+      @problems.each do |problem|
+        warn_io.puts render(problem) if problem.plugin.nil?
       end
+      collisions.each { |line| warn_io.puts line }
+
+      @reported = true
     end
+
+    private def render(problem : Problem) : String
+      line = "⚠️  Agent '#{problem.name}' (#{problem.path}): #{problem.reason}"
+      winner = @agents[problem.name]?
+      return line if winner.nil? || winner.path == problem.path
+
+      "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
+    end
+
 
     # The `agent_type` values that work: every key, plus every bare name
     # unambiguous enough to stand for one.
@@ -207,9 +234,9 @@ module Smith::Agents
       @aliases = nil
       @collisions = nil
       # A source added after a report can bring a clash the last report could
-      # not have known about, so the "said it once" flag is only good for the
-      # catalog as it stood.
-      @collisions_reported = false
+      # not have known about, so "said it once" is only good for the catalog as
+      # it stood.
+      @reported = false
     end
 
     private def build_aliases : Nil
@@ -256,15 +283,15 @@ module Smith::Agents
     # on a symlink loop — which is a file smith cannot read like any other, and
     # belongs in a warning rather than in a stack trace. A FIFO would block
     # `File.read` until something wrote to it, so it never gets that far.
-    private def regular_file?(name : String, path : String) : Bool
+    private def regular_file?(name : String, path : String, plugin : String? = nil) : Bool
       info = File.info?(path)
       return false if info.nil?
       return true if info.file?
 
-      @problems << Problem.new(name, path, "not a regular file (#{info.type.to_s.downcase}); it was skipped.")
+      @problems << Problem.new(name, path, "not a regular file (#{info.type.to_s.downcase}); it was skipped.", plugin)
       false
     rescue ex : File::Error
-      @problems << Problem.new(name, path, "could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      @problems << Problem.new(name, path, "could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", plugin)
       false
     end
 
@@ -298,7 +325,7 @@ module Smith::Agents
     KNOWN_FIELDS = %w[name description tools model provider mode]
 
     private def parse(path : String, filename : String, marketplace : String? = nil, plugin : String? = nil) : Definition?
-      content = read_definition(path)
+      content = read_definition(path, plugin)
       return nil if content.nil?
 
       document = Frontmatter.parse(content)
@@ -312,9 +339,9 @@ module Smith::Agents
       # but a header that did not read costs the agent its name and its
       # description, and puts the raw `---` lines in the system prompt.
       if document.malformed?
-        @problems << Problem.new(name, path, "the frontmatter could not be read as 'key: value' lines; what it declared was ignored.")
+        @problems << Problem.new(name, path, "the frontmatter could not be read as 'key: value' lines; what it declared was ignored.", plugin)
       elsif description.nil?
-        @problems << Problem.new(name, path, "no description in the frontmatter; the model will not know when to use it.")
+        @problems << Problem.new(name, path, "no description in the frontmatter; the model will not know when to use it.", plugin)
       end
 
       # Only for plugin definitions: a local file's extra keys are its author's
@@ -324,7 +351,7 @@ module Smith::Agents
       if plugin
         ignored = document.fields.keys.reject { |key| KNOWN_FIELDS.includes?(key) }
         unless ignored.empty?
-          @problems << Problem.new(name, path, "smith does not act on #{ignored.sort.join(", ")}; #{ignored.size == 1 ? "that field was" : "those fields were"} ignored.")
+          @problems << Problem.new(name, path, "smith does not act on #{ignored.sort.join(", ")}; #{ignored.size == 1 ? "that field was" : "those fields were"} ignored.", plugin)
         end
       end
 
@@ -345,16 +372,16 @@ module Smith::Agents
 
     # One unreadable file must not take every smith command with it: the catalog
     # is built in the CLI's constructor, before it knows what was asked for.
-    private def read_definition(path : String) : String?
+    private def read_definition(path : String, plugin : String? = nil) : String?
       content = File.read(path)
       # PCRE refuses to match against bytes that are not UTF-8, so a file saved
       # as Latin-1 raises out of the parser rather than parsing badly.
       return content if content.valid_encoding?
 
-      @problems << Problem.new(File.basename(path, ".md"), path, "the file is not valid UTF-8; it was skipped.")
+      @problems << Problem.new(File.basename(path, ".md"), path, "the file is not valid UTF-8; it was skipped.", plugin)
       nil
     rescue ex : IO::Error
-      @problems << Problem.new(File.basename(path, ".md"), path, "the file could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      @problems << Problem.new(File.basename(path, ".md"), path, "the file could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", plugin)
       nil
     end
   end

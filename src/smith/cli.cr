@@ -1931,8 +1931,13 @@ module Smith
     # implies — printing only what the file said would hide the difference.
     private def list_agents : Nil
       catalog = @agents_catalog
+      # Everything a plugin brought with it. Deliberately not on stderr at
+      # startup — a marketplace ships dozens of definitions written for another
+      # harness, and a line per file would sit in front of every command — so
+      # this listing is where they are said.
+      warnings = catalog.warnings
 
-      if catalog.agents.empty?
+      if catalog.agents.empty? && warnings.empty?
         puts "No agent definitions found."
         puts "   Add one at .smith/agents/<name>.md, or globally at #{File.join(Smith.home_dir, Agents::Catalog::DIRECTORY_NAME)}/<name>.md."
         return
@@ -1970,6 +1975,11 @@ module Smith
         # Which source won a name clash is otherwise nowhere visible, and a
         # warning on stderr may name the file that lost.
         catalog.shadowed[agent.name]?.try(&.each { |lost| puts "      shadows:     #{lost}" })
+      end
+
+      unless warnings.empty?
+        puts
+        warnings.each { |warning| puts warning }
       end
 
       puts
