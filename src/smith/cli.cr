@@ -1515,10 +1515,17 @@ module Smith
       end
     end
 
-    # Both commands work on a saved session, so they resolve the id the same
-    # way `resume` does.
-    private def resolve_session(session_id : String?) : Session::Data
-      data = session_id ? @session_store.load(session_id) : @session_store.latest
+    # Both commands work on a saved session, so they resolve the reference the
+    # same way `resume` does — through the store, which is what makes a name
+    # work here as well as an id, and what refuses a reference that is really
+    # a path. It used to call `load` directly, so it did neither.
+    private def resolve_session(reference : String?) : Session::Data
+      data = begin
+        reference ? @session_store.resolve(reference) : @session_store.latest
+      rescue ex : ArgumentError
+        STDERR.puts "❌ #{ex.message}"
+        exit(1)
+      end
 
       if data.nil?
         STDERR.puts "❌ No sessions found."

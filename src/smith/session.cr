@@ -240,7 +240,16 @@ module Smith::Session
 
     # A session owns a directory now, so its checkpoints have somewhere to
     # live next to it.
+    #
+    # This is the seam: every read and every write of a session goes through
+    # here, so it is where "an id can be a directory name under sessions/"
+    # has to be true rather than at each caller. `resolve_id` guarantees it
+    # for what the user types, but `latest`, `load` and the checkpoint
+    # commands reach a session by an id straight out of the index or off the
+    # command line, and an index is a plain file that can say anything.
     def session_dir(id : String) : String
+      assert_plain_reference(id)
+
       File.join(@sessions_dir, id)
     end
 
@@ -372,10 +381,21 @@ module Smith::Session
       {entries.sort_by { |e| -e.updated_at.to_unix }, damage}
     end
 
+    # The newest session, which is what `resume`, `continue` and `context`
+    # take when given no reference at all — the most-used path there is.
+    #
+    # An entry whose id is really a path is skipped with a warning rather
+    # than loaded or raised on: nothing should read outside the sessions tree
+    # by *default*, and a bare `smith resume` failing outright because one
+    # line of the index is wrong would be its own kind of broken.
     def latest : Data?
-      entries = list
-      return nil if entries.empty?
-      load(entries.first.id)
+      list.each do |entry|
+        return load(entry.id) if plain_reference?(entry.id)
+
+        @warn_io.puts "⚠️  Skipping index entry '#{entry.id}': that is a path, not a session id."
+      end
+
+      nil
     end
 
     # A reference is whatever the user typed: an id or a name. An id wins,
@@ -562,7 +582,13 @@ module Smith::Session
       )
     end
 
+    # A probe, so it answers rather than raises: `resolve_id` asks this about
+    # whatever the user typed, and "no" is the right answer for a reference
+    # that could never name a session directory. The load path is the one
+    # that has to refuse loudly.
     private def session_file?(id : String) : Bool
+      return false unless plain_reference?(id)
+
       File.exists?(File.join(session_dir(id), "session.json")) || File.exists?(legacy_path(id))
     end
 

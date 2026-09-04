@@ -711,6 +711,42 @@ describe "a session reference" do
     end
   end
 
+  it "refuses to build a session path out of anything but a session id" do
+    with_store do |store|
+      # The seam. `resolve_id` guarantees this for what the user types, but
+      # `latest`, `load` and the checkpoint commands reach a session by an id
+      # straight out of the index or off the command line — so the promise
+      # has to hold here, or it holds nowhere.
+      ["../victim", "../../etc", "sessions/x", "/etc/passwd", "..", ".", ""].each do |hostile|
+        expect_raises(ArgumentError, /is not a session reference/) { store.session_dir(hostile) }
+        expect_raises(ArgumentError, /is not a session reference/) { store.load(hostile) }
+      end
+
+      # And a real session still goes through all of it.
+      session = session_with(store, "a real session")
+      store.session_dir(session.id).should eq(File.join(store.sessions_dir, session.id))
+      store.load(session.id).id.should eq(session.id)
+    end
+  end
+
+  it "skips a poisoned newest entry rather than making it the default session" do
+    with_store do |store|
+      # `smith resume` and `smith context` with no argument go through
+      # `latest`, which never touched resolution at all.
+      warnings = IO::Memory.new
+      store = Smith::Session::Store.new(base_dir: store.base_dir, warn_io: warnings)
+      real = session_with(store, "the real session")
+
+      entries = JSON.parse(File.read(store.index_path)).as_a
+      rogue = JSON.parse(%({"id": "../victim", "created_at": "2030-01-01T00:00:00Z", "updated_at": "2030-01-01T00:00:00Z", "first_prompt": "x", "message_count": 0}))
+      File.write(store.index_path, ([rogue] + entries).to_json)
+      store.list.first.id.should eq("../victim") # it really is the newest
+
+      store.latest.try(&.id).should eq(real.id)
+      warnings.to_s.should contain("Skipping index entry '../victim'")
+    end
+  end
+
   it "prunes past a path-shaped id instead of taking the session down with it" do
     with_store do |store|
       # `prune` runs at the start of every session and never goes through
