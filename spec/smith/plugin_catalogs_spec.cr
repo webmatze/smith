@@ -141,7 +141,7 @@ describe "plugin skills" do
       plugins: {"fixture/skills-demo" => {"skills/deploy/SKILL.md" => skill("deploy", body: "The plugin deploy.")}},
       project: {"deploy" => skill("deploy", body: "The local deploy.")}
     ) do |dir|
-      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir, warn_io: IO::Memory.new)
 
       catalog.skills.keys.sort.should eq(["deploy", "skills-demo:deploy"])
       catalog.bare_aliases.should be_empty
@@ -166,7 +166,7 @@ describe "plugin skills" do
       "fixture/one" => {"skills/shared/SKILL.md" => skill("shared", body: "From one.")},
       "fixture/two" => {"skills/shared/SKILL.md" => skill("shared", body: "From two.")},
     }) do |dir|
-      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir, warn_io: IO::Memory.new)
 
       catalog.bare_aliases.should be_empty
       catalog.resolve("shared").should be_nil
@@ -187,11 +187,33 @@ describe "plugin skills" do
       "fixture/other" => {"skills/demo/SKILL.md" => skill("demo", body: "The demo body.")},
       "fixture/demo"  => {"skills/alpha/SKILL.md" => skill("alpha", body: "The alpha body.")},
     }) do |dir|
-      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir)
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir, warn_io: IO::Memory.new)
 
       expanded = catalog.expand_prompt("run $demo:alpha")
       expanded.should contain("The alpha body.")
       expanded.should_not contain("The demo body.")
+    end
+  end
+
+  # The same trap one level down: `demo` here is a real catalog key, not an
+  # alias, and a guard applied only to the alias path let `$demo:alpha` inject
+  # the local skill's body alongside the one that was actually asked for.
+  it "does not let a real key steal the plugin half of a namespaced reference" do
+    with_plugins(
+      plugins: {"fixture/demo" => {"skills/alpha/SKILL.md" => skill("alpha", body: "The alpha body.")}},
+      project: {"demo" => skill("demo", body: "The local demo body.")}
+    ) do |dir|
+      catalog = Smith::Skills::Catalog.discover(workspace_dir: dir, warn_io: IO::Memory.new)
+      catalog.skills.keys.sort.should eq(["demo", "demo:alpha"])
+
+      expanded = catalog.expand_prompt("run $demo:alpha")
+      expanded.should contain("The alpha body.")
+      expanded.should_not contain("The local demo body.")
+
+      # …while a plain reference to the local skill still works, and so does one
+      # whose colon is only punctuation.
+      catalog.expand_prompt("run $demo now").should contain("The local demo body.")
+      catalog.expand_prompt("about $demo: it is local").should contain("The local demo body.")
     end
   end
 
@@ -251,9 +273,9 @@ describe "plugin agents" do
       catalog.bare_aliases.should be_empty
       catalog.invocation_names.sort.should eq(["agents-demo:reviewer", "reviewer"])
 
-      # A clash a plugin caused belongs in the listing, not in front of every
-      # command.
-      warnings.to_s.should be_empty
+      # A clash is the one thing that does not wait to be asked for: it changes
+      # what the bare name does for someone who never typed the plugin's.
+      warnings.to_s.should contain("Agent 'reviewer' is defined outside any plugin")
       catalog.warnings.join("\n").should contain("Agent 'reviewer' is defined outside any plugin")
     end
   end
@@ -267,12 +289,13 @@ describe "plugin agents" do
       catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: warnings)
 
       catalog["shared"].should be_nil
-      warnings.to_s.should be_empty
+      warnings.to_s.lines.count { |line| line.includes?("'shared'") }.should eq(1)
       catalog.warnings.count { |line| line.includes?("'shared'") }.should eq(1)
 
-      # Rendered on demand, so asking twice says the same thing rather than
-      # twice as much.
-      catalog.warnings.should eq(catalog.warnings)
+      # Said once, not once per report.
+      again = IO::Memory.new
+      catalog.report(again)
+      again.to_s.should be_empty
     end
   end
 
@@ -342,6 +365,43 @@ describe "where a plugin's problems are said" do
       again = IO::Memory.new
       catalog.report(again)
       again.to_s.should be_empty
+    end
+  end
+
+  # The one exception, and the reason the split is by *kind* rather than by
+  # source. An unread frontmatter field is informational and can wait to be
+  # asked for. A name clash changes what a bare `/name` does, right now, for
+  # someone who never typed the plugin's name — so it is said without asking,
+  # in both catalogs, once.
+  it "still says a name clash at startup, in both catalogs" do
+    with_plugins(
+      plugins: {"mkt/p" => {
+        "skills/demo/SKILL.md" => skill("demo", body: "plugin"),
+        "agents/clash.md"      => agent("clash"),
+      }},
+      project: {"demo" => skill("demo", body: "local")},
+      global: {"clash" => agent("clash")}
+    ) do |dir|
+      skill_io = IO::Memory.new
+      Smith::Skills::Catalog.discover(workspace_dir: dir, warn_io: skill_io)
+      skill_io.to_s.should contain("Skill 'demo' is defined outside any plugin")
+
+      agent_io = IO::Memory.new
+      catalog = Smith::Agents::Catalog.discover(workspace_dir: dir, warn_io: agent_io)
+      agent_io.to_s.should contain("Agent 'clash' is defined outside any plugin")
+
+      # Once, not once per report.
+      again = IO::Memory.new
+      catalog.report(again)
+      again.to_s.should be_empty
+    end
+  end
+
+  it "stays quiet at startup when no name clashes" do
+    with_plugins({"mkt/p" => {"skills/alpha/SKILL.md" => skill("alpha"), "agents/auditor.md" => agent("auditor")}}) do |dir|
+      skill_io = IO::Memory.new
+      Smith::Skills::Catalog.discover(workspace_dir: dir, warn_io: skill_io)
+      skill_io.to_s.should be_empty
     end
   end
 

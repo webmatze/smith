@@ -1853,6 +1853,13 @@ module Smith
     rescue ex : Marketplace::Error
       STDERR.puts "❌ Error: #{ex.message}"
       exit(1)
+    rescue ex : IO::Error | JSON::Error
+      # Everything below here reaches for the filesystem and the network, and
+      # a third-party marketplace decides much of what it finds. A Crystal
+      # backtrace is not the "klare Fehlermeldung" this command promises.
+      # `File::Error` is an `IO::Error`, so both arrive here.
+      STDERR.puts "❌ Error: #{ex.message}"
+      exit(1)
     end
 
     private def run_skills(subcommand : String?) : Nil

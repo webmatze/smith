@@ -1373,6 +1373,8 @@ Agent frontmatter written for another harness (`maxTurns`, `disallowedTools`, `m
 
 **Where a plugin's problems are said matters as much as that they are said.** A definition *you* wrote warns on stderr at startup, as it always has: it is your file and you can fix it in a second. A definition a *plugin* brought does not — a marketplace ships them by the dozen, written for another harness, so unread fields are the normal case rather than the exception, and a line per file would sit in front of every `smith` command forever about files you do not own. Those are said twice instead, both times on purpose: once by `smith plugin install`, where you are deciding about the plugin, and then on demand in `smith skills list` and `smith agents list`, the commands that exist to show catalog state. Nothing is dropped.
 
+**A name clash is the exception**, and it is an exception about *kind*, not about source. The lines above are informational — a field was not read. A clash changes what a bare `/name` **does**, right now, for someone who never typed the plugin's name. That is said at startup, once, in both catalogs, whoever caused it.
+
 #### What it refuses, and why
 
 - **`npm` and `command` sources** are refused permanently. One needs a package manager smith does not ship, manage or sandbox; the other *is* arbitrary code execution, outside every gate smith has.
@@ -1392,6 +1394,20 @@ smith plugin install my-plugin@my-marketplace
 ```
 
 A local path *without* a manifest is treated as a git repository to clone — which is what a bare repository is, and what smith's own specs run against so that no test ever reaches the network.
+
+#### A pin is a pin
+
+When a source names a `sha`, or a `ref`, that is the only thing smith will install. If the remote no longer serves it — the history was rewritten, the repository changed hands — the install **fails**, with the reason. It does not fall back to whatever the remote calls `HEAD` today, which would install an unaudited tree, record it as the version, and report "up to date" from then on.
+
+#### Known limitations
+
+Honest about the edges rather than quiet about them:
+
+- Two marketplaces shipping a plugin of the **same name** produce the same `<plugin>:<name>` key. The last one read wins, `smith skills list` shows the `shadows:` line, and `smith plugin install` warns — but there is no `<marketplace>:<plugin>:<name>` form to address the loser by.
+- Re-adding a marketplace under a name already registered **replaces** the entry, as Claude Code does, but prints no "the source changed" line.
+- On a case-insensitive filesystem (macOS by default), `Case@evil` and `case@evil` collide where they would not on ext4.
+- Nothing locks the registry, so two `smith plugin` commands running at once can lose one another's write.
+- `installed/<marketplace>/<plugin>` being replaced by a **symlink** after installation is followed. The copy never creates one; this is about the directory afterwards.
 
 ### Background Commands
 

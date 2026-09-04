@@ -31,7 +31,7 @@ end
 
 private def run(*arguments : String) : String
   printed = IO::Memory.new
-  Smith::Marketplace::Commands.new(printed, printed).dispatch(arguments.to_a)
+  Smith::Marketplace::Commands.new(printed).dispatch(arguments.to_a)
   printed.to_s
 end
 
@@ -113,6 +113,35 @@ describe Smith::Marketplace::Manifest do
     manifest.resolve("old").name.should eq("new")
     expect_raises(Smith::Marketplace::Error, /withdrawn/) { manifest.resolve("dropped") }
     expect_raises(Smith::Marketplace::Error, /has no plugin/) { manifest.resolve("absent") }
+  end
+
+  # Claude Code is explicit: "A source that contains a `/`, such as
+  # `team-a/formatter`, isn't a bare name and still needs the `./` prefix, even
+  # when `metadata.pluginRoot` is set."
+  it "applies pluginRoot only to a name with no slash in it" do
+    with_home do |temp_dir|
+      root = File.join(temp_dir, "market")
+      FileUtils.mkdir_p(File.join(root, "plugins", "good"))
+      FileUtils.mkdir_p(File.join(root, "plugins", "bare"))
+
+      manifest = parse(<<-JSON)
+        {
+          "name": "m", "owner": {"name": "o"},
+          "metadata": {"pluginRoot": "./plugins"},
+          "plugins": [
+            {"name": "bare", "source": "bare"},
+            {"name": "slashed", "source": "plugins/good"},
+            {"name": "dotted", "source": "./plugins/good"}
+          ]
+        }
+        JSON
+
+      resolved = Smith::Marketplace.real_path(root)
+      manifest.source_dir(root, manifest.resolve("bare")).should eq(File.join(resolved, "plugins", "bare"))
+      # Not <root>/plugins/plugins/good, which failed to install at all.
+      manifest.source_dir(root, manifest.resolve("slashed")).should eq(File.join(resolved, "plugins", "good"))
+      manifest.source_dir(root, manifest.resolve("dotted")).should eq(File.join(resolved, "plugins", "good"))
+    end
   end
 
   it "resolves a bare source name under pluginRoot and a written path from the root" do
@@ -346,6 +375,51 @@ describe Smith::Marketplace do
       end
     end
 
+    it "survives a directory under installed/ that cannot be listed" do
+      with_home do |temp_dir|
+        plugin = File.join(Smith::Marketplace.installed_dir, "mkt", "plug", "skills", "s")
+        FileUtils.mkdir_p(plugin)
+        File.write(File.join(plugin, "SKILL.md"), "---\nname: s\ndescription: d\n---\nbody")
+
+        unreadable = File.join(Smith::Marketplace.installed_dir, "mkt")
+        File.chmod(unreadable, 0o000)
+
+        begin
+          # `smith plugin uninstall` is among the commands this would take down,
+          # which is the one that would repair it.
+          Smith::Marketplace.installed.should be_empty
+
+          catalog = Smith::Skills::Catalog.discover(workspace_dir: temp_dir, warn_io: IO::Memory.new)
+          catalog.skills.should be_empty
+          catalog.warnings.join("\n").should contain("could not be listed")
+
+          agents = IO::Memory.new
+          Smith::Agents::Catalog.discover(workspace_dir: temp_dir, warn_io: agents).agents.should be_empty
+        ensure
+          File.chmod(unreadable, 0o755)
+        end
+      end
+    end
+
+    it "drops a registry entry whose url or ref could not be added today" do
+      with_home do
+        FileUtils.mkdir_p(Smith::Marketplace.root_dir)
+        File.write(Smith::Marketplace.registry_path, <<-JSON)
+          {"version": 1, "marketplaces": {
+            "sshy": {"name": "sshy", "source": "x", "url": "ssh://evil/repo.git", "added_at": "t", "updated_at": "t"},
+            "exty": {"name": "exty", "source": "x", "url": "ext::sh -c whoami", "added_at": "t", "updated_at": "t"},
+            "flaggy": {"name": "flaggy", "source": "x", "url": "https://example.com/r.git", "ref": "--upload-pack=touch /tmp/x", "added_at": "t", "updated_at": "t"},
+            "relative": {"name": "relative", "source": "x", "dir": "../elsewhere", "added_at": "t", "updated_at": "t"},
+            "fine": {"name": "fine", "source": "x", "url": "https://example.com/r.git", "ref": "v1.0.0", "added_at": "t", "updated_at": "t"}
+          }}
+          JSON
+
+        # The url and the ref reach a git command line; the file is editable, so
+        # they are validated coming back in and not only going out.
+        Smith::Marketplace::Registry.load.names.should eq(["fine"])
+      end
+    end
+
     it "drops a registry entry whose name could be a path" do
       with_home do
         FileUtils.mkdir_p(Smith::Marketplace.root_dir)
@@ -396,6 +470,54 @@ describe Smith::Marketplace do
         updated = run("marketplace", "update")
         updated.should contain("→ #{moved[0, 8]}")
         Smith::Marketplace::Registry.load["fixture"].commit.should eq(moved)
+      end
+    end
+
+    # The pin is the whole point of a pin: a marketplace names an audited
+    # commit, the upstream is force-pushed or taken over, and the pinned commit
+    # stops being reachable. Falling back to whatever the remote calls HEAD
+    # today would install the attacker's tree, record it as the version, and
+    # report "up to date" ever after.
+    it "refuses a pinned sha the repository does not contain" do
+      with_fixture do |temp_dir, repo|
+        dest = File.join(temp_dir, "pinned")
+
+        expect_raises(Smith::Marketplace::Error, /does not contain the pinned commit/) do
+          Smith::Marketplace::Git.materialize(repo.bare, dest, sha: "0123456789abcdef0123456789abcdef01234567")
+        end
+      end
+    end
+
+    it "refuses a pinned ref the repository does not contain" do
+      with_fixture do |temp_dir, repo|
+        dest = File.join(temp_dir, "pinned-ref")
+
+        expect_raises(Smith::Marketplace::Error, /does not contain the pinned ref/) do
+          Smith::Marketplace::Git.materialize(repo.bare, dest, ref: "v9-does-not-exist")
+        end
+      end
+    end
+
+    it "resolves a pin the repository does contain" do
+      with_fixture do |temp_dir, repo|
+        head = MarketplaceFixture.head(repo.work)
+
+        Smith::Marketplace::Git.materialize(repo.bare, File.join(temp_dir, "by-sha"), sha: head).should eq(head)
+        Smith::Marketplace::Git.materialize(repo.bare, File.join(temp_dir, "by-ref"), ref: "main").should eq(head)
+        Smith::Marketplace::Git.materialize(repo.bare, File.join(temp_dir, "by-head")).should eq(head)
+      end
+    end
+
+    it "still resolves a pin when only a full fetch can serve it" do
+      with_fixture do |temp_dir, repo|
+        first = MarketplaceFixture.head(repo.work)
+        MarketplaceFixture.advance(repo, "move past the pin")
+
+        # The older commit is no longer any ref's tip, so a shallow fetch of it
+        # is the case that drives the full-fetch fallback — the path where
+        # FETCH_HEAD is the default branch and the pin has to be named.
+        dest = File.join(temp_dir, "older")
+        Smith::Marketplace::Git.materialize(repo.bare, dest, sha: first).should eq(first)
       end
     end
 
@@ -492,6 +614,48 @@ describe Smith::Marketplace do
 
         expect_raises(Smith::Marketplace::Error, /'\.\.'/) { run("install", "escape-demo@fixture") }
         Smith::Marketplace.installed.should be_empty
+      end
+    end
+
+    # An install is a long copy, and anything can end it: Ctrl-C, a full disk,
+    # a file the plugin will not let smith read. What must never happen is a
+    # half-plugin going live — or an interrupted re-install destroying the
+    # working plugin it was replacing.
+    it "leaves nothing behind when the copy cannot finish" do
+      with_fixture do |temp_dir, repo|
+        MarketplaceFixture.write(repo.work, "plugins/half/skills/ok/SKILL.md", "---\nname: ok\ndescription: d\n---\nbody")
+        MarketplaceFixture.write(repo.work, "plugins/half/unreadable", "secret")
+        File.chmod(File.join(repo.work, "plugins", "half", "unreadable"), 0o000)
+        MarketplaceFixture.write(repo.work, ".claude-plugin/marketplace.json",
+          %({"name": "fixture", "owner": {"name": "o"}, "plugins": [{"name": "half", "source": "./plugins/half"}]}))
+
+        run("marketplace", "add", repo.work)
+        expect_raises(Smith::Marketplace::Error, /could not copy unreadable/) { run("install", "half@fixture") }
+
+        Smith::Marketplace.installed.should be_empty
+        Smith::Skills::Catalog.discover(workspace_dir: temp_dir, warn_io: IO::Memory.new).skills.should be_empty
+        # Not even under its staging name.
+        marketplace_dir = File.join(Smith::Marketplace.installed_dir, "fixture")
+        (Dir.exists?(marketplace_dir) ? Dir.children(marketplace_dir) : Array(String).new).should be_empty
+      end
+    end
+
+    it "keeps the working plugin when a re-install cannot finish" do
+      with_fixture do |temp_dir, repo|
+        run("marketplace", "add", repo.work)
+        run("install", "skills-demo@fixture")
+
+        # The same plugin, now uncopyable.
+        MarketplaceFixture.write(repo.work, "plugins/skills-demo/unreadable", "secret")
+        File.chmod(File.join(repo.work, "plugins", "skills-demo", "unreadable"), 0o000)
+
+        expect_raises(Smith::Marketplace::Error, /could not copy/) { run("install", "skills-demo@fixture") }
+
+        # The copy that was already there is untouched.
+        installed = Smith::Marketplace.installed
+        installed.map(&.plugin).should eq(["skills-demo"])
+        installed.first.meta.not_nil!.version.should eq("1.2.0")
+        File.exists?(File.join(installed.first.dir, "skills", "alpha", "SKILL.md")).should be_true
       end
     end
 

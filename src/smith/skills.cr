@@ -55,8 +55,14 @@ module Smith::Skills
     # another is added.
     @aliases : Hash(String, String)? = nil
     @collisions : Array(String)? = nil
+    @collisions_reported = false
 
-    def self.discover(workspace_dir : String = Dir.current) : Catalog
+    # `warn_io` carries exactly one kind of line: a name clash. Everything else
+    # this catalog has to say waits for `smith skills list`, because it is built
+    # in the CLI's constructor and would otherwise print before every command's
+    # own output. A clash is the exception because it changes what a bare
+    # `/name` *does* for someone who never typed the plugin's name.
+    def self.discover(workspace_dir : String = Dir.current, warn_io : IO = STDERR) : Catalog
       catalog = Catalog.new
 
       # 1. Global skills in ~/.smith/skills/
@@ -78,7 +84,17 @@ module Smith::Skills
         catalog.load_skills_dir(dir)
       end
 
+      catalog.report_collisions(warn_io)
+
       catalog
+    end
+
+    # See the note on `discover`. Once per catalog, not once per call.
+    def report_collisions(warn_io : IO = STDERR) : Nil
+      return if @collisions_reported
+
+      collisions.each { |line| warn_io.puts line }
+      @collisions_reported = true
     end
 
     # Rendered by `smith skills list`. Collected rather than written to a
@@ -105,7 +121,7 @@ module Smith::Skills
       invalidate
       return unless directory?(dir)
 
-      Dir.children(dir).sort.each do |child|
+      children(dir, dir).each do |child|
         skill_dir = File.join(dir, child)
         next unless entry_info(child, skill_dir).try(&.directory?)
 
@@ -124,11 +140,18 @@ module Smith::Skills
     def load_plugins_dir(base : String = Smith.installed_plugins_dir) : Nil
       return unless directory?(base)
 
-      Dir.children(base).sort.each do |marketplace|
+      children(base, base).each do |marketplace|
+        # An install stages its copy under a dot-prefixed name and renames it
+        # into place, so a dot-prefixed entry is a half-written plugin, never
+        # one to load.
+        next if marketplace.starts_with?('.')
+
         marketplace_dir = File.join(base, marketplace)
         next unless entry_info(marketplace, marketplace_dir).try(&.directory?)
 
-        Dir.children(marketplace_dir).sort.each do |plugin|
+        children(marketplace, marketplace_dir).each do |plugin|
+          next if plugin.starts_with?('.')
+
           plugin_dir = File.join(marketplace_dir, plugin)
           next unless entry_info(plugin, plugin_dir).try(&.directory?)
 
@@ -144,7 +167,7 @@ module Smith::Skills
 
       skills_dir = File.join(plugin_dir, "skills")
       if directory?(skills_dir)
-        Dir.children(skills_dir).sort.each do |child|
+        children(plugin, skills_dir).each do |child|
           skill_dir = File.join(skills_dir, child)
           next unless entry_info(child, skill_dir).try(&.directory?)
 
@@ -172,6 +195,19 @@ module Smith::Skills
       File.info?(path).try(&.directory?) || false
     rescue File::Error
       false
+    end
+
+    # `Dir.children` raises where a directory cannot be *read*, which the stat
+    # guards do not cover: `chmod 000` on a directory under `plugins/installed/`
+    # is enough, and that is the one tree a third-party install writes into.
+    # This runs before smith knows what was asked for, so it may not raise —
+    # `smith plugin uninstall`, the command that would repair it, is among the
+    # ones it would otherwise take down.
+    private def children(name : String, path : String) : Array(String)
+      Dir.children(path).sort
+    rescue ex : File::Error
+      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      Array(String).new
     end
 
     # What an entry is, without opening it. `File.info?` answers nil for
@@ -269,6 +305,7 @@ module Smith::Skills
     private def invalidate : Nil
       @aliases = nil
       @collisions = nil
+      @collisions_reported = false
     end
 
     private def build_aliases : Nil
@@ -361,16 +398,14 @@ module Smith::Skills
       # `$plugin:skill` also contains `$plugin`, and the full name is the one
       # that was meant.
       @skills.each do |name, skill|
-        pattern = "$#{name}"
-        if user_text.includes?(pattern) && !skills_appended.includes?(skill)
-          skills_appended << skill
-        end
+        next if skills_appended.includes?(skill)
+        skills_appended << skill if mentions?(user_text, name)
       end
 
       bare_aliases.each do |bare, key|
         skill = @skills[key]?
         next if skill.nil? || skills_appended.includes?(skill)
-        skills_appended << skill if mentions_bare?(user_text, bare)
+        skills_appended << skill if mentions?(user_text, bare)
       end
 
       # If any skills matched, append full bodies to user turn
@@ -387,16 +422,22 @@ module Smith::Skills
       end
     end
 
-    # `$bare` where a namespaced reference does not already own the text: in
-    # `$plugin:skill` the substring `$plugin` must not fire an unrelated skill
-    # that happens to be called `plugin`.
-    private def mentions_bare?(text : String, bare : String) : Bool
-      token = "$#{bare}"
+    # `$name`, where a namespaced reference does not already own the text: the
+    # substring `$demo` inside `$demo:alpha` is the *plugin half* of that
+    # reference, and must not also pull in a skill that happens to be called
+    # `demo` — whether that skill is a bare alias or a key of its own.
+    #
+    # A colon that merely ends a clause — `$demo: it works` — is not a
+    # namespaced reference, so only a colon followed by a non-space counts.
+    private def mentions?(text : String, name : String) : Bool
+      token = "$#{name}"
       offset = 0
 
       while index = text.index(token, offset)
         after = index + token.size
-        return true if after >= text.size || text[after] != ':'
+        namespaced = text[after]? == ':' && (text[after + 1]?.try { |char| !char.whitespace? } || false)
+        return true unless namespaced
+
         offset = after
       end
 

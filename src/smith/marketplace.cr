@@ -45,6 +45,11 @@ module Smith::Marketplace
   # what its source said, the version that was resolved, what was ignored.
   META_FILE = "plugin.json.meta"
 
+  # An install is assembled under this prefix and renamed into place. The dot
+  # is load-bearing: discovery skips dot-prefixed entries, so a half-written
+  # plugin is never loadable, listable or aliasable.
+  STAGING_PREFIX = ".staging-"
+
   # Components a plugin may carry that smith deliberately does not load. Named
   # in a warning and in the install summary, never dropped in silence.
   #
@@ -114,6 +119,17 @@ module Smith::Marketplace
       return nil if value.nil? || value.empty?
       raise Error.new("sha #{value.inspect} is not a commit id.") unless value.matches?(SHA)
       value
+    end
+
+    # What may sit in a registry entry's `url` — which is *not* the same set a
+    # marketplace may name. `Origin.parse` also accepts a local repository, so
+    # a path the reader typed is legitimate here; only a marketplace-supplied
+    # url is held to https alone, by `url!` below.
+    def self.remote?(value : String) : Bool
+      return false if value.includes?('\0')
+      return true if value.matches?(HTTPS_URL)
+
+      Path.new(value).absolute?
     end
 
     def self.url!(value : String?) : String
@@ -474,13 +490,19 @@ module Smith::Marketplace
       path = entry.source.path
       raise Error.new("plugin #{entry.name.inspect} has no source path.") if path.nil? || path.empty?
 
-      # A bare name resolves under `metadata.pluginRoot`; anything written as a
-      # path stays relative to the marketplace root.
+      # Only a *bare name* resolves under `metadata.pluginRoot`, and bare means
+      # exactly what Claude Code says it means: no slash in it. "A source that
+      # contains a `/`, such as `team-a/formatter`, isn't a bare name and still
+      # needs the `./` prefix, even when `metadata.pluginRoot` is set." Reading
+      # "no leading `./`" as bare instead turned `plugins/good` under a
+      # pluginRoot of `./plugins` into `plugins/plugins/good`, and the install
+      # then failed on a marketplace that is perfectly well formed.
+      root_for = plugin_root
       relative =
-        if path.starts_with?("./") || path.starts_with?("../") || path.starts_with?("/") || plugin_root.nil?
+        if root_for.nil? || path.includes?('/') || path.starts_with?('.')
           path
         else
-          File.join(plugin_root.not_nil!, path)
+          File.join(root_for, path)
         end
 
       Marketplace.resolve_within(root, relative, "plugin source")
@@ -551,11 +573,22 @@ module Smith::Marketplace
       "GIT_PAGER"           => "cat",
     }
 
-    PREFIX = ["-c", "credential.helper="]
-
-    def self.available? : Bool
-      run(["--version"], timeout: 10).ok?
-    end
+    # Config forced onto every invocation, so the URL validator is not the only
+    # thing standing between a marketplace and a transport smith never meant to
+    # use. `protocol.allow=never` turns the allow-list around: `ext::` (which is
+    # arbitrary code execution), `ssh://` and `git://` are refused by git itself
+    # even if one ever slipped past `Safe.url!`. `file` is allowed because a
+    # local path is a *user* argument — a marketplace cannot supply one — and it
+    # is what the specs' bare repository is. `followRedirects=false` stops a
+    # validated `https://trusted/repo.git` from being redirected to a host that
+    # was never checked; git's default (`initial`) would allow exactly that.
+    PREFIX = [
+      "-c", "credential.helper=",
+      "-c", "protocol.allow=never",
+      "-c", "protocol.https.allow=always",
+      "-c", "protocol.file.allow=always",
+      "-c", "http.followRedirects=false",
+    ]
 
     def self.run(arguments : Array(String), chdir : String? = nil, timeout : Int32 = DEFAULT_TIMEOUT) : Result
       output = IO::Memory.new
@@ -601,15 +634,96 @@ module Smith::Marketplace
     # for a local path — which would make the local fixture in the specs behave
     # differently from the real thing. Fetching `HEAD` asks the remote what its
     # default is instead.
+    # What a fetch is *allowed* to land on, and whether it did.
+    #
+    # A value rather than three scattered judgements. The shallow fetch, the
+    # full fallback fetch and the checkout each used to decide for themselves
+    # what "worked" meant, and a pin degraded silently in the seam between them:
+    # a full fetch writes the remote's **default branch** into `FETCH_HEAD`, so
+    # checking that out after a pinned fetch had failed installed whatever the
+    # remote calls HEAD today, recorded it as the version, and reported "up to
+    # date" ever after. Everything about that decision now lives here, and
+    # `#satisfied_by!` is on every path — including the one that looked like it
+    # worked.
+    struct Pin
+      getter sha : String?
+      getter ref : String?
+
+      def initialize(@sha : String? = nil, @ref : String? = nil)
+      end
+
+      def pinned? : Bool
+        !(@sha.nil? && @ref.nil?)
+      end
+
+      # The refspec to ask the remote for.
+      def wanted : String
+        @sha || @ref || "HEAD"
+      end
+
+      # Where a *full* fetch may be told to go, in order of preference.
+      # `FETCH_HEAD` is deliberately absent whenever there is a pin: it is the
+      # default branch by then, which is the substitution a pin exists to stop.
+      def checkout_candidates : Array(String)
+        if sha = @sha
+          [sha]
+        elsif ref = @ref
+          ["refs/remotes/origin/#{ref}", ref, "refs/tags/#{ref}"]
+        else
+          ["FETCH_HEAD"]
+        end
+      end
+
+      # A sha pin is checkable against the result; a ref pin is checked by the
+      # checkout of that name having succeeded at all.
+      def satisfied_by!(resolved : String) : Nil
+        sha = @sha
+        return if sha.nil? || resolved == sha || resolved.starts_with?(sha)
+
+        raise Error.new("the source pins commit #{sha}, but the checkout landed on #{resolved} — refusing to install something other than what was pinned.")
+      end
+
+      def unreachable : Error
+        what = @sha ? "commit #{@sha}" : "ref #{@ref.inspect}"
+        Error.new("the repository does not contain the pinned #{what}. That is a refusal, not a reason to install its default branch instead: a pin that has become unreachable means the history was rewritten, or the source is no longer the one that was audited.")
+      end
+    end
+
+    # One budget for a whole operation rather than one per call. `materialize`
+    # makes up to eight git calls, and a per-call timeout would multiply into a
+    # quarter of an hour before a headless command gave up.
+    private struct Budget
+      def initialize(@deadline : Time::Instant)
+      end
+
+      def self.for(timeout : Int32) : Budget
+        Budget.new(Time.instant + timeout.seconds)
+      end
+
+      def remaining : Int32
+        left = (@deadline - Time.instant).total_seconds.ceil.to_i
+        raise Error.new("the git operation ran out of time.") if left <= 0
+        left
+      end
+    end
+
+    # Fetch `url` into `dest` at the requested ref or sha, and answer the commit
+    # that ended up checked out.
+    #
+    # `init` + `fetch` rather than `clone --depth 1`: a clone has to guess the
+    # default branch name, and `clone --depth` silently degrades to a full clone
+    # for a local path — which would make the local fixture in the specs behave
+    # differently from the real thing. Fetching `HEAD` asks the remote what its
+    # default is instead.
     def self.materialize(url : String, dest : String, ref : String? = nil, sha : String? = nil, timeout : Int32 = DEFAULT_TIMEOUT) : String
       FileUtils.rm_rf(dest) if File.exists?(dest)
       FileUtils.mkdir_p(File.dirname(dest))
 
-      check!(run(["init", "-q", dest], timeout: timeout), "initialise #{dest}")
-      check!(run(["remote", "add", "origin", url], chdir: dest, timeout: timeout), "add the remote #{url}")
+      budget = Budget.for(timeout)
+      check!(run(["init", "-q", dest], timeout: budget.remaining), "initialise #{dest}")
+      check!(run(["remote", "add", "origin", url], chdir: dest, timeout: budget.remaining), "add the remote #{url}")
 
-      fetch!(dest, ref, sha, timeout)
-      head(dest, timeout)
+      fetch!(dest, Pin.new(sha, ref), budget)
     end
 
     # Re-fetch an existing checkout in place. The caller falls back to a fresh
@@ -617,8 +731,7 @@ module Smith::Marketplace
     def self.refresh(dest : String, ref : String? = nil, sha : String? = nil, timeout : Int32 = DEFAULT_TIMEOUT) : String
       raise Error.new("#{dest} is not a git checkout.") unless File.exists?(File.join(dest, ".git"))
 
-      fetch!(dest, ref, sha, timeout)
-      head(dest, timeout)
+      fetch!(dest, Pin.new(sha, ref), Budget.for(timeout))
     end
 
     def self.head(dest : String, timeout : Int32 = DEFAULT_TIMEOUT) : String
@@ -627,25 +740,31 @@ module Smith::Marketplace
       result.output.strip
     end
 
-    private def self.fetch!(dest : String, ref : String?, sha : String?, timeout : Int32) : Nil
-      target = sha || ref || "HEAD"
+    # Answers the commit that is checked out when it is the one that was asked
+    # for, and raises otherwise. There is no third outcome on purpose.
+    private def self.fetch!(dest : String, pin : Pin, budget : Budget) : String
+      shallow = run(["fetch", "--depth", "1", "origin", pin.wanted], chdir: dest, timeout: budget.remaining)
 
-      # Shallow first; a server (or a transport) that refuses a shallow fetch of
-      # this particular ref is answered with a full one rather than a failure.
-      result = run(["fetch", "--depth", "1", "origin", target], chdir: dest, timeout: timeout)
-      unless result.ok?
-        result = run(["fetch", "origin"], chdir: dest, timeout: timeout)
-        check!(result, "fetch #{target}")
+      if shallow.ok?
+        # This fetch asked for exactly one refspec, so FETCH_HEAD *is* it.
+        check!(run(["checkout", "-q", "--detach", "FETCH_HEAD"], chdir: dest, timeout: budget.remaining),
+          "check out #{pin.wanted}")
+      else
+        # A server or transport that will not serve this ref shallowly is
+        # answered with a full fetch — after which the pin must be named, since
+        # FETCH_HEAD now points at the default branch.
+        check!(run(["fetch", "origin"], chdir: dest, timeout: budget.remaining), "fetch #{pin.wanted}")
+
+        landed = pin.checkout_candidates.find do |candidate|
+          run(["checkout", "-q", "--detach", candidate], chdir: dest, timeout: budget.remaining).ok?
+        end
+
+        raise pin.unreachable if landed.nil?
       end
 
-      # FETCH_HEAD is what the fetch above just wrote, which avoids naming a
-      # branch smith would otherwise have to guess.
-      checkout = run(["checkout", "-q", "--detach", "FETCH_HEAD"], chdir: dest, timeout: timeout)
-      unless checkout.ok?
-        # A full fallback fetch does not set FETCH_HEAD to the pinned sha.
-        checkout = run(["checkout", "-q", "--detach", target], chdir: dest, timeout: timeout) if sha
-        check!(checkout, "check out #{target}")
-      end
+      resolved = head(dest, budget.remaining)
+      pin.satisfied_by!(resolved)
+      resolved
     end
 
     private def self.check!(result : Result, what : String) : Nil
@@ -768,16 +887,34 @@ module Smith::Marketplace
       return Registry.new unless File.exists?(path)
 
       registry = Registry.from_json(File.read(path))
-      # The names in this file become directory names under ~/.smith — for
-      # `marketplace remove`, a directory it deletes. smith only ever writes
-      # validated names here, but the file is editable, so it is validated on
-      # the way in too rather than trusted for having been ours once.
-      registry.marketplaces.reject! { |name, entry| !Safe.name?(name) || name != entry.name }
+      # Everything in this file reaches something dangerous: the name becomes a
+      # directory `marketplace remove` deletes, and the url and ref become git
+      # command-line arguments. smith only ever writes validated values here,
+      # but the file is editable — so it is validated on the way in as well,
+      # rather than trusted for having been ours once.
+      registry.marketplaces.reject! { |name, entry| !Safe.name?(name) || name != entry.name || !usable?(entry) }
       registry
     rescue JSON::ParseException | IO::Error
       # A registry smith cannot read must not brick `smith plugin list`; the
       # next write replaces it.
       Registry.new
+    end
+
+    # The same validators the `add` path uses, run again on what was read back.
+    private def self.usable?(entry : RegistryEntry) : Bool
+      url = entry.url
+      return false if url && !Safe.remote?(url)
+
+      Safe.ref!(entry.ref)
+      # A local root is never a command-line argument, but it is a path smith
+      # reads a manifest out of; a relative one would resolve against whatever
+      # directory smith happens to be in.
+      directory = entry.dir
+      return false if directory && !Path.new(directory).absolute?
+
+      true
+    rescue Error
+      false
     end
 
     def save : Nil
@@ -833,20 +970,44 @@ module Smith::Marketplace
 
   record Installed, marketplace : String, plugin : String, dir : String, meta : InstallMeta?
 
+  # Whether this is a directory, without raising on a path that cannot be
+  # stat'ed. The same guard the two catalogs use.
+  def self.directory?(path : String) : Bool
+    File.info?(path).try(&.directory?) || false
+  rescue File::Error
+    false
+  end
+
+  # A directory listing that answers empty rather than raising. `chmod 000` on
+  # a directory under `installed/` would otherwise take down `smith plugin
+  # uninstall` — the very command that would repair it.
+  def self.children(path : String) : Array(String)
+    Dir.children(path).sort
+  rescue File::Error
+    Array(String).new
+  end
+
   # Every installed plugin on disk, marketplace first, then plugin. Reads only
-  # the two-level directory tree — the same walk discovery does.
+  # the two-level directory tree — the same walk discovery does, through the
+  # same guards.
   def self.installed : Array(Installed)
     found = Array(Installed).new
     base = installed_dir
-    return found unless Dir.exists?(base)
+    return found unless directory?(base)
 
-    Dir.children(base).sort.each do |marketplace|
+    children(base).each do |marketplace|
+      # An install stages its copy under a dot-prefixed name; a dot-prefixed
+      # entry is a half-written plugin, not one to list.
+      next if marketplace.starts_with?('.')
+
       marketplace_dir = File.join(base, marketplace)
-      next unless Dir.exists?(marketplace_dir)
+      next unless directory?(marketplace_dir)
 
-      Dir.children(marketplace_dir).sort.each do |plugin|
+      children(marketplace_dir).each do |plugin|
+        next if plugin.starts_with?('.')
+
         plugin_dir = File.join(marketplace_dir, plugin)
-        next unless Dir.exists?(plugin_dir)
+        next unless directory?(plugin_dir)
 
         found << Installed.new(marketplace, plugin, plugin_dir, InstallMeta.load(plugin_dir))
       end
@@ -881,7 +1042,13 @@ module Smith::Marketplace
       if info.type.directory?
         copy_tree(source, target, skipped, here)
       elsif info.type.file?
-        File.copy(source, target)
+        begin
+          File.copy(source, target)
+        rescue ex : File::Error
+          # A raw backtrace is not an error message, and this is reachable from
+          # any plugin carrying a file smith may not read.
+          raise Error.new("could not copy #{here} out of the plugin (#{ex.os_error.try(&.message) || ex.message}).")
+        end
       else
         skipped << here
       end
@@ -925,7 +1092,11 @@ module Smith::Marketplace
          smith plugin update [plugin]
       TEXT
 
-    def initialize(@out : IO = STDOUT, @err : IO = STDERR)
+    # One stream on purpose. Everything below is a subcommand's account of the
+    # work it was asked to do, which belongs on stdout; a failure leaves as a
+    # `Marketplace::Error` and the CLI prints that on stderr. Splitting the two
+    # inside a single command only made it unclear which was which.
+    def initialize(@out : IO = STDOUT)
       @registry = Registry.load
     end
 
@@ -1179,13 +1350,32 @@ module Smith::Marketplace
 
       elsewhere = Marketplace.installed.select { |other| other.plugin == entry.name && other.marketplace != marketplace_name }
 
-      FileUtils.rm_rf(target) if Dir.exists?(target)
-      skipped = Array(String).new
-      Marketplace.copy_tree(source_dir, target, skipped)
+      # Assembled beside the target and moved into place, never built in place.
+      # A copy is long enough to be interrupted — Ctrl-C, a full disk, a file
+      # the plugin will not let smith read — and building in place meant a
+      # half-plugin went live, complete with a bare alias and a version of `?`.
+      # Worse, `rm_rf` came first, so an interrupted *re*-install destroyed the
+      # working plugin it was replacing. The staging name is dot-prefixed, which
+      # is what keeps discovery out of it during the window before the rename.
+      staging = File.join(File.dirname(target), "#{STAGING_PREFIX}#{Random::Secure.hex(6)}")
+      sweep_staging(File.dirname(target))
 
-      meta = InstallMeta.new(entry.name, marketplace_name, entry.source.to_s, entry.source.raw.to_json,
-        version, description, Time.utc.to_rfc3339, ignored)
-      AtomicFile.write(File.join(target, META_FILE), meta.to_pretty_json)
+      skipped = Array(String).new
+      begin
+        Marketplace.copy_tree(source_dir, staging, skipped)
+
+        meta = InstallMeta.new(entry.name, marketplace_name, entry.source.to_s, entry.source.raw.to_json,
+          version, description, Time.utc.to_rfc3339, ignored)
+        AtomicFile.write(File.join(staging, META_FILE), meta.to_pretty_json)
+
+        # Only now, and with nothing between the two: a rename is the shortest
+        # window this can be reduced to without a filesystem that has better.
+        FileUtils.rm_rf(target) if File.exists?(target)
+        File.rename(staging, target)
+      rescue ex
+        FileUtils.rm_rf(staging) if File.exists?(staging)
+        raise ex
+      end
 
       skill_catalog, agent_catalog = catalogs_for(marketplace_name, entry.name, target)
       skills = skill_catalog.skills.keys.sort
@@ -1280,8 +1470,13 @@ module Smith::Marketplace
     private def update(name : String?) : Nil
       plugins = Marketplace.installed
       if wanted = name
-        bare = wanted.partition("@")[0]
-        plugins = plugins.select { |plugin| plugin.plugin == bare }
+        # `<plugin>@<marketplace>` narrows here the way it does for uninstall.
+        # Accepting the suffix and then ignoring it would update the wrong copy
+        # of a plugin two marketplaces both ship, without saying so.
+        bare, _, marketplace_name = wanted.partition("@")
+        plugins = plugins.select do |plugin|
+          plugin.plugin == bare && (marketplace_name.empty? || plugin.marketplace == marketplace_name)
+        end
       end
       if plugins.empty?
         raise Error.new("no plugin #{name.inspect} is installed.") if name
@@ -1349,6 +1544,23 @@ module Smith::Marketplace
       {skills, agents}
     end
 
+    # A staging directory outlives its install only if the process was killed
+    # between the copy and the rename — a SIGKILL, an OOM. Swept by age so a
+    # concurrent install's staging directory is left where it is.
+    private def sweep_staging(dir : String) : Nil
+      return unless Marketplace.directory?(dir)
+
+      Marketplace.children(dir).each do |child|
+        next unless child.starts_with?(STAGING_PREFIX)
+
+        path = File.join(dir, child)
+        info = File.info?(path)
+        next if info.nil? || info.modification_time > 1.hour.ago
+
+        FileUtils.rm_rf(path)
+      end
+    end
+
     # An empty `installed/<marketplace>/` left behind after the last uninstall
     # would keep showing up as a provenance directory.
     private def prune_marketplace_dir(name : String) : Nil
@@ -1357,7 +1569,7 @@ module Smith::Marketplace
     end
 
     private def report_manifest(manifest : Manifest) : Nil
-      manifest.warnings.each { |warning| @err.puts "⚠️  #{manifest.name}: #{warning}" }
+      manifest.warnings.each { |warning| @out.puts "⚠️  #{manifest.name}: #{warning}" }
 
       refused = manifest.plugins.select { |entry| entry.source.refusal }
       return if refused.empty?

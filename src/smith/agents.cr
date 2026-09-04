@@ -104,7 +104,7 @@ module Smith::Agents
       invalidate
       return unless directory?(dir)
 
-      Dir.children(dir).sort.each do |child|
+      children(dir, dir).each do |child|
         next unless child.ends_with?(".md")
 
         path = File.join(dir, child)
@@ -122,11 +122,17 @@ module Smith::Agents
     def load_plugins_dir(base : String = Smith.installed_plugins_dir) : Nil
       return unless directory?(base)
 
-      Dir.children(base).sort.each do |marketplace|
+      children(base, base).each do |marketplace|
+        # An install stages its copy under a dot-prefixed name and renames it
+        # into place, so a dot-prefixed entry is a half-written plugin.
+        next if marketplace.starts_with?('.')
+
         marketplace_dir = File.join(base, marketplace)
         next unless directory?(marketplace_dir)
 
-        Dir.children(marketplace_dir).sort.each do |plugin|
+        children(marketplace, marketplace_dir, marketplace).each do |plugin|
+          next if plugin.starts_with?('.')
+
           plugin_dir = File.join(marketplace_dir, plugin)
           next unless directory?(plugin_dir)
 
@@ -141,7 +147,7 @@ module Smith::Agents
       dir = File.join(plugin_dir, DIRECTORY_NAME)
       return unless directory?(dir)
 
-      Dir.children(dir).sort.each do |child|
+      children(plugin, dir, plugin).each do |child|
         next unless child.ends_with?(".md")
 
         path = File.join(dir, child)
@@ -277,6 +283,18 @@ module Smith::Agents
       File.info?(path).try(&.directory?) || false
     rescue File::Error
       false
+    end
+
+    # `Dir.children` raises where a directory cannot be *read*, which the stat
+    # guard above does not cover: `chmod 000` on a directory under
+    # `plugins/installed/` is enough, and that is the one tree a third-party
+    # install writes into. This runs before smith knows what was asked for, so
+    # it may not raise.
+    private def children(name : String, path : String, plugin : String? = nil) : Array(String)
+      Dir.children(path).sort
+    rescue ex : File::Error
+      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", plugin)
+      Array(String).new
     end
 
     # Only a regular file can be read. `File.file?` answers that, but it raises
