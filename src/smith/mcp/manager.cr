@@ -183,7 +183,19 @@ module Smith::MCP
       base = case ex
              when File::NotFoundError then "command not found: #{what}"
              when TimeoutError        then "no response to the MCP handshake — is #{what} an MCP server?"
-             else                          ex.message || ex.class.name
+             when Error
+               # Every exception this layer raises knows whether its message is
+               # smith's own words or a server's, and what to say instead. The
+               # question is asked of the value rather than of the class,
+               # because a JSON-RPC error object arrives here wrapped in three
+               # different classes depending on where it was noticed.
+               with_server_output ? (ex.message || ex.class.name) : ex.safe_message
+             else
+               # Everything left is the OS or the stdlib talking about smith's
+               # own configuration — a path that does not exist, a name that
+               # does not resolve. Never a server's words: nothing a server
+               # sends reaches this branch.
+               ex.message || ex.class.name
              end
 
       unless with_server_output
@@ -191,7 +203,7 @@ module Smith::MCP
         # to its host and leaves every other kind of text alone. It is here
         # because the messages smith composes quote the url; it is not, and
         # cannot be, a general redactor for arbitrary exception text. That is
-        # why the server's own output is excluded above rather than filtered.
+        # why the server's own words are replaced above rather than filtered.
         return ServerSpec.scrub_urls(base)
       end
 

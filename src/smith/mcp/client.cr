@@ -293,7 +293,16 @@ module Smith::MCP
         # The reader marks a lost connection by answering with an id-less
         # message. It has to become a ConnectionError rather than an RpcError:
         # only the former is worth a restart, and only the former is true here.
-        raise ConnectionError.new(message.error.try(&.message) || "MCP server '#{@name}' closed the connection") if message.id.nil?
+        #
+        # The stand-in travels with it. Whether these words are smith's or a
+        # server's is a fact about the value, and rewrapping must not lose it.
+        if message.id.nil?
+          lost = message.error
+          raise ConnectionError.new(
+            lost.try(&.message) || "MCP server '#{@name}' closed the connection",
+            lost.try(&.safe_message)
+          )
+        end
 
         if error = message.error
           raise error
@@ -341,7 +350,10 @@ module Smith::MCP
         id: nil,
         method: nil,
         result: nil,
-        error: RpcError.new(0, reason)
+        # Composed here, not by the server — so it is repeatable as it stands,
+        # and saying so keeps the useful reason ("answered HTTP 500") rather
+        # than replacing it with the generic stand-in.
+        error: RpcError.new(0, reason, safe_message: reason)
       )
 
       waiting.each { |channel| channel.send(dead) }

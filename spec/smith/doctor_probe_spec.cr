@@ -43,6 +43,52 @@ private def mcp_json(home : String, entries : String) : Nil
   File.write(File.join(home, "mcp.json"), %({"mcpServers": #{entries}}))
 end
 
+# A key in the environment a stdio child inherits, restored afterwards.
+private def with_key(&)
+  secret = "sk-doctor-#{Random::Secure.hex(6)}"
+  previous = ENV["OPENROUTER_API_KEY"]?
+  ENV["OPENROUTER_API_KEY"] = secret
+
+  begin
+    yield secret
+  ensure
+    if previous
+      ENV["OPENROUTER_API_KEY"] = previous
+    else
+      ENV.delete("OPENROUTER_API_KEY")
+    end
+  end
+end
+
+# Says no the protocol-correct way: HTTP 200 carrying a JSON-RPC error object,
+# with the Authorization header it was sent written into the message.
+private def with_rpc_error_server(sse : Bool, &)
+  server = HTTP::Server.new do |context|
+    auth = context.request.headers["Authorization"]?
+    body = %({"jsonrpc":"2.0","id":1,"error":{"code":-32002,"message":"denied; you sent #{auth}"}})
+
+    if sse
+      context.response.content_type = "text/event-stream"
+      context.response.print "data: #{body}\n\n"
+    else
+      context.response.content_type = "application/json"
+      context.response.print body
+    end
+  end
+  address = server.bind_unused_port("127.0.0.1")
+  spawn { server.listen }
+
+  begin
+    yield address.port
+  ensure
+    server.close
+  end
+end
+
+private def auth_entry(name : String, port : Int32) : String
+  %({"#{name}": {"url": "http://127.0.0.1:#{port}/mcp", "headers": {"Authorization": "Bearer ${OPENROUTER_API_KEY}"}}})
+end
+
 private def rendered(probe : Smith::Doctor::McpProbe) : String
   io = IO::Memory.new
   Smith::Doctor.render(Smith::Doctor::Report.new([Smith::Doctor.mcp_check(probe)]), io)
@@ -160,6 +206,116 @@ describe "Smith::Doctor.probe_mcp" do
     end
   end
 
+  # The third producer of server-authored text, after a subprocess's stderr
+  # and an HTTP error body: the JSON-RPC error object. A stdio server needs no
+  # configured header to reach a key — it inherits smith's whole environment
+  # and can read it — and an HTTP server saying no the protocol-correct way
+  # answers 200, so the status branch never sees it.
+  describe "a JSON-RPC error object" do
+    it "is replaced by its code, not repeated, on the stdio handshake" do
+      in_home do |home, workdir|
+        with_key do |secret|
+          server = write_server(home, "rpcinit.sh", <<-SH)
+            #!/bin/bash
+            while IFS= read -r line; do
+              id=${line#*\\"id\\":}
+              id=${id%%,*}
+              case "$line" in
+                *'"method":"initialize"'*)
+                  printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"refused; token was %s"}}\\n' "$id" "$OPENROUTER_API_KEY" ;;
+              esac
+            done
+            SH
+          mcp_json(home, %({"rpcinit": {"command": "#{server}"}}))
+
+          output = rendered(Smith::Doctor.probe_mcp(Smith::Config.load(workdir), workdir))
+
+          output.should_not contain(secret)
+          output.should contain("code -32000")
+        end
+      end
+    end
+
+    it "is replaced on tools/list too, after a clean handshake" do
+      in_home do |home, workdir|
+        with_key do |secret|
+          server = write_server(home, "rpctools.sh", <<-SH)
+            #!/bin/bash
+            while IFS= read -r line; do
+              id=${line#*\\"id\\":}
+              id=${id%%,*}
+              case "$line" in
+                *'"method":"initialize"'*)
+                  printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"t","version":"1"}}}\\n' "$id" ;;
+                *'"method":"tools/list"'*)
+                  printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32001,"message":"locked; key %s"}}\\n' "$id" "$OPENROUTER_API_KEY" ;;
+              esac
+            done
+            SH
+          mcp_json(home, %({"rpctools": {"command": "#{server}"}}))
+
+          output = rendered(Smith::Doctor.probe_mcp(Smith::Config.load(workdir), workdir))
+
+          output.should_not contain(secret)
+          output.should contain("code -32001")
+        end
+      end
+    end
+
+    it "is replaced when an http server answers 200 with a JSON error" do
+      in_home do |home, workdir|
+        with_key do |secret|
+          with_rpc_error_server(sse: false) do |port|
+            mcp_json(home, auth_entry("rpc200", port))
+
+            output = rendered(Smith::Doctor.probe_mcp(Smith::Config.load(workdir), workdir))
+
+            output.should_not contain(secret)
+            output.should contain("code -32002")
+          end
+        end
+      end
+    end
+
+    it "is replaced when the same error arrives inside an SSE frame" do
+      in_home do |home, workdir|
+        with_key do |secret|
+          with_rpc_error_server(sse: true) do |port|
+            mcp_json(home, auth_entry("sse", port))
+
+            output = rendered(Smith::Doctor.probe_mcp(Smith::Config.load(workdir), workdir))
+
+            output.should_not contain(secret)
+            output.should contain("code -32002")
+          end
+        end
+      end
+    end
+
+    it "still says what smith itself worked out about a dead connection" do
+      # The reader fiber composes an RpcError of its own to abandon waiting
+      # callers. That one is smith's own text, and replacing it with the
+      # generic stand-in would throw away the only useful part.
+      in_home do |home, workdir|
+        server = HTTP::Server.new do |context|
+          context.response.status = HTTP::Status::INTERNAL_SERVER_ERROR
+          context.response.print "irrelevant"
+        end
+        address = server.bind_unused_port("127.0.0.1")
+        spawn { server.listen }
+
+        begin
+          mcp_json(home, %({"gw": {"url": "http://127.0.0.1:#{address.port}/mcp"}}))
+
+          rendered(Smith::Doctor.probe_mcp(Smith::Config.load(workdir), workdir))
+            .should contain("answered HTTP 500")
+        ensure
+          server.close
+        end
+      end
+    end
+  end
+
   it "leaves no child process behind when a server has to be killed" do
     in_home do |home, workdir|
       pid_file = File.join(home, "server.pid")
@@ -219,6 +375,20 @@ describe "Smith::Doctor.probe_mcp" do
       # The verdict matters more than the wording: a probe that could not
       # finish must not read as a healthy one.
       Smith::Doctor.mcp_check(probe).status.should eq(Smith::Doctor::Status::Fail)
+    end
+  end
+end
+
+describe "Smith::Doctor.build_manager" do
+  it "builds servers that are killed rather than asked to leave" do
+    in_home do |home, workdir|
+      mcp_json(home, %({"a": {"command": "/bin/true"}}))
+      plan = Smith::Doctor.plan_mcp(Smith::Config.load(workdir), workdir)
+
+      # Without this the orphan fix regresses in silence: restoring the
+      # patient default still passes every behavioural spec, because the ten
+      # servers it strands are only visible from outside the process.
+      Smith::Doctor.build_manager(plan).handles.first.grace.should eq(Time::Span.zero)
     end
   end
 end

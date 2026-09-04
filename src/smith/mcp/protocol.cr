@@ -13,6 +13,19 @@ module Smith::MCP
   PROTOCOL_VERSION = "2024-11-05"
 
   class Error < Exception
+    # What smith may print in place of `message` where the server's own words
+    # must not be repeated — a diagnostic meant to be pasted into a bug report.
+    #
+    # Defaults to the message, because smith composes most of these itself.
+    # The ones that quote a server say so *on the value*, not by their class:
+    # an error object can leave `Client` wrapped in a `ConnectionError`, and by
+    # then the class no longer records whose words these are.
+    getter safe_message : String
+
+    def initialize(message : String? = nil, safe_message : String? = nil)
+      @safe_message = safe_message || message || self.class.name
+      super(message)
+    end
   end
 
   # The server took too long. Deliberately *not* a ConnectionError: a slow
@@ -30,8 +43,13 @@ module Smith::MCP
   class RpcError < Error
     getter code : Int32
 
-    def initialize(@code : Int32, message : String)
-      super(message)
+    # `message` is the server's own text in every case that comes off the
+    # wire, so the default stand-in says only what smith knows: that there was
+    # an error, and which code carried it. The reader fiber composes a couple
+    # of these itself and passes its own `safe_message`, because there is then
+    # nothing being held back.
+    def initialize(@code : Int32, message : String, safe_message : String? = nil)
+      super(message, safe_message || "the server answered the MCP protocol with an error (code #{@code})")
     end
   end
 
@@ -74,6 +92,11 @@ module Smith::MCP
       value.as_i64? || value.as_s?.try(&.to_i64?)
     end
 
+    # The one place a server's text becomes an exception. `safe_message` is
+    # deliberately not passed: the default is the guarded one, so text arriving
+    # from the wire is unrepeatable unless somebody says otherwise, rather than
+    # repeatable unless somebody remembers to guard it. A fourth producer of
+    # server-authored text cannot appear without coming through here.
     private def self.decode_error(value : JSON::Any?) : RpcError?
       fields = value.try(&.as_h?)
       return nil if fields.nil?
