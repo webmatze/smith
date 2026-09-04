@@ -157,6 +157,33 @@ describe "MCP over Streamable HTTP" do
     end
   end
 
+  it "keeps the url out of the failure line smith mcp list prints" do
+    # The url is smith's own configuration, not a server's words, and it can
+    # hide a credential in all four of the places filled here: userinfo, path,
+    # query and fragment. Port 1 refuses at once, so what is under test is the
+    # line that comes back rather than the connection.
+    with_http_manager(
+      Smith::MCP::ServerSpec.new(
+        name: "loud",
+        url: "http://LEAKUSER:LEAKPASS@127.0.0.1:1/v1/LEAKPATH/mcp?token=LEAKQUERY#LEAKFRAG"
+      )
+    ) do |manager, _warnings|
+      handle = manager["loud"].not_nil!
+      handle.running?.should be_false
+
+      error = handle.error.to_s
+      %w[LEAKUSER LEAKPASS LEAKPATH LEAKQUERY LEAKFRAG].each do |secret|
+        error.should_not contain(secret)
+      end
+      handle.error_summary.to_s.should_not contain("LEAK")
+
+      # What is left is what the line is read for: which server, where it
+      # tried, and why it did not get there.
+      error.should contain("http://127.0.0.1:1")
+      error.should contain("could not reach")
+    end
+  end
+
   it "names a non-2xx answer in the failure" do
     server = FakeHttpServer.new
     server.force_status = 500

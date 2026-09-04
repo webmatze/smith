@@ -24,14 +24,18 @@ module Smith::MCP
 
     getter error : String?
 
-    # The same failure without the server's own stderr and without whatever
-    # stands in its argument list or its url beyond the host.
+    # The same failure without the server's own stderr, without the body an
+    # HTTP server answered with, and without its own words.
     #
     # A stdio server inherits smith's environment, so what it prints is not
     # smith's to repeat where the output is meant to be pasted into a bug
-    # report. `error` keeps both for `smith mcp list`, where "why will this
-    # not start" is the whole question and the server's own complaint is the
-    # answer; `smith doctor` reads this one.
+    # report. `error` keeps all three for `smith mcp list`, where "why will
+    # this not start" is the whole question and the server's own complaint is
+    # the answer; `smith doctor` reads this one.
+    #
+    # What smith composed itself is trimmed the same way in both: an argument
+    # list and a url past its host come from `mcp.json` and are a secret of
+    # smith's own keeping, whichever of the two lines they would be printed on.
     getter error_summary : String?
 
     getter? lost : Bool
@@ -65,7 +69,7 @@ module Smith::MCP
       connect
       true
     rescue ex : Exception
-      @error = failure_message(ex, @spec.description, with_server_output: true)
+      @error = failure_message(ex, @spec.safe_description, with_server_output: true)
       @error_summary = failure_message(ex, @spec.safe_description, with_server_output: false)
       stop_client
       false
@@ -136,7 +140,7 @@ module Smith::MCP
         connect
       rescue ex : Exception
         lose!(
-          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.description, with_server_output: true)}",
+          "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.safe_description, with_server_output: true)}",
           "MCP server '#{@name}' could not be restarted: #{failure_message(ex, @spec.safe_description, with_server_output: false)}"
         )
         raise cause
@@ -198,14 +202,17 @@ module Smith::MCP
                ex.message || ex.class.name
              end
 
-      unless with_server_output
-        # `scrub_urls` is a url filter and nothing more — it cuts a url back
-        # to its host and leaves every other kind of text alone. It is here
-        # because the messages smith composes quote the url; it is not, and
-        # cannot be, a general redactor for arbitrary exception text. That is
-        # why the server's own words are replaced above rather than filtered.
-        return ServerSpec.scrub_urls(base)
-      end
+      # `scrub_urls` is a url filter and nothing more — it cuts a url back to
+      # its host and leaves every other kind of text alone. It runs on both
+      # branches because the url it finds came out of `mcp.json` whoever is
+      # reading: a token in a query string is smith's own configuration, not
+      # a server's complaint, and no reader of this line is owed it. It is
+      # not, and cannot be, a general redactor for arbitrary exception text —
+      # that is why the server's own words are replaced above rather than
+      # filtered, and why what is appended below is appended after it.
+      base = ServerSpec.scrub_urls(base)
+
+      return base unless with_server_output
 
       parts = [base]
 
