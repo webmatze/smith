@@ -35,13 +35,26 @@ module Smith::Skills
   end
 
   class Catalog
+    # Stands in for a plugin name where the failure is above any single plugin
+    # — the plugin tree itself. Never rendered; only ever tested for nil-ness.
+    PLUGIN_TREE = "plugins"
+
     # A file that did not read the way its author meant it to. Held as data
     # rather than as a finished line because whether the file is the one in
     # effect is only known once every source has been read.
     # `directory` marks a failure to *list* a directory rather than to read a
     # SKILL.md: it has no skill name and is not a skill, so it renders as
     # itself. The agents catalog draws the same distinction.
-    private record Problem, name : String, path : String, reason : String, directory : Bool = false
+    # `plugin` is set when the file came from an installed plugin: the reader
+    # did not write it and cannot fix it, which decides how much of it a
+    # diagnosis should spell out. `directory` marks a failure to *list* a
+    # directory rather than to read a SKILL.md.
+    private record Problem,
+      name : String,
+      path : String,
+      reason : String,
+      plugin : String? = nil,
+      directory : Bool = false
 
     getter skills = Hash(String, Skill).new
 
@@ -109,19 +122,38 @@ module Smith::Skills
     # about a shadowed file without saying so reads as "your working skill is
     # broken".
     def warnings : Array(String)
-      lines = @problems.map do |problem|
-        # A directory smith could not read is not a skill, and calling it one
-        # made the line read as though a working skill were broken.
-        next "⚠️  #{problem.path}: #{problem.reason}" if problem.directory
+      @problems.map { |problem| render(problem) } + collisions
+    end
 
-        line = "⚠️  Skill '#{problem.name}' (#{problem.path}): #{problem.reason}"
-        winner = @skills[problem.name]?
-        next line if winner.nil? || winner.path == problem.path
+    # The warnings for files the reader wrote — the ones a diagnosis can tell
+    # them to go and fix. A plugin's are informational: see `plugin_reasons`.
+    # Name clashes belong here whoever caused them, since a clash changes what
+    # a bare name does for the reader either way.
+    def own_warnings : Array(String)
+      @problems.reject(&.plugin).map { |problem| render(problem) } + collisions
+    end
 
-        "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
+    # Every plugin-sourced problem as {reason, plugin}, for a caller that wants
+    # to count rather than list. A marketplace's worth of files written for
+    # another harness share a handful of reasons between them, and eighteen
+    # copies of one sentence is worse than useless in a diagnosis.
+    def plugin_reasons : Array({String, String})
+      @problems.compact_map do |problem|
+        plugin = problem.plugin
+        plugin ? {problem.reason, plugin} : nil
       end
+    end
 
-      lines + collisions
+    private def render(problem : Problem) : String
+      # A directory smith could not read is not a skill, and calling it one
+      # made the line read as though a working skill were broken.
+      return "⚠️  #{problem.path}: #{problem.reason}" if problem.directory
+
+      line = "⚠️  Skill '#{problem.name}' (#{problem.path}): #{problem.reason}"
+      winner = @skills[problem.name]?
+      return line if winner.nil? || winner.path == problem.path
+
+      "#{line} The '#{problem.name}' in this catalog comes from #{winner.path} instead."
     end
 
     def load_skills_dir(dir : String)
@@ -147,20 +179,20 @@ module Smith::Skills
     def load_plugins_dir(base : String = Smith.installed_plugins_dir) : Nil
       return unless directory?(base)
 
-      children(base, base).each do |marketplace|
+      children(base, base, PLUGIN_TREE).each do |marketplace|
         # An install stages its copy under a dot-prefixed name and renames it
         # into place, so a dot-prefixed entry is a half-written plugin, never
         # one to load.
         next if marketplace.starts_with?('.')
 
         marketplace_dir = File.join(base, marketplace)
-        next unless entry_info(marketplace, marketplace_dir).try(&.directory?)
+        next unless entry_info(marketplace, marketplace_dir, PLUGIN_TREE).try(&.directory?)
 
-        children(marketplace, marketplace_dir).each do |plugin|
+        children(marketplace, marketplace_dir, marketplace).each do |plugin|
           next if plugin.starts_with?('.')
 
           plugin_dir = File.join(marketplace_dir, plugin)
-          next unless entry_info(plugin, plugin_dir).try(&.directory?)
+          next unless entry_info(plugin, plugin_dir, marketplace).try(&.directory?)
 
           load_plugin_dir(marketplace, plugin, plugin_dir)
         end
@@ -172,14 +204,19 @@ module Smith::Skills
     def load_plugin_dir(marketplace : String, plugin : String, plugin_dir : String) : Nil
       invalidate
 
+      # Marketplace-qualified, because a plugin name is only unique within one
+      # marketplace — counting distinct plugins by the bare name would under-
+      # report whenever two marketplaces ship one of the same name.
+      source = "#{marketplace}/#{plugin}"
+
       skills_dir = File.join(plugin_dir, "skills")
       if directory?(skills_dir)
-        children(plugin, skills_dir).each do |child|
+        children(plugin, skills_dir, source).each do |child|
           skill_dir = File.join(skills_dir, child)
-          next unless entry_info(child, skill_dir).try(&.directory?)
+          next unless entry_info(child, skill_dir, source).try(&.directory?)
 
           skill_file = File.join(skill_dir, "SKILL.md")
-          next unless regular_file?(child, skill_file)
+          next unless regular_file?(child, skill_file, source)
 
           load_skill_file(child, skill_file, marketplace, plugin)
         end
@@ -188,7 +225,7 @@ module Smith::Skills
       end
 
       root_skill = File.join(plugin_dir, "SKILL.md")
-      return unless regular_file?(plugin, root_skill)
+      return unless regular_file?(plugin, root_skill, source)
 
       load_skill_file(plugin, root_skill, marketplace, plugin)
     end
@@ -210,20 +247,21 @@ module Smith::Skills
     # This runs before smith knows what was asked for, so it may not raise —
     # `smith plugin uninstall`, the command that would repair it, is among the
     # ones it would otherwise take down.
-    private def children(name : String, path : String) : Array(String)
+    private def children(name : String, path : String, plugin : String? = nil) : Array(String)
       Dir.children(path).sort
     rescue ex : File::Error
-      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", directory: true)
+      @problems << Problem.new(name, path, "could not be listed (#{ex.os_error.try(&.message) || ex.message}); it was skipped.",
+        plugin, directory: true)
       Array(String).new
     end
 
     # What an entry is, without opening it. `File.info?` answers nil for
     # "absent" but raises for a symlink loop, which is a file smith cannot read
     # like any other and belongs in the list rather than in a stack trace.
-    private def entry_info(name : String, path : String) : File::Info?
+    private def entry_info(name : String, path : String, plugin : String? = nil) : File::Info?
       File.info?(path)
     rescue ex : File::Error
-      @problems << Problem.new(name, path, "could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      @problems << Problem.new(name, path, "could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", plugin)
       nil
     end
 
@@ -232,17 +270,19 @@ module Smith::Skills
     # nothing on screen, which is worse than a crash for being unattributable.
     # Absent stays silent; anything present but unusable is named, because
     # putting it there was deliberate.
-    private def regular_file?(name : String, path : String) : Bool
-      info = entry_info(name, path)
+    private def regular_file?(name : String, path : String, plugin : String? = nil) : Bool
+      info = entry_info(name, path, plugin)
       return false if info.nil?
       return true if info.file?
 
-      @problems << Problem.new(name, path, "not a regular file (#{info.type.to_s.downcase}); it was skipped.")
+      @problems << Problem.new(name, path, "not a regular file (#{info.type.to_s.downcase}); it was skipped.", plugin)
       false
     end
 
     private def load_skill_file(dir_name : String, file_path : String, marketplace : String? = nil, plugin : String? = nil) : Nil
-      content = read_skill_file(dir_name, file_path)
+      # See `load_plugin_dir`: the marker counts plugins, the name addresses one.
+      source = marketplace && plugin ? "#{marketplace}/#{plugin}" : plugin
+      content = read_skill_file(dir_name, file_path, source)
       return if content.nil?
 
       document = Frontmatter.parse(content)
@@ -256,9 +296,9 @@ module Smith::Skills
       # Loaded either way — a body still expands, which is the point of a skill
       # — but a header nobody read is a header nobody can trust.
       if document.malformed?
-        @problems << Problem.new(name, file_path, frontmatter_reason(document))
+        @problems << Problem.new(name, file_path, frontmatter_reason(document), source)
       elsif description.nil?
-        @problems << Problem.new(name, file_path, "no description in the frontmatter; the model will not know when to use it.")
+        @problems << Problem.new(name, file_path, "no description in the frontmatter; the model will not know when to use it.", source)
       end
 
       if previous = @skills[name]?
@@ -358,16 +398,16 @@ module Smith::Skills
     # are built before the CLI knows which command is running, so one unreadable
     # SKILL.md under .smith/skills/ would otherwise brick every smith command,
     # `smith -v` included.
-    private def read_skill_file(dir_name : String, file_path : String) : String?
+    private def read_skill_file(dir_name : String, file_path : String, plugin : String? = nil) : String?
       content = File.read(file_path)
       # PCRE refuses to match against bytes that are not UTF-8, so a file saved
       # as Latin-1 raises out of the parser rather than parsing badly.
       return content if content.valid_encoding?
 
-      @problems << Problem.new(dir_name, file_path, "the file is not valid UTF-8; it was skipped.")
+      @problems << Problem.new(dir_name, file_path, "the file is not valid UTF-8; it was skipped.", plugin)
       nil
     rescue ex : IO::Error
-      @problems << Problem.new(dir_name, file_path, "the file could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.")
+      @problems << Problem.new(dir_name, file_path, "the file could not be read (#{ex.os_error.try(&.message) || ex.message}); it was skipped.", plugin)
       nil
     end
 

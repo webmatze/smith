@@ -156,14 +156,18 @@ module Smith::Agents
     def load_plugin_dir(marketplace : String, plugin : String, plugin_dir : String) : Nil
       invalidate
 
+      # Marketplace-qualified, because a plugin name is only unique within one
+      # marketplace — counting distinct plugins by the bare name would under-
+      # report whenever two marketplaces ship one of the same name.
+      source = "#{marketplace}/#{plugin}"
       dir = File.join(plugin_dir, DIRECTORY_NAME)
       return unless directory?(dir)
 
-      children(plugin, dir, plugin).each do |child|
+      children(plugin, dir, source).each do |child|
         next unless child.ends_with?(".md")
 
         path = File.join(dir, child)
-        next unless regular_file?(File.basename(child, ".md"), path, plugin)
+        next unless regular_file?(File.basename(child, ".md"), path, source)
 
         register(parse(path, File.basename(child, ".md"), marketplace, plugin))
       end
@@ -189,6 +193,23 @@ module Smith::Agents
     # time to see them. Complete on purpose: it is the only view that is.
     def warnings : Array(String)
       @problems.map { |problem| render(problem) } + collisions
+    end
+
+    # The warnings for files the reader wrote — the ones a diagnosis can tell
+    # them to go and fix. A plugin's are informational: see `plugin_reasons`.
+    # Name clashes belong here whoever caused them, since a clash changes what
+    # a bare name does for the reader either way.
+    def own_warnings : Array(String)
+      @problems.reject(&.plugin).map { |problem| render(problem) } + collisions
+    end
+
+    # Every plugin-sourced problem as {reason, plugin}, for a caller that wants
+    # to count rather than list. See the note on the skills catalog's copy.
+    def plugin_reasons : Array({String, String})
+      @problems.compact_map do |problem|
+        plugin = problem.plugin
+        plugin ? {problem.reason, plugin} : nil
+      end
     end
 
     # What the reader wrote themselves, plus every name clash, on the channel
@@ -359,7 +380,10 @@ module Smith::Agents
     KNOWN_FIELDS = %w[name description tools model provider mode]
 
     private def parse(path : String, filename : String, marketplace : String? = nil, plugin : String? = nil) : Definition?
-      content = read_definition(path, plugin)
+      # See `load_plugin_dir`: the marker counts plugins, the name addresses one.
+      source = marketplace && plugin ? "#{marketplace}/#{plugin}" : plugin
+
+      content = read_definition(path, source)
       return nil if content.nil?
 
       document = Frontmatter.parse(content)
@@ -373,9 +397,9 @@ module Smith::Agents
       # but a header that did not read costs the agent its name and its
       # description, and puts the raw `---` lines in the system prompt.
       if document.malformed?
-        @problems << Problem.new(name, path, "the frontmatter could not be read as 'key: value' lines; what it declared was ignored.", plugin)
+        @problems << Problem.new(name, path, "the frontmatter could not be read as 'key: value' lines; what it declared was ignored.", source)
       elsif description.nil?
-        @problems << Problem.new(name, path, "no description in the frontmatter; the model will not know when to use it.", plugin)
+        @problems << Problem.new(name, path, "no description in the frontmatter; the model will not know when to use it.", source)
       end
 
       # Only for plugin definitions: a local file's extra keys are its author's
@@ -385,7 +409,7 @@ module Smith::Agents
       if plugin
         ignored = document.fields.keys.reject { |key| KNOWN_FIELDS.includes?(key) }
         unless ignored.empty?
-          @problems << Problem.new(name, path, "smith does not act on #{ignored.sort.join(", ")}; #{ignored.size == 1 ? "that field was" : "those fields were"} ignored.", plugin)
+          @problems << Problem.new(name, path, "smith does not act on #{ignored.sort.join(", ")}; #{ignored.size == 1 ? "that field was" : "those fields were"} ignored.", source)
         end
       end
 
