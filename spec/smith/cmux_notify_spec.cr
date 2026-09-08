@@ -2,6 +2,11 @@ require "socket"
 require "../spec_helper"
 require "../../src/smith/cmux_client"
 require "../../src/smith/notify"
+require "../../src/smith/turn_notifier"
+require "../../src/smith/agent"
+require "../../src/smith/tools"
+require "../../src/smith/cli"
+require "../../src/smith/session"
 
 # Records what `Smith::Notify` hands over, so the payload rules can be asserted
 # without a cmux daemon — which is the point: nothing here should depend on
@@ -498,5 +503,334 @@ describe Smith::Notify do
     Smith::Notify.new(client).notify("Build done", subtitle: "2 failed")
 
     client.last.to_json.should eq(%({"type":"notification","title":"Build done","subtitle":"2 failed"}))
+  end
+end
+
+# What the first consumer does with a run. Driven through the real agent loop
+# wherever a loop exists to drive, because the point of this listener is that
+# it reacts to events as they arrive — a hand-written sequence would pass
+# whatever order it happened to assert.
+private class NotifyingProvider < Smith::LLM::Provider
+  getter calls = 0
+
+  def name : String
+    "mock"
+  end
+
+  def default_model : String
+    "mock-model"
+  end
+
+  def complete(request : Smith::LLM::Request) : Smith::LLM::Response
+    @calls += 1
+
+    if @calls == 1
+      # Turn one announces and calls a tool — the announcement is not the
+      # answer, and the run is not over.
+      blocks = [
+        Smith::LLM::ContentBlock.text("Let me look at that."),
+        Smith::LLM::ContentBlock.tool_use("call_1", "read_file", JSON.parse(%({"path": "spec/spec_helper.cr"}))),
+      ]
+    else
+      blocks = [
+        Smith::LLM::ContentBlock.text("Done. The tests pass."),
+      ]
+    end
+
+    Smith::LLM::Response.new("resp_#{@calls}", request.model, blocks, usage: Smith::LLM::Usage.new(10, 5, 15))
+  end
+end
+
+describe Smith::TurnNotifier do
+  it "says nothing until the turn is over" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    notifier.handle(Smith::Events::AssistantText.new("thinking out loud"))
+    client.payloads.should be_empty
+
+    notifier.handle(Smith::Events::TurnCompleted.new(1))
+    client.payloads.size.should eq(1)
+  end
+
+  it "names the run and carries where it came from" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client), subtitle: "smith · notify")
+
+    notifier.handle(Smith::Events::AssistantText.new("all green"))
+    notifier.handle(Smith::Events::TurnCompleted.new(3))
+
+    payload = client.last
+    payload["title"].should eq("Smith")
+    payload["subtitle"].should eq("smith · notify")
+    payload["body"].should eq("all green")
+  end
+
+  it "reports the answer, not the announcement that came before the tools" do
+    # What a model says before calling a tool is a promise of work, not a
+    # result. Sent as the body it would read, an hour later, as though the run
+    # had stopped mid-sentence.
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    notifier.handle(Smith::Events::AssistantText.new("Let me look at that."))
+    notifier.handle(Smith::Events::ToolStart.new("call_1", "read_file", JSON.parse("{}")))
+    notifier.handle(Smith::Events::ToolFinished.new("call_1", "read_file", "contents", false))
+    notifier.handle(Smith::Events::AssistantText.new("Done."))
+    notifier.handle(Smith::Events::TurnCompleted.new(2))
+
+    client.last["body"].should eq("Done.")
+  end
+
+  it "sends no body at all for a run that ended among its tools" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    notifier.handle(Smith::Events::AssistantText.new("Let me look at that."))
+    notifier.handle(Smith::Events::ToolStart.new("call_1", "read_file", JSON.parse("{}")))
+    notifier.handle(Smith::Events::TurnCompleted.new(1))
+
+    client.last.has_key?("body").should be_false
+  end
+
+  it "collapses a multi-paragraph answer into one line" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    notifier.handle(Smith::Events::AssistantText.new("First paragraph.\n\nSecond  one,\twith a tab."))
+    notifier.handle(Smith::Events::TurnCompleted.new(1))
+
+    client.last["body"].should eq("First paragraph. Second one, with a tab.")
+  end
+
+  it "cuts a long answer at a word boundary and says it did" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    long = Array.new(40) { |i| "word#{i}" }.join(" ")
+    notifier.handle(Smith::Events::AssistantText.new(long))
+    notifier.handle(Smith::Events::TurnCompleted.new(1))
+
+    body = client.last["body"].as_s
+    body.size.should be <= Smith::TurnNotifier::MAX_BODY + 1
+    body.ends_with?("…").should be_true
+
+    # The cut happened at a space rather than inside a word: what is left is
+    # one whole token, and the source had none of any other shape.
+    kept = body[0, body.size - 1]
+    kept.split(" ").last.should match(/^word\d+$/)
+    # …and it dropped something rather than merely trailing off.
+    kept.split(" ").size.should be < long.split(" ").size
+  end
+
+  it "counts characters rather than bytes, so a body cannot be cut in half" do
+    # German text is where this shows: a byte-oriented cut would split a
+    # two-byte character and send an invalid string.
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    long = "Grüße " * 60
+    notifier.handle(Smith::Events::AssistantText.new(long))
+    notifier.handle(Smith::Events::TurnCompleted.new(1))
+
+    body = client.last["body"].as_s
+    body.size.should be <= Smith::TurnNotifier::MAX_BODY + 1
+    body.valid_encoding?.should be_true
+  end
+
+  it "leaves an answer that fits alone, ellipsis and all" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    notifier.handle(Smith::Events::AssistantText.new("short"))
+    notifier.handle(Smith::Events::TurnCompleted.new(1))
+
+    client.last["body"].should eq("short")
+  end
+
+  it "notifies once per turn, and again for the next one" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    2.times do |i|
+      notifier.handle(Smith::Events::AssistantText.new("turn #{i}"))
+      notifier.handle(Smith::Events::TurnCompleted.new(i + 1))
+    end
+
+    client.payloads.size.should eq(2)
+    client.payloads[0]["body"].should eq("turn 0")
+    client.payloads[1]["body"].should eq("turn 1")
+  end
+
+  it "drops what a run said before it failed, so the next run starts clean" do
+    # A run does not have to end on a completed turn: a provider that fails, a
+    # budget that runs out and a window that fills each end one, and none of
+    # them is followed by `TurnCompleted`. Whatever was collected belongs to
+    # the run that died, and left standing it would be prefixed to the answer
+    # of the next one — a session of two turns would notify "second answer"
+    # with the first turn's half-answer glued in front of it.
+    [
+      Smith::Events::TurnError.new("Provider completion failed"),
+      Smith::Events::BudgetExceeded.new(spent_usd: 2.0, limit_usd: 1.0),
+      Smith::Events::ContextExhausted.new(9000, 8000, 0),
+    ].each do |ending|
+      client = RecordingClient.new
+      notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+      notifier.handle(Smith::Events::AssistantText.new("the run that died"))
+      notifier.handle(ending)
+      client.payloads.should be_empty, "#{ending.class} notified"
+
+      notifier.handle(Smith::Events::AssistantText.new("the answer after it"))
+      notifier.handle(Smith::Events::TurnCompleted.new(1))
+
+      client.last["body"].should eq("the answer after it"), "#{ending.class} leaked"
+    end
+  end
+
+  it "ignores everything that is not a turn ending" do
+    client = RecordingClient.new
+    notifier = Smith::TurnNotifier.new(Smith::Notify.new(client))
+
+    notifier.handle(Smith::Events::ToolStart.new("call_1", "bash", JSON.parse("{}")))
+    notifier.handle(Smith::Events::UsageUpdated.new(Smith::LLM::Usage.new(1, 1, 2)))
+    notifier.handle(Smith::Events::TurnError.new("provider said no"))
+    notifier.handle(Smith::Events::BudgetExceeded.new(spent_usd: 1.5, limit_usd: 1.0))
+
+    client.payloads.should be_empty
+  end
+
+  it "says nothing through a null client, and survives a client that throws" do
+    # Not inside cmux is the ordinary case: a plain terminal run must not be
+    # changed by this feature, and must not pay for it either.
+    null_notifier = Smith::TurnNotifier.new(Smith::Notify.new(Smith::NullCmuxClient.new))
+    null_notifier.handle(Smith::Events::TurnCompleted.new(1))
+
+    # A notification is the last thing a run does; it must not be the reason
+    # one ends. This call is the assertion: a client that throws out of
+    # `handle` fails the example right here.
+    exploding = Smith::TurnNotifier.new(Smith::Notify.new(ExplodingClient.new))
+    exploding.handle(Smith::Events::TurnCompleted.new(1))
+  end
+
+  describe "through the real agent loop" do
+    it "is told by the events a run actually emits" do
+      provider = NotifyingProvider.new
+      registry = Smith::Tools::Registry.default
+      agent = Smith::Agent.new(provider: provider, registry: registry, model: "mock-model")
+
+      client = RecordingClient.new
+      notifier = Smith::TurnNotifier.new(Smith::Notify.new(client), subtitle: "spec-project")
+
+      # The same two lines `CLI#build_agent` runs, which is the wiring under
+      # test: a listener alongside the renderer rather than inside it.
+      agent.on_event { |event| notifier.handle(event) }
+      agent.send("Read spec_helper and tell me when the tests pass")
+
+      # One notification for the whole run — the intermediate turn that called
+      # a tool announced itself and was not over.
+      client.payloads.size.should eq(1)
+      payload = client.last
+      payload["type"].should eq("notification")
+      payload["title"].should eq("Smith")
+      payload["subtitle"].should eq("spec-project")
+      payload["body"].should eq("Done. The tests pass.")
+    end
+  end
+end
+
+# The wiring itself: what `CLI#build_agent` attaches, and what a resolved
+# notification says about where the run is. Reaching into the private helpers
+# rather than restating them is the same reason clear_persist_spec.cr does —
+# a copy written out in the spec would pass whatever the CLI happened to do.
+class Smith::CLI
+  def notify_for_spec : Smith::Notify
+    notify
+  end
+
+  def notify_subtitle_for_spec(session : Smith::Session::Data?) : String?
+    notify_subtitle(session)
+  end
+
+  def config_for_spec : Smith::Config
+    @config
+  end
+end
+
+describe "the notifications a CLI run is wired to send" do
+  it "resolves to nothing to deliver to in a shell that is not cmux" do
+    # The default has to be "a plain terminal run is unchanged": nothing is
+    # delivered, and nothing is even looked for. Resolved against an
+    # environment passed in rather than the ambient one — these specs run
+    # inside a real cmux terminal more often than not, and a test that reads
+    # `ENV` would then assert the opposite of what it claims.
+    temp_dir = File.join(Dir.tempdir, "smith_wire_#{Random::Secure.hex(4)}")
+    previous = ENV["SMITH_HOME"]?
+    ENV["SMITH_HOME"] = temp_dir
+
+    begin
+      cli = Smith::CLI.new([] of String)
+
+      resolved = Smith::CmuxClient.resolve(cli.config_for_spec.notify, {} of String => String?)
+      resolved.enabled?.should be_false
+      resolved.deliverable?.should be_false
+    ensure
+      previous ? (ENV["SMITH_HOME"] = previous) : ENV.delete("SMITH_HOME")
+      FileUtils.rm_rf(temp_dir)
+    end
+  end
+
+  it "delivers nothing yet, inside cmux or not" do
+    # The seam this stops at, asserted rather than assumed: `Notify#enabled?`
+    # reports whether there is a client that can deliver, and until the socket
+    # is spoken to there is only the null one. So the wiring is complete and
+    # still sends nothing — which is why `build_agent` can attach it
+    # unconditionally instead of branching on "am I inside cmux?".
+    temp_dir = File.join(Dir.tempdir, "smith_wire_#{Random::Secure.hex(4)}")
+    previous = ENV["SMITH_HOME"]?
+    ENV["SMITH_HOME"] = temp_dir
+
+    begin
+      cli = Smith::CLI.new([] of String)
+      notify = cli.notify_for_spec
+
+      notify.enabled?.should be_false
+      # …and a run finishing still costs nothing and still fails nothing.
+      notifier = Smith::TurnNotifier.new(notify)
+      notifier.handle(Smith::Events::TurnCompleted.new(1))
+    ensure
+      previous ? (ENV["SMITH_HOME"] = previous) : ENV.delete("SMITH_HOME")
+      FileUtils.rm_rf(temp_dir)
+    end
+  end
+
+  it "names the project a session was started in" do
+    # Read off the session rather than `Dir.current`: a resumed session runs
+    # wherever it was created, and that is the name worth reading from another
+    # tab. Built rather than created, because `Store#create` writes a session
+    # file — and a spec has no business leaving one in the developer's
+    # `~/.smith`.
+    session = Smith::Session::Data.new(id: "spec-session", cwd: "/work/smith", model: "mock-model", provider: "mock")
+
+    Smith::CLI.new([] of String).notify_subtitle_for_spec(session).should eq("smith")
+  end
+
+  it "prefers a session name when it has one" do
+    session = Smith::Session::Data.new(
+      id: "spec-session",
+      cwd: "/work/smith",
+      model: "mock-model",
+      provider: "mock",
+      name: "notify-work"
+    )
+
+    Smith::CLI.new([] of String).notify_subtitle_for_spec(session).should eq("smith · notify-work")
+  end
+
+  it "still names something when there is no session yet" do
+    # A headless run has one, but the helper must not depend on it: it is
+    # called from the same place the agent is built, and a nil session is a
+    # state that reaches it.
+    Smith::CLI.new([] of String).notify_subtitle_for_spec(nil).should eq(File.basename(Dir.current))
   end
 end

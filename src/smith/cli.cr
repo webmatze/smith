@@ -27,6 +27,7 @@ require "./update"
 require "./doctor"
 require "./marketplace"
 require "./ui"
+require "./turn_notifier"
 
 module Smith
   class CLI
@@ -73,6 +74,7 @@ module Smith
     # keep the plain renderer even on a TTY.
     @interactive_tui : Bool = false
     @tui_app : UI::App? = nil
+    @notify : Notify? = nil
     @tui_warned : Bool = false
     @update_check : Bool = false
     @allow_unverified : Bool = false
@@ -684,6 +686,25 @@ module Smith
       end
     end
 
+    # Where completion notifications go. Built once, from the config and the
+    # `CMUX_*` environment merged in `CmuxClient.resolve`, and a no-op anywhere
+    # cmux is not the terminal in use — so no call site has to ask first.
+    private def notify : Notify
+      @notify ||= Notify.new(CmuxClient.build(@config.notify))
+    end
+
+    # Which session this is, in one glance from another tab. The project
+    # directory is the part that tells two smith runs apart, since they are
+    # usually the same project run twice rather than two projects; a session
+    # that was named says its name, because that is what the user would have
+    # called it.
+    private def notify_subtitle(session_data : Session::Data?) : String?
+      project = File.basename(session_data.try(&.cwd) || Dir.current)
+      name = session_data.try(&.name)
+
+      name.nil? || name.empty? ? project : "#{project} · #{name}"
+    end
+
     # Takes the whole session rather than its pieces: passing messages and the
     # calibration ratio separately is how one call site came to carry the
     # transcript without what had been learned about measuring it.
@@ -815,6 +836,16 @@ module Smith
 
       agent.on_event do |event|
         renderer.handle(event)
+      end
+
+      # A second listener rather than a branch inside the first: a
+      # notification is not a rendering choice, and every renderer — plain,
+      # JSON, fullscreen — is served by the same one. Fresh per agent, so the
+      # subtitle is the session this agent runs and the text collected for it
+      # cannot carry over into one that replaced it.
+      notifier = TurnNotifier.new(notify, subtitle: notify_subtitle(session_data))
+      agent.on_event do |event|
+        notifier.handle(event)
       end
 
       plan = plan_session
