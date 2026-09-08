@@ -839,3 +839,100 @@ describe "session settings" do
     end
   end
 end
+
+# Only the config file tier: merging the `CMUX_*` environment into this is
+# `Smith::CmuxClient.resolve`, covered in cmux_notify_spec.cr. Keeping the two
+# apart here is what makes it possible to say which tier a value came from.
+describe "notify settings" do
+  it "is off and empty until a [notify] section says otherwise" do
+    with_sandbox do |temp_dir, _home|
+      settings = Smith::Config.load(make_project(temp_dir)).notify
+
+      settings.enabled.should be_false
+      settings.socket_path.should be_nil
+      settings.surface_id.should be_nil
+      settings.workspace_id.should be_nil
+      settings.timeout.should eq(1.0)
+    end
+  end
+
+  it "reads the section" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [notify]
+        enabled = true
+        socket_path = "/tmp/cmux.sock"
+        surface_id = "surface:1"
+        workspace_id = "workspace:1"
+        timeout = 2.5
+        TOML
+
+      settings = Smith::Config.load(project).notify
+
+      settings.enabled.should be_true
+      settings.socket_path.should eq("/tmp/cmux.sock")
+      settings.surface_id.should eq("surface:1")
+      settings.workspace_id.should eq("workspace:1")
+      settings.timeout.should eq(2.5)
+      settings.socket?.should be_true
+      settings.deliverable?.should be_true
+    end
+  end
+
+  it "lets the project config override the global one, key by key" do
+    with_sandbox do |temp_dir, home_dir|
+      File.write(File.join(home_dir, "config.toml"), <<-TOML)
+        [notify]
+        enabled = true
+        socket_path = "/global/cmux.sock"
+        surface_id = "global-surface"
+        TOML
+
+      project = make_project(temp_dir, <<-TOML)
+        [notify]
+        surface_id = "project-surface"
+        TOML
+
+      settings = Smith::Config.load(project).notify
+
+      settings.enabled.should be_true
+      settings.socket_path.should eq("/global/cmux.sock")
+      settings.surface_id.should eq("project-surface")
+    end
+  end
+
+  it "turns a blank setting into unset rather than into an empty value" do
+    # An empty `socket_path` is a key someone left behind, not a location. Read
+    # as a location it would shadow the environment's with nothing.
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [notify]
+        socket_path = "  "
+        surface_id = ""
+        TOML
+
+      settings = Smith::Config.load(project).notify
+
+      settings.socket_path.should be_nil
+      settings.surface_id.should be_nil
+      settings.socket?.should be_false
+    end
+  end
+
+  it "ignores values of the wrong type instead of refusing to start" do
+    with_sandbox do |temp_dir, _home|
+      project = make_project(temp_dir, <<-TOML)
+        [notify]
+        enabled = "yes"
+        socket_path = 42
+        timeout = "soon"
+        TOML
+
+      settings = Smith::Config.load(project).notify
+
+      settings.enabled.should be_false
+      settings.socket_path.should be_nil
+      settings.timeout.should eq(1.0)
+    end
+  end
+end
