@@ -88,9 +88,7 @@ describe Smith::NotifyConfig do
   it "defaults the timeout to something a socket can live with" do
     Smith::NotifyConfig.new.timeout.should eq(1.0)
   end
-end
 
-describe Smith::CmuxClient do
   describe ".from_table" do
     it "reads the [notify] keys" do
       table = TOML.parse(<<-TOML)
@@ -101,7 +99,7 @@ describe Smith::CmuxClient do
         timeout = 2.5
         TOML
 
-      config = Smith::CmuxClient.from_table(table)
+      config = Smith::NotifyConfig.from_table(table)
 
       config.enabled.should be_true
       config.socket_path.should eq("/tmp/cmux.sock")
@@ -111,7 +109,7 @@ describe Smith::CmuxClient do
     end
 
     it "says nothing when there is no section at all" do
-      config = Smith::CmuxClient.from_table(nil)
+      config = Smith::NotifyConfig.from_table(nil)
 
       config.enabled.should be_nil
       config.socket_path.should be_nil
@@ -121,12 +119,12 @@ describe Smith::CmuxClient do
     it "reads an integer timeout as well as a float one" do
       table = TOML.parse("timeout = 3")
 
-      Smith::CmuxClient.from_table(table).timeout.should eq(3.0)
+      Smith::NotifyConfig.from_table(table).timeout.should eq(3.0)
     end
 
     it "treats a timeout that could not work as the default" do
-      Smith::CmuxClient.from_table(TOML.parse("timeout = 0")).timeout.should eq(1.0)
-      Smith::CmuxClient.from_table(TOML.parse("timeout = -1.5")).timeout.should eq(1.0)
+      Smith::NotifyConfig.from_table(TOML.parse("timeout = 0")).timeout.should eq(1.0)
+      Smith::NotifyConfig.from_table(TOML.parse("timeout = -1.5")).timeout.should eq(1.0)
     end
 
     it "turns blank strings into unset, so they cannot shadow the environment" do
@@ -136,7 +134,7 @@ describe Smith::CmuxClient do
         surface_id = ""
         TOML
 
-      config = Smith::CmuxClient.from_table(table)
+      config = Smith::NotifyConfig.from_table(table)
 
       config.socket_path.should be_nil
       config.surface_id.should be_nil
@@ -151,7 +149,7 @@ describe Smith::CmuxClient do
         socket_path = 42
         TOML
 
-      config = Smith::CmuxClient.from_table(table)
+      config = Smith::NotifyConfig.from_table(table)
 
       # Not false: an unreadable `enabled` is nobody having said, so the
       # terminal keeps its say rather than a typo switching notifications off.
@@ -165,13 +163,15 @@ describe Smith::CmuxClient do
         surface_id = " surface:1 "
         TOML
 
-      config = Smith::CmuxClient.from_table(table)
+      config = Smith::NotifyConfig.from_table(table)
 
       config.socket_path.should eq("/tmp/cmux.sock")
       config.surface_id.should eq("surface:1")
     end
   end
+end
 
+describe Smith::CmuxClient do
   describe ".resolve" do
     it "leaves the config alone when the environment says nothing" do
       resolved = Smith::CmuxClient.resolve(filled_config, no_cmux_env)

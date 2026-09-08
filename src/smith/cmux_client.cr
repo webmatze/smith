@@ -1,15 +1,15 @@
-require "toml"
 require "./cmux_clientable"
 require "./null_cmux_client"
 require "./notify_config"
 
 module Smith
-  # Turns the two places a cmux notification setup can be described — the
-  # `[notify]` section of config.toml and the `CMUX_*` environment the cmux
-  # terminal exports into every process it spawns — into one `NotifyConfig`,
-  # and that into something `Smith::Notify` can talk to.
+  # The environment half of a cmux notification setup. `NotifyConfig.from_table`
+  # reads what the config file said; this merges in the `CMUX_*` variables the
+  # terminal exports into every process it spawns, decides which of the two
+  # wins, and turns the result into something `Smith::Notify` can talk to.
   #
-  # This is the only place that knows those names. `Smith::Notify` sees a
+  # This is the only place in smith that knows those variable names, that a
+  # socket is involved, or that a protocol exists. `Smith::Notify` sees a
   # resolved config and a `CmuxClientable`; neither knows there is an
   # environment, and neither reaches for one.
   module CmuxClient
@@ -47,27 +47,6 @@ module Smith
     # would find no socket at all — and would then conclude the session is not
     # running inside cmux, because the socket is what says so.
     FALSEY = {"", "0", "false", "no", "off"}
-
-    DEFAULT_TIMEOUT = 1.0
-
-    # The config tier, before the environment has had a say. Blank strings
-    # become nil, so `socket_path = ""` in a config file is the same as the key
-    # not being there — otherwise the empty value would shadow the environment
-    # with nothing.
-    #
-    # `enabled` keeps its third state for the same reason: absent is "nobody
-    # said", and that is the answer the environment gets to overrule.
-    def self.from_table(table : Hash(String, TOML::Any)? = nil) : NotifyConfig
-      timeout = float_setting(table, "timeout")
-
-      NotifyConfig.new(
-        enabled: setting(table, "enabled").try(&.as_bool?),
-        socket_path: normalize(setting(table, "socket_path").try(&.as_s?)),
-        surface_id: normalize(setting(table, "surface_id").try(&.as_s?)),
-        workspace_id: normalize(setting(table, "workspace_id").try(&.as_s?)),
-        timeout: timeout.nil? || timeout <= 0 ? DEFAULT_TIMEOUT : timeout
-      )
-    end
 
     # Config plus environment, environment winning. Inside cmux the variables
     # describe the terminal that is running right now — this surface, this
@@ -163,33 +142,17 @@ module Smith
       nil
     end
 
-    private def self.setting(table : Hash(String, TOML::Any)?, key : String) : TOML::Any?
-      table.try(&.[key]?)
-    end
-
-    # TOML writes `timeout = 2` as an integer and `timeout = 0.5` as a float,
-    # and both are the same statement — `as_f?` reads either.
-    private def self.float_setting(table : Hash(String, TOML::Any)?, key : String) : Float64?
-      setting(table, key).try(&.as_f?)
-    end
-
     # A set variable that says something. Whitespace-only and the usual
     # spellings of "off" come back as nil, which is what lets the tier below
     # speak.
     private def self.truthy(env : Hash(String, String?), key : String) : String?
-      value = normalize(env[key]?)
+      value = NotifyConfig.normalize(env[key]?)
       return nil if value.nil?
       FALSEY.includes?(value.downcase) ? nil : value
     end
 
     private def self.presence(env : Hash(String, String?), key : String) : String?
-      normalize(env[key]?)
-    end
-
-    private def self.normalize(value : String?) : String?
-      return nil if value.nil?
-      stripped = value.strip
-      stripped.empty? ? nil : stripped
+      NotifyConfig.normalize(env[key]?)
     end
 
     # A copy of the process environment, in the type the resolution works in.

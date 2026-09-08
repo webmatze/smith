@@ -10,7 +10,6 @@ require "./sandbox"
 require "./media"
 require "./pricing"
 require "./notify_config"
-require "./cmux_client"
 
 module Smith
   # Resolved configuration, merged from (lowest to highest priority):
@@ -630,16 +629,15 @@ module Smith
     end
 
     # The `[notify]` section, and only that: what the config file says about
-    # cmux desktop notifications. The `CMUX_*` environment cmux exports into
-    # the processes it spawns is the other half, and merging the two is
-    # `Smith::CmuxClient.resolve`'s job — this deliberately does not reach for
-    # `ENV`, so a config file and a terminal can be reasoned about separately.
+    # cmux desktop notifications.
     #
-    # The result is a `NotifyConfig` rather than a nested struct here because
-    # `CmuxClient` already owns every rule about which value wins; keeping two
-    # shapes would mean keeping two sets.
+    # The `CMUX_*` environment the terminal exports is the other half, and this
+    # deliberately does not reach for it — a config file and a terminal are two
+    # questions, and keeping them apart is what lets either be reasoned about.
+    # The record does the reading: it is pure data, so no name that knows about
+    # sockets or variables appears here at all.
     def notify : NotifyConfig
-      CmuxClient.from_table(lookup("notify").try(&.as_h?))
+      NotifyConfig.from_table(lookup("notify").try(&.as_h?))
     end
 
     # Consumed by Subagents::Supervisor via CLI#build_agent. max_children = 0
