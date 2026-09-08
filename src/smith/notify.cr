@@ -1,6 +1,8 @@
 require "json"
+require "./cmux_client"
 require "./cmux_clientable"
 require "./null_cmux_client"
+require "./notify_config"
 
 module Smith
   # Decides that a notification should go out, and what it says. Nothing
@@ -26,6 +28,21 @@ module Smith
     TYPE = "notification"
 
     def initialize(@client : CmuxClientable)
+    end
+
+    # The one door the rest of smith goes through: hand over the resolved
+    # config, get back something that notifies or silently does not. No caller
+    # has to ask which client a config deserves, whether a socket is involved
+    # or whether cmux is the terminal in use — and so no caller learns the name
+    # of anything that knows, which is what keeps "the rest of smith knows
+    # none of these three" true rather than approximately true.
+    #
+    # The resolution lives in `CmuxClient`, not here: this class still knows no
+    # environment, no socket and no protocol, and only names the thing that
+    # does. A constructor taking a client stays, because that is how a spec
+    # hands over a recording one.
+    def self.build(config : NotifyConfig) : Notify
+      new(CmuxClient.build(config))
     end
 
     # True when there is somewhere to deliver to. Purely informational — the

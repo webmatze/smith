@@ -686,11 +686,12 @@ module Smith
       end
     end
 
-    # Where completion notifications go. Built once, from the config and the
-    # `CMUX_*` environment merged in `CmuxClient.resolve`, and a no-op anywhere
-    # cmux is not the terminal in use — so no call site has to ask first.
+    # Where completion notifications go. Built once, and a no-op anywhere cmux
+    # is not the terminal in use — so no call site has to ask first. Which
+    # config and which environment decide that is `Notify`'s business, and the
+    # reason this names one class rather than two.
     private def notify : Notify
-      @notify ||= Notify.new(CmuxClient.build(@config.notify))
+      @notify ||= Notify.build(@config.notify)
     end
 
     # Which session this is, in one glance from another tab. The project
