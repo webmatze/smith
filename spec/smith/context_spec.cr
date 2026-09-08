@@ -782,9 +782,10 @@ describe "a long agentic run inside one turn" do
     assert_tool_pairing(result.messages)
   end
 
-  it "does not spend a provider call to summarize its own summary" do
+  it "shortens the turn rather than summarizing again on the next compaction" do
     # The second compaction of the same history is where the old behaviour
     # settled: the prefix is the summary the first one wrote, and nothing else.
+    # Shortening the turn is what makes the call unnecessary in the first place.
     messages = [Smith::LLM::Message.user("#{Smith::Context::SUMMARY_PREFIX}what came before")] +
                one_long_turn(30)[3..]
 
@@ -795,8 +796,31 @@ describe "a long agentic run inside one turn" do
     end
 
     calls.should eq(0)
-    result.strategy.summarized?.should be_false
-    result.after_tokens.should be <= result.before_tokens
+    result.stages.should eq(["truncate"])
+    result.reached_target?.should be_true
+  end
+
+  it "refuses to summarize a prefix that is only the last summary" do
+    # Nothing here is truncatable, so the desperate pass cannot help and the
+    # cut lands back on the same boundary. What is left to summarize is the
+    # summary itself — a call that buys the difference between one summary and
+    # the next, every turn, forever.
+    messages = [
+      Smith::LLM::Message.user("#{Smith::Context::SUMMARY_PREFIX}what came before"),
+      user_msg("yes, go ahead"),
+      Smith::LLM::Message.assistant("x" * 300_000),
+    ]
+
+    calls = 0
+    result = Smith::Context.compact(messages, budget(70_000)) do |_|
+      calls += 1
+      "what came before"
+    end
+
+    calls.should eq(0)
+    result.strategy.none?.should be_true
+    result.compacted?.should be_false
+    result.messages.should eq(messages)
   end
 
   it "keeps the staged history when the summary comes back longer than the turns it replaces" do
