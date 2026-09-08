@@ -55,10 +55,14 @@ private class ExplodingClient < Smith::CmuxClientable
 end
 
 describe Smith::NotifyConfig do
-  it "is off, and undeliverable, until something says otherwise" do
+  it "says nothing at all, and delivers nothing, until something does" do
     config = Smith::NotifyConfig.new
 
-    config.enabled.should be_false
+    # `enabled` is tri-state on purpose: nil is "nobody said", which is the
+    # answer a terminal is allowed to overrule. false would be somebody
+    # turning notifications off, and no environment may overrule that.
+    config.enabled.should be_nil
+    config.enabled?.should be_false
     config.socket_path.should be_nil
     config.surface_id.should be_nil
     config.workspace_id.should be_nil
@@ -70,6 +74,10 @@ describe Smith::NotifyConfig do
     Smith::NotifyConfig.new(enabled: true).deliverable?.should be_false
     Smith::NotifyConfig.new(socket_path: "/tmp/cmux.sock").deliverable?.should be_false
     Smith::NotifyConfig.new(enabled: true, socket_path: "/tmp/cmux.sock").deliverable?.should be_true
+  end
+
+  it "is not deliverable when explicitly turned off, however much else is there" do
+    Smith::NotifyConfig.new(enabled: false, socket_path: "/tmp/cmux.sock").deliverable?.should be_false
   end
 
   it "defaults the timeout to something a socket can live with" do
@@ -97,10 +105,10 @@ describe Smith::CmuxClient do
       config.timeout.should eq(2.5)
     end
 
-    it "is the off-by-default config when there is no section at all" do
+    it "says nothing when there is no section at all" do
       config = Smith::CmuxClient.from_table(nil)
 
-      config.enabled.should be_false
+      config.enabled.should be_nil
       config.socket_path.should be_nil
       config.deliverable?.should be_false
     end
@@ -140,7 +148,9 @@ describe Smith::CmuxClient do
 
       config = Smith::CmuxClient.from_table(table)
 
-      config.enabled.should be_false
+      # Not false: an unreadable `enabled` is nobody having said, so the
+      # terminal keeps its say rather than a typo switching notifications off.
+      config.enabled.should be_nil
       config.socket_path.should be_nil
     end
 
@@ -161,7 +171,7 @@ describe Smith::CmuxClient do
     it "leaves the config alone when the environment says nothing" do
       resolved = Smith::CmuxClient.resolve(filled_config, no_cmux_env)
 
-      resolved.enabled.should be_true
+      resolved.enabled?.should be_true
       resolved.socket_path.should eq("/config/cmux.sock")
       resolved.surface_id.should eq("config-surface")
       resolved.workspace_id.should eq("config-workspace")
@@ -181,39 +191,64 @@ describe Smith::CmuxClient do
       resolved.workspace_id.should eq("env-workspace")
     end
 
-    it "switches notifications on from inside cmux, without a config file asking" do
-      off = Smith::NotifyConfig.new
+    it "switches notifications on inside cmux, without a config file asking" do
+      # cmux exports a socket path into every process it spawns; that is how
+      # smith knows this session is running inside one. There is no `CMUX=1`
+      # flag to read, and the terminal's own environment is checked below.
+      silent = Smith::NotifyConfig.new
 
-      Smith::CmuxClient.resolve(off, {"CMUX" => "1"}).enabled.should be_true
+      Smith::CmuxClient.resolve(silent, {"CMUX_SOCKET_PATH" => "/cmux.sock"}).enabled?.should be_true
     end
 
-    it "keeps them off when the config says so and cmux says nothing" do
-      Smith::CmuxClient.resolve(Smith::NotifyConfig.new, no_cmux_env).enabled.should be_false
+    it "leaves notifications off in a shell that is not cmux" do
+      # The default has to be "nothing happens" — a plain terminal session
+      # must not be changed by this feature, and must not spend a turn
+      # looking for a socket that was never there.
+      Smith::CmuxClient.resolve(Smith::NotifyConfig.new, no_cmux_env).enabled?.should be_false
     end
 
-    it "reads a falsey CMUX as cmux not being there, and leaves the config its say" do
-      # One rule for every variable: a falsey value is an absent value. `CMUX=0`
-      # in a shell that is not cmux says nothing about whether notifications
-      # were asked for, so the config file keeps deciding. Turning them off
-      # from inside cmux is `enabled = false`, which this honours — see below.
-      on = Smith::NotifyConfig.new(enabled: true)
+    it "honours an explicit enabled = false over the terminal" do
+      # Somebody turned them off. Being inside cmux is not a reason to
+      # overrule that, which is why `false` is not folded into "unset".
       off = Smith::NotifyConfig.new(enabled: false)
 
+      resolved = Smith::CmuxClient.resolve(off, {"CMUX_SOCKET_PATH" => "/cmux.sock"})
+
+      resolved.enabled?.should be_false
+      resolved.deliverable?.should be_false
+    end
+
+    it "does not read a socket path from a config file as being inside cmux" do
+      # Naming a location is not the same statement as the terminal making
+      # itself known: a config file can point at a socket for a session that
+      # is not running inside cmux at all. Left to `enabled` to ask for.
+      configured = Smith::NotifyConfig.new(socket_path: "/config/cmux.sock")
+
+      Smith::CmuxClient.resolve(configured, no_cmux_env).enabled?.should be_false
+    end
+
+    it "reads a falsey socket variable as cmux not being there" do
+      # One rule for every variable: a falsey value is an absent value, so it
+      # cannot switch notifications on either. This is not a hypothetical —
+      # cmux exports `CMUX_SOCKET=` empty alongside a populated
+      # `CMUX_SOCKET_PATH` in the same shell.
       %w[0 false no off].each do |value|
-        {"CMUX" => value, "CMUX" => value.upcase}.each do |key, spelling|
-          Smith::CmuxClient.resolve(on, {key => spelling}).enabled.should be_true, "#{key}=#{spelling}"
-          Smith::CmuxClient.resolve(off, {key => spelling}).enabled.should be_false, "#{key}=#{spelling}"
+        {"CMUX_SOCKET_PATH" => value, "CMUX_SOCKET_PATH" => value.upcase}.each do |key, spelling|
+          env = {key => spelling} of String => String?
+          Smith::CmuxClient.resolve(Smith::NotifyConfig.new, env).enabled?.should be_false, "#{key}=#{spelling}"
         end
       end
     end
 
-    it "reads an empty CMUX as unset rather than as off" do
-      # `export CMUX=` and no export at all are the same statement, and both
-      # leave the config file in charge.
-      on = Smith::NotifyConfig.new(enabled: true)
+    it "reads an empty socket variable as unset rather than as a location" do
+      # `export CMUX_SOCKET=` and no export at all are the same statement.
+      # Read as a location it would shadow the real one with nothing.
+      env = {"CMUX_SOCKET" => ""} of String => String?
 
-      Smith::CmuxClient.resolve(on, {"CMUX" => ""}).enabled.should be_true
-      Smith::CmuxClient.resolve(on, {"CMUX" => nil}).enabled.should be_true
+      resolved = Smith::CmuxClient.resolve(filled_config, env)
+
+      resolved.socket_path.should eq("/config/cmux.sock")
+      resolved.deliverable?.should be_true
     end
 
     it "keeps the timeout: it is not something an environment describes" do
@@ -240,12 +275,15 @@ describe Smith::CmuxClient do
       end
 
       it "does not read a flag-shaped CMUX as a location" do
-        # `CMUX=1` switches notifications on. Treating `1` as a socket path
+        # `CMUX=1` is the shape of a flag, not of a path. Treating `1` as one
         # would connect to a file called `1` in the current directory.
-        resolved = Smith::CmuxClient.resolve(filled_config, {"CMUX" => "1"} of String => String?)
+        silent = Smith::NotifyConfig.new
+        resolved = Smith::CmuxClient.resolve(silent, {"CMUX" => "1"} of String => String?)
 
-        resolved.socket_path.should eq("/config/cmux.sock")
-        resolved.enabled.should be_true
+        resolved.socket_path.should be_nil
+        # …and a flag is not a socket, so it cannot switch notifications on
+        # either: nothing in this environment says "you are inside cmux".
+        resolved.enabled?.should be_false
       end
 
       it "skips a falsey socket variable and keeps looking" do
@@ -277,6 +315,34 @@ describe Smith::CmuxClient do
 
         resolved.surface_id.should eq("config-surface")
         resolved.workspace_id.should eq("config-workspace")
+      end
+
+      it "takes a documented spelling when the exported one is missing" do
+        # cmux documents `CMUX_TAB_ID` and `CMUX_PANEL_ID` and exports
+        # `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID` carrying the same two values.
+        # Which pair a build offers is not something smith can ask about, so
+        # neither is assumed.
+        silent = Smith::NotifyConfig.new
+        env = {"CMUX_TAB_ID" => "tab-1", "CMUX_PANEL_ID" => "panel-1"} of String => String?
+
+        resolved = Smith::CmuxClient.resolve(silent, env)
+
+        resolved.workspace_id.should eq("tab-1")
+        resolved.surface_id.should eq("panel-1")
+      end
+
+      it "prefers the workspace and surface ids it was documented with" do
+        env = {
+          "CMUX_WORKSPACE_ID" => "workspace-1",
+          "CMUX_TAB_ID"       => "tab-1",
+          "CMUX_SURFACE_ID"   => "surface-1",
+          "CMUX_PANEL_ID"     => "panel-1",
+        } of String => String?
+
+        resolved = Smith::CmuxClient.resolve(Smith::NotifyConfig.new, env)
+
+        resolved.workspace_id.should eq("workspace-1")
+        resolved.surface_id.should eq("surface-1")
       end
     end
   end

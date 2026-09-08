@@ -13,16 +13,39 @@ module Smith
   # resolved config and a `CmuxClientable`; neither knows there is an
   # environment, and neither reaches for one.
   module CmuxClient
-    # In priority order. cmux itself documents `CMUX_SOCKET_PATH`; the other
-    # two are the older spellings still found in the wild, so they are checked
-    # rather than argued with.
+    # In priority order. `CMUX_SOCKET_PATH` is the one cmux documents and the
+    # one its environment actually carries.
+    #
+    # The other two are kept because they cost nothing to check and because a
+    # spelling smith refused to read is a notification that silently does not
+    # arrive: `CMUX_SOCKET` is exported alongside the documented name — empty,
+    # in the environment this was written against, which is exactly why a
+    # resolution has to read the first value that says something rather than
+    # the first variable that is set — and `CMUX` is the spelling #120 named
+    # and the one a wrapper script is most likely to set itself.
     SOCKET_PATH_KEYS = {"CMUX_SOCKET_PATH", "CMUX_SOCKET", "CMUX"}
 
+    # Two pairs of names for the same two values. cmux's own CLI and docs speak
+    # of tabs and panels, and the environment this was written against exports
+    # `CMUX_WORKSPACE_ID` and `CMUX_SURFACE_ID` carrying the same two ids its
+    # `CMUX_TAB_ID` and `CMUX_PANEL_ID` do — both halves verified, not assumed.
+    #
+    # Reading both costs nothing, and which pair a build exports is not
+    # something smith can ask about. The workspace and surface names come
+    # first: they are the ones observed, and the tab and panel names are the
+    # ones a build might stop exporting.
+    WORKSPACE_ID_KEYS = {"CMUX_WORKSPACE_ID", "CMUX_TAB_ID"}
+    SURFACE_ID_KEYS   = {"CMUX_SURFACE_ID", "CMUX_PANEL_ID"}
+
     # Values an environment variable can hold that mean "not set" rather than
-    # "set to this". A shell that exports `CMUX_SOCKET=` is saying the same
-    # thing as one that never exported it, and `CMUX=0` is how a program turns
-    # a flag off without unsetting it — in both cases the next tier down gets
-    # its say instead.
+    # "set to this": a shell that exports one of these is saying the same thing
+    # as one that never exported it, so the next tier down gets its say.
+    #
+    # Not a hypothetical. cmux exports `CMUX_SOCKET=` empty alongside a
+    # populated `CMUX_SOCKET_PATH` in the same environment, so a resolution
+    # that read the first set *variable* rather than the first set *value*
+    # would find no socket at all — and would then conclude the session is not
+    # running inside cmux, because the socket is what says so.
     FALSEY = {"", "0", "false", "no", "off"}
 
     DEFAULT_TIMEOUT = 1.0
@@ -31,12 +54,14 @@ module Smith
     # become nil, so `socket_path = ""` in a config file is the same as the key
     # not being there — otherwise the empty value would shadow the environment
     # with nothing.
+    #
+    # `enabled` keeps its third state for the same reason: absent is "nobody
+    # said", and that is the answer the environment gets to overrule.
     def self.from_table(table : Hash(String, TOML::Any)? = nil) : NotifyConfig
-      enabled = setting(table, "enabled").try(&.as_bool?)
       timeout = float_setting(table, "timeout")
 
       NotifyConfig.new(
-        enabled: enabled.nil? ? false : enabled,
+        enabled: setting(table, "enabled").try(&.as_bool?),
         socket_path: normalize(setting(table, "socket_path").try(&.as_s?)),
         surface_id: normalize(setting(table, "surface_id").try(&.as_s?)),
         workspace_id: normalize(setting(table, "workspace_id").try(&.as_s?)),
@@ -51,27 +76,25 @@ module Smith
     #
     # `env` is a parameter rather than `ENV` so the resolution is testable
     # without touching the process environment.
-    def self.resolve(config : NotifyConfig, env : Hash(String, String?) = ENV) : NotifyConfig
-      cmux = truthy(env, "CMUX")
+    def self.resolve(config : NotifyConfig, env : Hash(String, String?) = env_snapshot) : NotifyConfig
+      # A socket cmux itself put into the environment, as opposed to one a
+      # config file named. Kept apart because the two mean different things:
+      # the first says "this terminal is inside cmux, right now", the second
+      # only says "here is a location".
+      live_socket = socket_from_env(env)
 
       NotifyConfig.new(
-        # `CMUX` being *truthy* is cmux announcing "you are inside me", which
-        # is the same statement as `enabled = true` — and the one made about
-        # the terminal actually in use. A falsey `CMUX` is one rule for every
-        # variable: an absent value. It says nothing about notifications, so
-        # the config file keeps deciding; turning them off from inside cmux is
-        # `enabled = false`, which this honours.
-        enabled: cmux.nil? ? config.enabled : true,
-        socket_path: socket_path(env, config.socket_path),
-        surface_id: presence(env, "CMUX_SURFACE_ID") || config.surface_id,
-        workspace_id: presence(env, "CMUX_WORKSPACE_ID") || config.workspace_id,
+        enabled: enabled(config, live_socket),
+        socket_path: live_socket || config.socket_path,
+        surface_id: first_of(env, SURFACE_ID_KEYS) || config.surface_id,
+        workspace_id: first_of(env, WORKSPACE_ID_KEYS) || config.workspace_id,
         timeout: config.timeout
       )
     end
 
     # Resolve, then build. The one call a caller that is not itself resolving
     # anything needs.
-    def self.build(config : NotifyConfig, env : Hash(String, String?) = ENV) : CmuxClientable
+    def self.build(config : NotifyConfig, env : Hash(String, String?) = env_snapshot) : CmuxClientable
       client(resolve(config, env))
     end
 
@@ -91,17 +114,53 @@ module Smith
       NullCmuxClient.new
     end
 
-    private def self.socket_path(env : Hash(String, String?), configured : String?) : String?
+    # Whether notifications go out. Three answers, because there are three
+    # questions and only two of them belong to the config file:
+    #
+    # An explicit `enabled = false` is honoured no matter what the terminal
+    # says — that is somebody turning them off, and being inside cmux is not a
+    # reason to overrule them. An explicit `true` is honoured as readily.
+    #
+    # Absent is nobody having said, and that is where the terminal gets its
+    # say: cmux announcing a socket *is* the announcement that this session is
+    # running inside it, which is the situation a completion notification
+    # exists for. So the default is on inside cmux and off everywhere else,
+    # and a run started in a plain terminal is unchanged by this feature.
+    #
+    # Deliberately not decided by whether a socket path resolved *from config*:
+    # pointing at a location is not the same statement as "you are inside me",
+    # and treating it as one would switch notifications on for a config file
+    # that only ever meant to say where the socket is.
+    private def self.enabled(config : NotifyConfig, live_socket : String?) : Bool
+      explicit = config.enabled
+      return explicit unless explicit.nil?
+
+      !live_socket.nil?
+    end
+
+    private def self.socket_from_env(env : Hash(String, String?)) : String?
       SOCKET_PATH_KEYS.each do |key|
         value = truthy(env, key)
         next if value.nil?
-        # `CMUX` is a flag first and a path second: only when it holds
-        # something that looks like a location is it read as one.
+        # A bare `CMUX` holds a flag in the wild — `CMUX=1` — and reading that
+        # as a location would connect to a file called `1` in the current
+        # directory. Only something shaped like a path is taken as one.
         next if key == "CMUX" && !value.includes?("/")
         return value
       end
 
-      configured
+      nil
+    end
+
+    # The first of `keys` that holds a value saying something, so a documented
+    # spelling can stand in for an exported one without either being assumed.
+    private def self.first_of(env : Hash(String, String?), keys : Enumerable(String)) : String?
+      keys.each do |key|
+        value = presence(env, key)
+        return value unless value.nil?
+      end
+
+      nil
     end
 
     private def self.setting(table : Hash(String, TOML::Any)?, key : String) : TOML::Any?
@@ -131,6 +190,19 @@ module Smith
       return nil if value.nil?
       stripped = value.strip
       stripped.empty? ? nil : stripped
+    end
+
+    # A copy of the process environment, in the type the resolution works in.
+    #
+    # Not `ENV` itself as the default: `ENV` is not a `Hash`, and a default
+    # argument is only checked where the method is actually called — so
+    # `= ENV` sat unobjected until something called `resolve`, and it broke the
+    # build rather than failing quietly. Snapshotting also means a resolution
+    # cannot observe the environment changing underneath it mid-call.
+    private def self.env_snapshot : Hash(String, String?)
+      snapshot = Hash(String, String?).new
+      ENV.each { |key, value| snapshot[key] = value }
+      snapshot
     end
   end
 end

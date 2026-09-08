@@ -848,7 +848,9 @@ describe "notify settings" do
     with_sandbox do |temp_dir, _home|
       settings = Smith::Config.load(make_project(temp_dir)).notify
 
-      settings.enabled.should be_false
+      # nil, not false: nobody asked either way, and that is the answer
+      # `CmuxClient.resolve` lets the terminal overrule.
+      settings.enabled.should be_nil
       settings.socket_path.should be_nil
       settings.surface_id.should be_nil
       settings.workspace_id.should be_nil
@@ -930,7 +932,7 @@ describe "notify settings" do
 
       settings = Smith::Config.load(project).notify
 
-      settings.enabled.should be_false
+      settings.enabled.should be_nil
       settings.socket_path.should be_nil
       settings.timeout.should eq(1.0)
     end
