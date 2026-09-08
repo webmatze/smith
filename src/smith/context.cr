@@ -20,6 +20,12 @@ module Smith
     TRUNCATION_MARKER = "truncated by smith to stay within the context window"
     SUPERSEDED_MARKER = "superseded by a later identical call"
 
+    # What a summarized prefix is introduced by. Named for the same reason the
+    # two markers above are, and for one more: the compaction that writes a
+    # summary and the compaction that has to recognise its own work a turn
+    # later are the same code reading the same string.
+    SUMMARY_PREFIX = "Summary of the earlier conversation: "
+
     # How many real turns are left alone. One turn is a user message and
     # everything the agent did about it, so three of them cover "read the file,
     # edit it, run the tests" whole. A constant rather than config: an extra
@@ -346,33 +352,61 @@ module Smith
 
       # Stage 3 — replace the oldest turns with a summary.
       cut = safe_cut_index(staged, target)
-      if cut.zero?
-        # No boundary to cut at, so the recency window is the last thing left to
-        # give. One oversized `cat` inside the current turn is the case this
-        # exists for: protecting the work in hand is worth less than a request
-        # the provider will accept at all.
+
+      # Whether cutting there is the answer, or only the best boundary on
+      # offer. `safe_cut_index` returns the earliest turn boundary whose tail
+      # fits and falls back to the newest one when none does — and a tail that
+      # is itself over target is the ordinary shape of a long agentic run, not
+      # an exotic one: the recency window counts turns, and such a run is a
+      # single turn. Summarizing the prefix then reclaims whatever the prefix
+      # happens to be, which after the first compaction is the previous summary
+      # and nothing else. So this is the same dead end `cut.zero?` is, reached
+      # by a different road, and it has to give way the same way.
+      if estimate_tokens(staged[cut..]) > target
+        # The recency window is the last thing left to give. One oversized
+        # `cat` inside the current turn is the case this started as; a hundred
+        # tool results inside it is that case at the scale a coding session
+        # reaches — and protecting the work in hand is worth less than a
+        # request the provider will accept at all.
         # Attachments first, here as everywhere: shortening the text of a
         # result while its image stays behind gives up the readable part and
         # keeps the expensive one.
         if drop_stale_media(working, target, window_turns: 0, tool_only: true)
           stages << "attachments" unless stages.includes?("attachments")
-          staged = working.messages
-          after = budget.charged(working.tokens)
         end
 
         if truncate_old_tool_results(working, target, window_turns: 0)
           stages << "truncate" unless stages.includes?("truncate")
-          staged = working.messages
-          after = budget.charged(working.tokens)
         end
 
-        # Report honestly rather than claiming a compaction that did not happen.
+        staged = working.messages
+        after = budget.charged(working.tokens)
+
+        # Shorter than it was, so a boundary that did not fit may fit now — and
+        # if the whole history fits there is nothing left for a summary to do.
+        cut = working.fits?(target) ? 0 : safe_cut_index(staged, target)
+      end
+
+      # No boundary to cut at, or none still worth cutting. Report honestly
+      # rather than claiming a compaction that did not happen.
+      if cut.zero?
         strategy = stages.empty? ? Strategy::None : Strategy::Truncated
         return Result.new(staged, strategy, before, after, budget, stages)
       end
 
       prefix = staged[0...cut]
       tail = staged[cut..]
+
+      # A prefix that is nothing but the summary the last compaction wrote.
+      # Summarizing that again spends a provider call and a prompt-cache
+      # invalidation to reclaim the difference between one summary and the
+      # next, which is noise — and once a single turn has outgrown the target
+      # it is what *every* turn would do, forever. Refused rather than merely
+      # allowed to be cheap.
+      if prefix.size == 1 && summary?(prefix.first)
+        strategy = stages.empty? ? Strategy::None : Strategy::Truncated
+        return Result.new(staged, strategy, before, after, budget, stages)
+      end
 
       strategy = Strategy::Summarized
       replacement = begin
@@ -385,17 +419,42 @@ module Smith
         "Ask the user if you need details from before this point."
       end
 
+      compacted = [LLM::Message.user("#{SUMMARY_PREFIX}#{replacement}")] + tail
+      raw_compacted = estimate_tokens(compacted)
+
+      # A summary can come back longer than the turns it replaced — nothing
+      # bounds what the provider answers. Keeping it would mean paying for the
+      # call, losing the detail *and* growing the request, so the staged
+      # history stands and the summary is thrown away.
+      if raw_compacted >= working.tokens
+        strategy = stages.empty? ? Strategy::None : Strategy::Truncated
+        return Result.new(staged, strategy, before, after, budget, stages)
+      end
+
       stages << (strategy.dropped? ? "drop" : "summarize")
-      compacted = [LLM::Message.user("Summary of the earlier conversation: #{replacement}")] + tail
 
       Result.new(
         compacted,
         strategy,
         before,
-        budget.charged(estimate_tokens(compacted)),
+        budget.charged(raw_compacted),
         budget,
         stages
       )
+    end
+
+    # Whether a message is a summary an earlier compaction wrote. Read off the
+    # text rather than a flag on the message: a resumed session brings its
+    # history back from disk through the same JSON as any other message, and a
+    # flag that does not survive that round trip would make the guard hold in a
+    # fresh session and lapse in a resumed one.
+    private def self.summary?(message : LLM::Message) : Bool
+      return false unless message.role.user?
+
+      first = message.content.first?
+      return false if first.nil?
+
+      (first.text || "").starts_with?(SUMMARY_PREFIX)
     end
 
     # The history under compaction, with a running byte total.
