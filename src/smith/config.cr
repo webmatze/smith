@@ -9,6 +9,7 @@ require "./mentions"
 require "./sandbox"
 require "./media"
 require "./pricing"
+require "./notify_config"
 
 module Smith
   # Resolved configuration, merged from (lowest to highest priority):
@@ -625,6 +626,18 @@ module Smith
         enabled: enabled.nil? ? DEFAULT_MCP_ENABLED : enabled,
         timeout: timeout > 0 ? timeout : DEFAULT_MCP_TIMEOUT
       )
+    end
+
+    # The `[notify]` section, and only that: what the config file says about
+    # cmux desktop notifications.
+    #
+    # The `CMUX_*` environment the terminal exports is the other half, and this
+    # deliberately does not reach for it — a config file and a terminal are two
+    # questions, and keeping them apart is what lets either be reasoned about.
+    # The record does the reading: it is pure data, so no name that knows about
+    # sockets or variables appears here at all.
+    def notify : NotifyConfig
+      NotifyConfig.from_table(lookup("notify").try(&.as_h?))
     end
 
     # Consumed by Subagents::Supervisor via CLI#build_agent. max_children = 0
