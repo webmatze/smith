@@ -742,3 +742,96 @@ describe "the cost of compacting a long history" do
     assert_tool_pairing(result.messages)
   end
 end
+
+# One prompt, then a hundred tool calls. The recency window counts turns, so a
+# run of this shape is a *single* turn and the window covers all of it — which
+# is how compaction came to summarize its own summary every turn while the
+# thing that was actually growing sat behind the cut, untouched.
+private def one_long_turn(steps : Int32, result_bytes : Int32 = 8_000)
+  messages = [] of Smith::LLM::Message
+
+  messages << user_msg("the first question")
+  messages << assistant_tool_call("call-first")
+  messages << tool_result("call-first", "y" * 200)
+
+  messages << user_msg("yes, go ahead")
+  steps.times do |i|
+    messages << assistant_tool_call("call-#{i}")
+    messages << tool_result("call-#{i}", "x" * result_bytes)
+  end
+
+  messages
+end
+
+private def tool_result_bytes(messages : Array(Smith::LLM::Message))
+  messages.sum do |message|
+    message.content.sum { |block| block.type.tool_result? ? (block.text.try(&.bytesize) || 0) : 0 }
+  end
+end
+
+describe "a long agentic run inside one turn" do
+  it "shortens the turn that is the whole context instead of summarizing the prefix" do
+    messages = one_long_turn(30)
+    result = compact_with_summary(messages, budget(70_000))
+
+    # It used to report `["summarize"]` here, having replaced three messages
+    # with a summary and left 240 KB of tool results in the turn behind the cut.
+    result.stages.should eq(["truncate"])
+    result.reached_target?.should be_true
+    tool_result_bytes(result.messages).should be < tool_result_bytes(messages)
+    assert_tool_pairing(result.messages)
+  end
+
+  it "shortens the turn rather than summarizing again on the next compaction" do
+    # The second compaction of the same history is where the old behaviour
+    # settled: the prefix is the summary the first one wrote, and nothing else.
+    # Shortening the turn is what makes the call unnecessary in the first place.
+    messages = [Smith::LLM::Message.user("#{Smith::Context::SUMMARY_PREFIX}what came before")] +
+               one_long_turn(30)[3..]
+
+    calls = 0
+    result = Smith::Context.compact(messages, budget(70_000)) do |_|
+      calls += 1
+      "what came before"
+    end
+
+    calls.should eq(0)
+    result.stages.should eq(["truncate"])
+    result.reached_target?.should be_true
+  end
+
+  it "refuses to summarize a prefix that is only the last summary" do
+    # Nothing here is truncatable, so the desperate pass cannot help and the
+    # cut lands back on the same boundary. What is left to summarize is the
+    # summary itself — a call that buys the difference between one summary and
+    # the next, every turn, forever.
+    messages = [
+      Smith::LLM::Message.user("#{Smith::Context::SUMMARY_PREFIX}what came before"),
+      user_msg("yes, go ahead"),
+      Smith::LLM::Message.assistant("x" * 300_000),
+    ]
+
+    calls = 0
+    result = Smith::Context.compact(messages, budget(70_000)) do |_|
+      calls += 1
+      "what came before"
+    end
+
+    calls.should eq(0)
+    result.strategy.none?.should be_true
+    result.compacted?.should be_false
+    result.messages.should eq(messages)
+  end
+
+  it "keeps the staged history when the summary comes back longer than the turns it replaces" do
+    # Nothing bounds what a provider answers with. Paying for the call, losing
+    # the detail and growing the request is the one outcome worth refusing.
+    messages = conversation(10, result_bytes: 60_000)
+    result = Smith::Context.compact(messages, budget(1_000)) { |_| "z" * 4_000_000 }
+
+    result.strategy.summarized?.should be_false
+    result.stages.should_not contain("summarize")
+    result.after_tokens.should be <= result.before_tokens
+    assert_tool_pairing(result.messages)
+  end
+end
