@@ -1184,7 +1184,7 @@ Servers go in `.smith/mcp.json` (project) or `~/.smith/mcp.json` (global), delib
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"],
-      "env": { "FOO": "bar" }
+      "env": { "FOO": "bar", "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
     },
     "everything": {
       "type": "http",
@@ -1195,7 +1195,7 @@ Servers go in `.smith/mcp.json` (project) or `~/.smith/mcp.json` (global), delib
 }
 ```
 
-An entry with a `url` is an HTTP server — `type: "http"` may say so, and `sse` is accepted as an alias; everything else is a subprocess. `${VARIABLE}` in a header value is looked up in smith's environment at startup, so a token does not have to stand literally in the file; an unset one warns rather than being sent as `${...}`.
+An entry with a `url` is an HTTP server — `type: "http"` may say so, and `sse` is accepted as an alias; everything else is a subprocess. `${VARIABLE}` in a header value **or in an `env` value** is looked up in smith's environment at startup, so a token does not have to stand literally in a file you commit; an unset one warns and becomes empty rather than being passed on as `${...}`. Only that exact shape is a reference — a bare `$`, or `${not-a-name}`, is left as written. There is no way to escape one: a value that needs a literal `${NAME}` cannot have it, which is worth knowing for an `env` value meant as a template for the server to expand itself. An unset variable becomes empty rather than absent, and to a program reading it those are not the same thing — an empty `PYTHONPATH` is not no `PYTHONPATH` — so the startup warning is worth reading. Numbers and booleans in `env` are handed over as the strings they obviously mean, so `"PORT": 8080` needs no quoting.
 
 Global first, then project — a project entry of the same name replaces the global one. Entries with `"disabled": true`, or with a transport smith does not speak, are skipped with a word about why.
 

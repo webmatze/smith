@@ -229,7 +229,7 @@ module Smith::MCP
         name: name,
         command: command,
         args: fields["args"]?.try(&.as_a?).try(&.compact_map(&.as_s?)) || Array(String).new,
-        env: string_map(fields["env"]?),
+        env: expand_env(fields["env"]?, name, warn_io),
         source: source
       )
     end
@@ -269,33 +269,87 @@ module Smith::MCP
         text = entry.as_s?
         next if text.nil?
 
-        result[key] = text.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/) do |match|
-          found = ENV[$1]?
-          if found.nil?
-            warn_io.puts "⚠️  MCP server '#{server}': header '#{key}' references #{match}, which is not set in the environment — sending it empty."
-            ""
-          else
-            found
-          end
-        end
+        result[key] = expand_vars(text, server, "header '#{key}'", warn_io)
       end
 
       result
     end
 
-    private def self.string_map(value : JSON::Any?) : Hash(String, String)
+    # The same for a stdio server's `env`, because the reason is the same one:
+    # a secret belongs in the environment and not in a file that gets
+    # committed. Until this, `headers` understood `${VAR}` and `env` two
+    # methods away did not, so the only ways to give a child process a token
+    # were to write it in plainly or to leave it to inherit smith's entire
+    # environment — the second of which is what #109 exists to stop, and
+    # cannot be stopped while there is no other way to pass one deliberately.
+    private def self.expand_env(value : JSON::Any?, server : String, warn_io : IO) : Hash(String, String)
       result = Hash(String, String).new
       table = value.try(&.as_h?)
       return result if table.nil?
 
       table.each do |key, entry|
         # Numbers and booleans appear in real configs (ports, flags); they mean
-        # the obvious thing as an environment variable.
-        text = entry.as_s? || entry.raw.try(&.to_s)
-        result[key] = text if text
+        # the obvious thing as an environment variable. Only a string is
+        # expanded, because only a string can hold a `${VAR}` to begin with:
+        # `8080` is a port, not a reference to anything.
+        if text = entry.as_s?
+          result[key] = expand_vars(text, server, "env '#{key}'", warn_io)
+        elsif raw = entry.raw.try(&.to_s)
+          result[key] = raw
+        end
       end
 
       result
+    end
+
+    # One implementation for both, so a `${VAR}` cannot come to mean two
+    # different things depending on which half of an entry it was written in.
+    #
+    # `what` names the place rather than the kind, because a header and an env
+    # entry are both `key: value` and which one it was is the first thing
+    # somebody reading the warning needs to know.
+    #
+    # An unset variable becomes empty rather than being dropped, which the
+    # issue asked for and which is worth a note, because the two halves are
+    # not equally harmless. An empty header is inert. An empty *environment
+    # variable* is not the same thing as an absent one to the program reading
+    # it: an empty `PYTHONPATH` puts the working directory on the import path,
+    # an empty `PATH` or `HOME` is a different program than no `PATH` or
+    # `HOME`.
+    #
+    # The warning is the whole defence, and there is nothing behind it: an
+    # explicit entry *overrides* what the child would have inherited, so an
+    # empty expansion does not fall back to the inherited value, it replaces
+    # it. `clear_env` will not change that — what `clear_env` takes away is
+    # the fallback for a variable no entry names at all, which is a different
+    # hazard. This one is already as sharp as it is going to get.
+    #
+    # If it is ever traded the other way, the shape of the alternative is
+    # worth not rediscovering. `Process` reads a nil value as "leave this
+    # variable unset", and does it properly: a nil drops an *inherited* value
+    # too, so all three states — set, set-empty, absent — are reachable.
+    # Dropping the key costs widening `ServerSpec#env` and `spawn_server`'s
+    # signature to `Hash(String, String?)`, its body already passing the map
+    # straight through — plus the part that is not typing: `expand_vars`
+    # returns a `String` and so cannot say "this whole value was one unset
+    # reference". Only a value that is nothing else could become nil;
+    # `"a${UNSET}b"` has to stay a string. That decision is the work, not the
+    # signatures.
+    #
+    # There is no escape: a value that wants a literal `${NAME}` cannot have
+    # one, `$$` and a backslash included. Inherited from headers rather than
+    # decided here, and it matters more for `env`, where a value is likelier
+    # to be a template some other program means to expand itself.
+    private def self.expand_vars(text : String, server : String, what : String, warn_io : IO) : String
+      text.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/) do |match|
+        found = ENV[$1]?
+        if found.nil?
+          warn_io.puts "⚠️  MCP server '#{server}': #{what} references #{match}, which is not set in the environment — using an empty value."
+          ""
+        else
+          found
+        end
+      end
     end
   end
 end
