@@ -200,6 +200,16 @@ module Smith::LLM
       @prompt_tokens + @cache_read_tokens + @cache_creation_tokens
     end
 
+    # Nothing was used. Deliberately not `total_tokens.zero?`: that field is
+    # whatever the provider reported, and three of the four adapters default
+    # it to 0 when the key is missing while `prompt_tokens` and
+    # `completion_tokens` hold real numbers. Anthropic computes it as input
+    # plus output, which leaves out billable cache tokens. Asking the four
+    # fields that carry the counts is the only test that cannot be lied to.
+    def empty? : Bool
+      billed_prompt_tokens.zero? && @completion_tokens.zero?
+    end
+
     def initialize(
       @prompt_tokens : Int32 = 0,
       @completion_tokens : Int32 = 0,

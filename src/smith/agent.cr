@@ -72,6 +72,16 @@ module Smith
     # and ending the run over money never spent when it is to a dearer one.
     getter spent_usd : Float64 = 0.0
 
+    # What this run used, split by the model in force when each response
+    # arrived. The same reason `spent_usd` adds up per response rather than
+    # pricing the total once: after `/model` there is no single model the run
+    # was charged at, so there is no single one to attribute its tokens to.
+    #
+    # Keyed by model alone, not provider: `/model` changes the model and
+    # leaves the provider, its key and its connection exactly as they were.
+    # Whoever persists this knows which provider it belongs to.
+    getter usage_by_model : Hash(String, LLM::Usage) = Hash(String, LLM::Usage).new
+
     def initialize(
       @provider : LLM::Provider,
       @registry : Tools::Registry = Tools::Registry.default,
@@ -523,6 +533,9 @@ module Smith
 
     private def update_usage(u : LLM::Usage)
       @cumulative_usage += u
+      # `@model` is what was asked for and answered just now, which is what
+      # makes this attribution right rather than approximate.
+      @usage_by_model[@model] = (@usage_by_model[@model]? || LLM::Usage.new(0, 0, 0)) + u
       # A stretch with no known rate contributes nothing rather than a guess —
       # the CLI is what says so out loud when a budget is set.
       if rates = @rates

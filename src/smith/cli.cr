@@ -816,7 +816,13 @@ module Smith
       # five call sites. A run start, `smith resume`, `smith -c` and the
       # `/resume` inside either loop all reach a new agent through here, and
       # the last of those is the one a baseline taken at process start misses.
-      session_data.try { |data| data.usage_before_run = data.usage }
+      session_data.try do |data|
+        data.usage_before_run = data.usage
+        # Taken here for the same reason and at the same moment as the total
+        # above — the run's split has to be added to what the session already
+        # had, not written over it.
+        data.segments_before_run = data.segments
+      end
 
       agent = Agent.new(
         provider: provider,
@@ -922,7 +928,7 @@ module Smith
       shutdown_bash_jobs
       shutdown_mcp
       persist(session_data, agent)
-      renderer.finish(agent.cumulative_usage, cost_for(provider.name, agent.model, agent.cumulative_usage))
+      renderer.finish(agent.cumulative_usage, run_cost(provider.name, agent))
 
       # A failed provider call must not report success to a calling script.
       exit(renderer.exit_code)
@@ -989,6 +995,16 @@ module Smith
       # it in would count turn one again on turn two, and again on turn three.
       # Against a baseline it is the same answer however often it is written.
       session_data.usage = session_data.usage_before_run + agent.cumulative_usage
+      # The provider comes from the record because `/model` cannot change it:
+      # it switches the model and leaves the client, its key and its
+      # connection alone. The agent therefore counts by model and this is
+      # where the pair is put back together.
+      session_data.usage_segments = Session.merge_segments(
+        session_data.segments_before_run,
+        agent.usage_by_model.map do |model, usage|
+          Session::UsageSegment.new(session_data.provider, model, usage)
+        end
+      )
       session_data.todos = @todos.items
       session_data.context_ratio = agent.context_ratio
       @session_store.save(session_data)
@@ -1067,7 +1083,7 @@ module Smith
       shutdown_bash_jobs
       shutdown_mcp
       persist(session_data, agent)
-      renderer.finish(agent.cumulative_usage, cost_for(session_data.provider, agent.model, agent.cumulative_usage))
+      renderer.finish(agent.cumulative_usage, run_cost(session_data.provider, agent))
       exit(renderer.exit_code)
     end
 
@@ -1231,7 +1247,7 @@ module Smith
             else
               submit(agent, trimmed)
               persist(session_data, agent)
-              if cost = cost_for(session_data.provider, agent.model, agent.cumulative_usage)
+              if cost = run_cost(session_data.provider, agent)
                 app.cost_text = "#{Smith::Pricing.format(cost)}"
               end
               app.turn_finished
@@ -1381,6 +1397,15 @@ module Smith
 
       previous = agent.model
       agent.model = name
+
+      # Settle the split *before* the model moves. A record written before
+      # #103 carries no segments and derives its one from `model` — so
+      # overwriting `model` first would silently re-attribute everything the
+      # session ever spent to the model it is switching *to*, which is the
+      # very error #103 exists to remove, arriving through the door of the
+      # feature that motivated it. Once written down, the past cannot be
+      # re-read.
+      session_data.usage_segments = session_data.segments
 
       # Persisted as well as applied, so `smith resume` comes back on the new
       # model — the index row is rebuilt from this same field on save.
@@ -2067,6 +2092,35 @@ module Smith
 
     private def cost_for(provider_name : String, model : String, usage : LLM::Usage) : Float64?
       Pricing.estimate(usage, provider_name, model, @config.pricing)
+    end
+
+    # What the run has cost, priced per stretch rather than all at the model
+    # it happens to have ended on.
+    #
+    # This and `BudgetExceeded` disagreed after a switch: one summed per turn
+    # at the rates in force, the other priced the whole run at the model it
+    # had arrived at. Pricing per stretch settles that from this side — see
+    # below for why it is done here rather than by reading the agent's own
+    # total, which was the obvious way to make them agree and the wrong one.
+    private def run_cost(provider_name : String, agent : Agent) : Float64?
+      # Nothing counted yet: no segments to price and no model to blame, so
+      # the answer is the one a zero-usage run always gave.
+      return cost_for(provider_name, agent.model, agent.cumulative_usage) if agent.usage_by_model.empty?
+
+      # Priced from the segments rather than read off `Agent#spent_usd`, which
+      # the issue offered as the shortcut. Where both are defined they agree —
+      # same rates, same responses, only grouped differently — so the
+      # disagreement with `BudgetExceeded` that #103 names is gone either way.
+      # Where they differ, `spent_usd` is the wrong one to show: it is the
+      # enforcement figure, and enforcement deliberately counts a stretch with
+      # no known rate as nothing. Printing that as a *cost* would answer
+      # "unknown" with "free", against the rule `output.cr` states outright.
+      Session.cost_of(
+        agent.usage_by_model.map do |model, usage|
+          Session::UsageSegment.new(provider_name, model, usage)
+        end,
+        @config.pricing
+      )
     end
 
     # A budget without a price for the model in use is not a budget. Saying so
