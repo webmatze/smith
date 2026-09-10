@@ -151,6 +151,10 @@ describe Smith::MCP::ServerConfig do
         specs.first.headers["Authorization"].should eq("Bearer ")
         warnings.should contain("SMITH_MCP_MISSING_TOKEN")
         warnings.should contain("not set")
+        # Which entry, not just which variable — the two sides share one
+        # implementation now, and nothing else pins that the header call site
+        # still names its own.
+        warnings.should contain("header 'Authorization'")
       end
 
       it "skips an http entry without a url" do

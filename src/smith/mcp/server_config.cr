@@ -308,6 +308,20 @@ module Smith::MCP
     # `what` names the place rather than the kind, because a header and an env
     # entry are both `key: value` and which one it was is the first thing
     # somebody reading the warning needs to know.
+    # An unset variable becomes empty rather than being dropped, which the
+    # issue asked for and which is worth a note, because the two halves are
+    # not equally harmless. An empty header is inert. An empty *environment
+    # variable* is not the same thing as an absent one to the program reading
+    # it: an empty `PYTHONPATH` puts the working directory on the import path,
+    # an empty `PATH` or `HOME` is a different program than no `PATH` or
+    # `HOME`. Today the warning is the whole defence, and the value the child
+    # would otherwise have inherited is still there behind it. Under #109's
+    # `clear_env` it will not be, and the choice deserves revisiting there.
+    #
+    # There is no escape: a value that wants a literal `${NAME}` cannot have
+    # one, `$$` and a backslash included. Inherited from headers rather than
+    # decided here, and it matters more for `env`, where a value is likelier
+    # to be a template some other program means to expand itself.
     private def self.expand_vars(text : String, server : String, what : String, warn_io : IO) : String
       text.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/) do |match|
         found = ENV[$1]?
