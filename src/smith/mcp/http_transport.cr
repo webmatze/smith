@@ -1,6 +1,7 @@
 require "http/client"
 require "uri"
 require "./protocol"
+require "./server_config"
 
 module Smith::MCP
   # A Streamable-HTTP connection to a remote MCP server: JSON-RPC messages go
@@ -195,7 +196,24 @@ module Smith::MCP
     # Connection-level failure: remember the reason, end the stream. Everyone
     # still waiting is abandoned by the reader and sees this message — the same
     # shape a dead stdio pipe produces.
+    #
+    # Every message that reaches here names the url, because where it was
+    # trying to go is half the reason — and that url came out of `mcp.json`,
+    # where userinfo, a path segment, a query and a fragment are each a place a
+    # token is routinely written. It is cut back to scheme, host and port
+    # *here*, where the line is composed, rather than at each place it is later
+    # read: `send` raises it at the next write, and `Client#abandon_pending`
+    # hands it to every caller still waiting, from where it becomes a tool
+    # result — the model's context, `transcript.jsonl` and every
+    # `smith sessions export` of the session. Filtering on the way in leaves
+    # nothing raw in the ivar, so a reader added later cannot become a new way
+    # for the url to get out.
+    #
+    # `body` is not filtered and not merged: it is the server's own words, and
+    # only a caller knows whether repeating them is the answer being looked for.
     private def die!(message : String, body : String? = nil) : Nil
+      message = ServerSpec.scrub_urls(message)
+
       @state_lock.synchronize do
         @failure_hint ||= message
         @failure_body ||= body
