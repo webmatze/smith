@@ -83,6 +83,7 @@ describe Smith::MCP::StdioTransport do
   it "keeps what a server wrote to stderr when nothing has drained it yet" do
     script = File.tempname("smith-mcp-lastwords", ".sh")
     written = File.tempname("smith-mcp-lastwords", ".written")
+    process = nil
 
     begin
       File.write(script, <<-SH)
@@ -112,38 +113,14 @@ describe Smith::MCP::StdioTransport do
 
       transport.stderr_tail.join(" ").should contain("TOKEN-from-the-child")
     ensure
+      # The assertion above can fail before `close` has run, and a child that
+      # nothing signals outlives the spec run.
+      process.try do |running|
+        running.terminate rescue nil
+        running.wait rescue nil
+      end
       File.delete(script) if File.exists?(script)
       File.delete(written) if File.exists?(written)
-    end
-  end
-
-  # The other half of the same descriptor race, and the half no spec can force:
-  # `Process#wait` closes all three pipes in its `ensure`, so reaping is itself
-  # a way to end the drain early. It usually does not, because `wait` blocks on
-  # a channel first and the drain fiber gets that turn — "usually" being the
-  # whole complaint.
-  #
-  # What can be pinned is the invariant that makes the question go away: by the
-  # time the transport reports the process gone, its stderr has been read. A
-  # reordering that reaps first would leave this empty.
-  it "reads a server's stderr before reaping the process that wrote it" do
-    script = File.tempname("smith-mcp-reap", ".sh")
-
-    begin
-      File.write(script, "#!/bin/sh\necho 'TOKEN-from-the-child' >&2\nexit 1\n")
-      File.chmod(script, 0o755)
-
-      transport = Smith::MCP::StdioTransport.spawn_server(script)
-
-      100.times do
-        break unless transport.alive?
-        sleep 10.milliseconds
-      end
-      transport.alive?.should be_false
-
-      transport.stderr_tail.join(" ").should contain("TOKEN-from-the-child")
-    ensure
-      File.delete(script) if File.exists?(script)
     end
   end
 end

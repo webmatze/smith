@@ -173,9 +173,10 @@ module Smith::MCP
     end
 
     # Wait, briefly, for whatever the server wrote to stderr to have been read.
-    # Only stdio has a stderr to drain, and only a transport knows when its
-    # own draining is finished — so the caller that is about to quote
-    # `stderr_tail` asks here rather than guessing with a sleep.
+    # Only stdio has a stderr to drain, and only a transport knows when its own
+    # draining has finished — so `ServerHandle#failure_message`, which is about
+    # to quote `stderr_tail`, asks here rather than guessing with a sleep. An
+    # HTTP transport has nothing to drain and answers at once.
     def await_stderr : Nil
     end
 
@@ -200,12 +201,16 @@ module Smith::MCP
     GRACE = 3.seconds
 
     # How long `close` waits for the stderr drain to reach the end of the pipe
-    # before closing it anyway. It is reached, not waited out: by this point
-    # the process has been signalled and what it wrote is already sitting in
-    # the pipe buffer, so the fiber needs one turn to read it and see EOF. The
-    # cap is for the case where it will not come at all — a process that
-    # survived SIGKILL long enough to hold the write end open — because losing
-    # a server's last words is better than never shutting down.
+    # before closing it anyway. Normally it is reached rather than waited out:
+    # what the process wrote is already in the pipe buffer, and the fiber needs
+    # a turn to read it and see EOF.
+    #
+    # The cap is for the case where the end does not come, which is not a
+    # process outliving SIGKILL — nothing does — but a *second* process holding
+    # the same write end: a grandchild that inherited fd 2 from a wrapper keeps
+    # stderr open long after the server is gone. Waiting for that would be
+    # waiting for something unrelated to finish, so it is bounded, and losing a
+    # server's last words is the better end of that trade.
     STDERR_GRACE = 250.milliseconds
 
     getter stderr_tail : Array(String)
@@ -251,23 +256,19 @@ module Smith::MCP
       @drained = Channel(Nil).new
 
       spawn do
-        # Draining comes first, and this is why: `Process#wait` closes all
-        # three pipes on its way out (`ensure close`), so calling it is what
-        # ends the drain — not by reaching the end of stderr but by pulling
-        # the file descriptor out from under it, discarding whatever the
-        # process wrote and had not been read yet. Two fibers were racing for
-        # the same descriptor, and the winner decided whether a server that
-        # explains itself and exits is quoted or misquoted as silent.
-        #
-        # Waiting here is not a delay: stderr reaches its end when the last
-        # write end closes, which is when the process exits — the same event
-        # `wait` is about to report. It costs a hop, not a wait.
-        #
-        # Nothing deadlocks if the end never comes — a grandchild that
-        # inherited stderr and outlives its parent is the case — because
-        # `close` closes the descriptor itself once its grace runs out, which
-        # ends the drain and releases this fiber to reap.
-        @drained.receive?
+        # `Process#wait` closes all three pipes on its way out (`ensure
+        # close`), so reaping is itself a way to end the drain early — not by
+        # reaching the end of stderr but by taking the descriptor away from it.
+        # Yielding to the drain first closes that window. Capped, and the cap
+        # is the whole design: stderr ends when the *last* write end closes,
+        # and a grandchild that inherited fd 2 — a wrapper that backgrounds
+        # something, a server with a worker — holds it open long after its
+        # parent is gone. Waiting without a bound made reaping wait for a
+        # shutdown that was waiting for the reaping, and only both graces
+        # timing out broke the circle: 6.3 seconds per server, measured.
+        # Bounded, the same wait costs a scheduler turn where the drain can
+        # finish and 250 ms where it never will.
+        await_stderr
         @status = @process.wait
         @done.send(nil)
       end
