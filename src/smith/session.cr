@@ -503,12 +503,15 @@ module Smith::Session
         # last run rather than the lifetime, and copying it meant something
         # smaller and defensible; the meaning changed underneath it.
         #
-        # The cost of starting at zero is named rather than swallowed: a fork's
-        # own `COST` column does not show what its inherited context costs on
-        # the first request. That is an understatement of one request, against
-        # an overstatement of an entire history, and only one of the two can be
-        # summed. The transcript is inherited and the bill for having produced
-        # it stays with the session that paid it.
+        # Nothing is lost by starting at zero, which is worth saying because
+        # the obvious worry is wrong: the fork is not undercharged for the
+        # context it inherited. `build_agent` takes its baseline from this
+        # field, the agent is built with the whole inherited transcript, and
+        # the first response's prompt tokens cover all of it — so re-sending
+        # what it inherited is billed to the fork and lands in its own `COST`
+        # column. What stays with the parent is what the parent spent
+        # *producing* that transcript, which has already been counted once, on
+        # the session that paid it.
         todos: source.todos.dup,
         name: unique_name(source.name.try { |n| "#{n}-fork" }, nil),
         parent_id: source.id
