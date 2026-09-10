@@ -68,22 +68,29 @@ module Smith
       entries.each do |entry|
         agg.sessions += 1
 
-        usage = entry.usage
-        provider = entry.provider
-        model = entry.model
-        next if usage.nil? || provider.nil? || model.nil?
+        # One segment per model the session used — exactly one for a session
+        # that never switched, and for every row written before it could.
+        segments = entry.segments
+        next if segments.empty?
 
+        # Per entry, not per segment: this counts sessions, and a session that
+        # switched models is still one session.
         agg.with_usage += 1
-        agg.prompt_tokens += usage.prompt_tokens
-        agg.completion_tokens += usage.completion_tokens
-        agg.cache_creation_tokens += usage.cache_creation_tokens
-        agg.cache_read_tokens += usage.cache_read_tokens
 
-        key = Pricing.key_for(provider, model)
-        stat = models[key]? || ModelStat.new(provider, model)
-        stat.add(usage, Pricing.estimate(usage, provider, model, overrides))
-        # ModelStat is a struct: write the updated copy back into the hash.
-        models[key] = stat
+        segments.each do |segment|
+          usage = segment.usage
+
+          agg.prompt_tokens += usage.prompt_tokens
+          agg.completion_tokens += usage.completion_tokens
+          agg.cache_creation_tokens += usage.cache_creation_tokens
+          agg.cache_read_tokens += usage.cache_read_tokens
+
+          key = Pricing.key_for(segment.provider, segment.model)
+          stat = models[key]? || ModelStat.new(segment.provider, segment.model)
+          stat.add(usage, Pricing.estimate(usage, segment.provider, segment.model, overrides))
+          # ModelStat is a struct: write the updated copy back into the hash.
+          models[key] = stat
+        end
       end
 
       known = models.values.sum { |s| s.cost || 0.0 }

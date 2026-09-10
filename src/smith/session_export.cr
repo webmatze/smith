@@ -33,6 +33,13 @@ module Smith
       end
     end
 
+    # One model's share of a session, with its price already worked out.
+    record SegmentCost,
+      provider : String,
+      model : String,
+      usage : LLM::Usage,
+      cost : Float64?
+
     class Document
       getter id : String
       getter name : String?
@@ -43,6 +50,14 @@ module Smith
       getter cwd : String?
       getter usage : LLM::Usage?
       getter cost : Float64?
+
+      # One entry per model the session used, priced when the document was
+      # built — a `Document` renders, it does not carry the pricing table.
+      #
+      # A session that never switched has one and it says nothing the header
+      # does not; a session that did is otherwise a total with no way to tell
+      # where it came from.
+      getter usage_segments : Array(SegmentCost) = Array(SegmentCost).new
       getter todos : Array(TodoList::Item)
       getter messages : Array(LLM::Message)
       getter source : Source
@@ -74,6 +89,7 @@ module Smith
         @cwd : String? = nil,
         @usage : LLM::Usage? = nil,
         @cost : Float64? = nil,
+        @usage_segments : Array(SegmentCost) = Array(SegmentCost).new,
         @todos : Array(TodoList::Item) = Array(TodoList::Item).new,
         @transcript_count : Int32? = nil,
         @transcript_skipped : Int32 = 0,
@@ -132,6 +148,21 @@ module Smith
             # point. Same for the cost below.
             json.field("usage") { (usage = @usage) ? usage.to_json(json) : json.null }
             json.field "cost_usd", @cost
+            # Only where it adds something: one segment is the header again.
+            if @usage_segments.size > 1
+              json.field("usage_by_model") do
+                json.array do
+                  @usage_segments.each do |segment|
+                    json.object do
+                      json.field "provider", segment.provider
+                      json.field "model", segment.model
+                      json.field("usage") { segment.usage.to_json(json) }
+                      json.field "cost_usd", segment.cost
+                    end
+                  end
+                end
+              end
+            end
             json.field("todos") { @todos.to_json(json) }
             json.field("messages") { @messages.to_json(json) }
           end
@@ -154,6 +185,18 @@ module Smith
             " completion, " << usage.cached_tokens << " cache\n"
         end
         md << "- **Cost:** " << Pricing.format(@cost) << "\n"
+
+        # A session that switched models has a total that belongs to no single
+        # rate. Saying which stretch was which is the difference between a
+        # figure that can be checked and one that has to be taken on trust.
+        if @usage_segments.size > 1
+          md << "- **By model:**\n"
+          @usage_segments.each do |segment|
+            md << "  - " << segment.provider << "/" << segment.model << ": "
+            md << segment.usage.total_tokens << " tokens, "
+            md << Pricing.format(segment.cost) << "\n"
+          end
+        end
         md << "- **Exported from:** `" << @source.label << "` (" << source_note << ")\n"
         md << "\n_Tool arguments, tool results and thinking are abbreviated to " << ABBREVIATED_CHARS <<
           " characters; `--json` exports the log in full._\n\n"
@@ -232,6 +275,7 @@ module Smith
       provider = data.try(&.provider) || entry.try(&.provider)
       model = data.try(&.model) || entry.try(&.model)
       usage = data.try(&.usage) || entry.try(&.usage)
+      segments = data.try(&.segments) || entry.try(&.segments) || Array(Session::UsageSegment).new
 
       Document.new(
         id: id,
@@ -244,7 +288,15 @@ module Smith
         updated_at: data.try(&.updated_at) || entry.try(&.updated_at),
         cwd: data.try(&.cwd),
         usage: usage,
-        cost: cost_of(usage, provider, model, overrides),
+        cost: Session.cost_of(segments, overrides),
+        usage_segments: segments.map do |segment|
+          SegmentCost.new(
+            provider: segment.provider,
+            model: segment.model,
+            usage: segment.usage,
+            cost: Pricing.estimate(segment.usage, segment.provider, segment.model, overrides)
+          )
+        end,
         todos: data.try(&.todos) || Array(TodoList::Item).new,
         transcript_count: recorded.try(&.size),
         transcript_skipped: skipped_lines,

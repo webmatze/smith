@@ -15,6 +15,67 @@ module Smith::Session
   class NotFound < ArgumentError
   end
 
+  # What one provider/model stretch of a session used. A session that never
+  # switched has exactly one of these; `/model` adds another.
+  #
+  # An array rather than a hash keyed by "provider/model", because a model
+  # name is allowed to contain a slash — `anthropic/claude-sonnet-5` is how
+  # OpenRouter spells one — and a key that cannot be taken apart again is not
+  # a key.
+  struct UsageSegment
+    include JSON::Serializable
+
+    getter provider : String
+    getter model : String
+    getter usage : Smith::LLM::Usage
+
+    def initialize(@provider : String, @model : String, @usage : Smith::LLM::Usage)
+    end
+
+    def same_target?(other : UsageSegment) : Bool
+      Smith::Pricing.key_for(provider, model) == Smith::Pricing.key_for(other.provider, other.model)
+    end
+
+    def +(other : UsageSegment) : UsageSegment
+      UsageSegment.new(provider, model, usage + other.usage)
+    end
+  end
+
+  # Adds two lists of segments together, one entry per provider/model. Used
+  # wherever a run's segments meet the ones a session already had.
+  def self.merge_segments(base : Array(UsageSegment), addition : Array(UsageSegment)) : Array(UsageSegment)
+    result = base.map { |segment| segment }
+
+    addition.each do |segment|
+      if index = result.index { |existing| existing.same_target?(segment) }
+        result[index] = result[index] + segment
+      else
+        result << segment
+      end
+    end
+
+    result
+  end
+
+  # What a list of segments cost, or nil if any one of them cannot be priced.
+  #
+  # nil rather than the sum of the parts that *are* known: a figure that
+  # silently omits one model is worse than no figure, which is the rule
+  # `pricing.cr` is built on. A session priced `n/a` because one stretch ran
+  # on an unknown model is telling the truth about itself.
+  def self.cost_of(segments : Array(UsageSegment), overrides : Smith::Pricing::Overrides? = nil) : Float64?
+    return nil if segments.empty?
+
+    total = 0.0
+    segments.each do |segment|
+      cost = Smith::Pricing.estimate(segment.usage, segment.provider, segment.model, overrides)
+      return nil if cost.nil?
+      total += cost
+    end
+
+    total
+  end
+
   struct IndexEntry
     include JSON::Serializable
 
@@ -34,6 +95,11 @@ module Smith::Session
     getter model : String? = nil
     getter usage : Smith::LLM::Usage? = nil
 
+    # Usage split by the model that incurred it. Absent from every row written
+    # before `/model` could switch one, which is why `segments` below falls
+    # back rather than this being read directly.
+    getter usage_segments : Array(UsageSegment) = Array(UsageSegment).new
+
     def initialize(
       @id : String,
       @created_at : Time,
@@ -45,7 +111,26 @@ module Smith::Session
       @provider : String? = nil,
       @model : String? = nil,
       @usage : Smith::LLM::Usage? = nil,
+      @usage_segments : Array(UsageSegment) = Array(UsageSegment).new,
     )
+    end
+
+    # What to price, in the shape everything downstream wants.
+    #
+    # A row from before this existed has no segments and needs no migration:
+    # it recorded one model and one block of usage, which is exactly one
+    # segment, and reading it as one says precisely what it always said. The
+    # fallback is the whole of the compatibility story — nothing rewrites an
+    # old row until a real turn saves the session anyway.
+    def segments : Array(UsageSegment)
+      return @usage_segments unless @usage_segments.empty?
+
+      provider = @provider
+      model = @model
+      usage = @usage
+      return Array(UsageSegment).new if provider.nil? || model.nil? || usage.nil?
+
+      [UsageSegment.new(provider, model, usage)]
     end
 
     # What to type to get this session back.
@@ -57,12 +142,7 @@ module Smith::Session
     # overrides. nil when the rate is unknown or the entry predates usage
     # tracking — a wrong cost figure is worse than no cost figure.
     def cost(overrides : Smith::Pricing::Overrides? = nil) : Float64?
-      provider = @provider
-      model = @model
-      usage = @usage
-      return nil if provider.nil? || model.nil? || usage.nil?
-
-      Smith::Pricing.estimate(usage, provider, model, overrides)
+      Session.cost_of(segments, overrides)
     end
   end
 
@@ -101,6 +181,14 @@ module Smith::Session
     property messages : Array(Smith::LLM::Message)
     property usage : Smith::LLM::Usage
 
+    # The same total, split by the model that incurred it. `usage` stays the
+    # sum because plenty reads it and none of that wants to know about models
+    # — the split is for pricing, where the rate differs per stretch.
+    #
+    # Empty in a record written before `/model` existed, and in one that has
+    # never run; `segments` is what to read.
+    property usage_segments : Array(UsageSegment) = Array(UsageSegment).new
+
     # Sessions written before the todo tool existed simply have no field. The
     # same goes for name and parent_id: both default so older files load.
     property todos : Array(Smith::TodoList::Item) = Array(Smith::TodoList::Item).new
@@ -133,6 +221,12 @@ module Smith::Session
     @[JSON::Field(ignore: true)]
     property usage_before_run : Smith::LLM::Usage = Smith::LLM::Usage.new(0, 0, 0)
 
+    # The same baseline for the split, taken at the same moment and for the
+    # same reason: the run's segments have to be added to what the session
+    # stood at, not assigned over it.
+    @[JSON::Field(ignore: true)]
+    property segments_before_run : Array(UsageSegment) = Array(UsageSegment).new
+
     def initialize(
       @id : String,
       @cwd : String,
@@ -159,6 +253,21 @@ module Smith::Session
       txt.size > 60 ? "#{txt[0..57]}..." : txt
     end
 
+    # As `IndexEntry#segments`: an old record recorded one model and one block
+    # of usage, and that is one segment.
+    #
+    # A record that has spent nothing gets no segment at all, which matters
+    # more than it looks: this list is what `build_agent` takes as a baseline,
+    # and a zero-token segment for the model a fresh session merely *declares*
+    # would be merged into the run's real ones and reported as a model that
+    # was never asked anything.
+    def segments : Array(UsageSegment)
+      return @usage_segments unless @usage_segments.empty?
+      return Array(UsageSegment).new if @usage.total_tokens.zero?
+
+      [UsageSegment.new(@provider, @model, @usage)]
+    end
+
     def to_index_entry : IndexEntry
       IndexEntry.new(
         id: @id,
@@ -170,7 +279,11 @@ module Smith::Session
         parent_id: @parent_id,
         provider: @provider,
         model: @model,
-        usage: @usage
+        usage: @usage,
+        # The resolved list, not the raw field: a row is written to be read by
+        # `smith stats` and the COST column, and neither should have to know
+        # that a record predating the split spells its one segment differently.
+        usage_segments: segments
       )
     end
 

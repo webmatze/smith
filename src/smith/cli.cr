@@ -816,7 +816,13 @@ module Smith
       # five call sites. A run start, `smith resume`, `smith -c` and the
       # `/resume` inside either loop all reach a new agent through here, and
       # the last of those is the one a baseline taken at process start misses.
-      session_data.try { |data| data.usage_before_run = data.usage }
+      session_data.try do |data|
+        data.usage_before_run = data.usage
+        # Taken here for the same reason and at the same moment as the total
+        # above — the run's split has to be added to what the session already
+        # had, not written over it.
+        data.segments_before_run = data.segments
+      end
 
       agent = Agent.new(
         provider: provider,
@@ -922,7 +928,7 @@ module Smith
       shutdown_bash_jobs
       shutdown_mcp
       persist(session_data, agent)
-      renderer.finish(agent.cumulative_usage, cost_for(provider.name, agent.model, agent.cumulative_usage))
+      renderer.finish(agent.cumulative_usage, run_cost(provider.name, agent))
 
       # A failed provider call must not report success to a calling script.
       exit(renderer.exit_code)
@@ -989,6 +995,16 @@ module Smith
       # it in would count turn one again on turn two, and again on turn three.
       # Against a baseline it is the same answer however often it is written.
       session_data.usage = session_data.usage_before_run + agent.cumulative_usage
+      # The provider comes from the record because `/model` cannot change it:
+      # it switches the model and leaves the client, its key and its
+      # connection alone. The agent therefore counts by model and this is
+      # where the pair is put back together.
+      session_data.usage_segments = Session.merge_segments(
+        session_data.segments_before_run,
+        agent.usage_by_model.map do |model, usage|
+          Session::UsageSegment.new(session_data.provider, model, usage)
+        end
+      )
       session_data.todos = @todos.items
       session_data.context_ratio = agent.context_ratio
       @session_store.save(session_data)
@@ -1067,7 +1083,7 @@ module Smith
       shutdown_bash_jobs
       shutdown_mcp
       persist(session_data, agent)
-      renderer.finish(agent.cumulative_usage, cost_for(session_data.provider, agent.model, agent.cumulative_usage))
+      renderer.finish(agent.cumulative_usage, run_cost(session_data.provider, agent))
       exit(renderer.exit_code)
     end
 
@@ -1231,7 +1247,7 @@ module Smith
             else
               submit(agent, trimmed)
               persist(session_data, agent)
-              if cost = cost_for(session_data.provider, agent.model, agent.cumulative_usage)
+              if cost = run_cost(session_data.provider, agent)
                 app.cost_text = "#{Smith::Pricing.format(cost)}"
               end
               app.turn_finished
@@ -2067,6 +2083,29 @@ module Smith
 
     private def cost_for(provider_name : String, model : String, usage : LLM::Usage) : Float64?
       Pricing.estimate(usage, provider_name, model, @config.pricing)
+    end
+
+    # What the run has cost, priced per stretch rather than all at the model
+    # it happens to have ended on.
+    #
+    # With a budget set the agent has already added it up, per response, at
+    # the rates in force when each one arrived — so reading that is not an
+    # optimisation but the only way the line and `BudgetExceeded` can agree.
+    # They did not, after a switch: one summed per turn and the other priced
+    # the lot at the current model.
+    private def run_cost(provider_name : String, agent : Agent) : Float64?
+      return agent.spent_usd unless @max_budget_usd.nil?
+
+      # Nothing counted yet: there are no segments to price and no model to
+      # blame, so the answer is the one a zero-usage run always gave.
+      return cost_for(provider_name, agent.model, agent.cumulative_usage) if agent.usage_by_model.empty?
+
+      Session.cost_of(
+        agent.usage_by_model.map do |model, usage|
+          Session::UsageSegment.new(provider_name, model, usage)
+        end,
+        @config.pricing
+      )
     end
 
     # A budget without a price for the model in use is not a budget. Saying so

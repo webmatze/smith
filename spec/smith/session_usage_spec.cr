@@ -269,6 +269,68 @@ describe "a session's lifetime usage across resumes" do
     end
   end
 
+  it "prices a session that switched models at both rates, not at the one it ended on" do
+    # #103. `claude-opus-5` and `claude-haiku-4-5` are an order of magnitude
+    # apart, so pricing everything at the model a session happens to end on is
+    # not a rounding error — it is the difference the report exists to show.
+    with_cli do |cli|
+      session = cli.store_for_spec.create(model: "claude-opus-5", provider: "anthropic")
+      agent = cli.build_agent_for_spec(BillingProvider.new, session)
+      # What `-m` decides at startup; the harness's provider would otherwise
+      # answer on its own default and the switch below would be the second of
+      # three models rather than the second of two.
+      agent.model = "claude-opus-5"
+
+      agent.send("expensive turn")
+      agent.model = "claude-haiku-4-5"
+      agent.send("cheap turn")
+      cli.persist_for_spec(session, agent)
+
+      # Two segments, one per model, each with its own half of the tokens.
+      saved = cli.store_for_spec.load(session.id)
+      saved.segments.map(&.model).sort!.should eq(["claude-haiku-4-5", "claude-opus-5"])
+      saved.segments.each(&.usage.total_tokens.should eq(120))
+      # And the total is still the total.
+      saved.usage.total_tokens.should eq(240)
+
+      # The COST column and `smith stats` both price per segment now.
+      entry = cli.store_for_spec.list.find { |row| row.id == session.id }.not_nil!
+      opus = Smith::Pricing.estimate(TURN_USAGE, "anthropic", "claude-opus-5").not_nil!
+      haiku = Smith::Pricing.estimate(TURN_USAGE, "anthropic", "claude-haiku-4-5").not_nil!
+
+      entry.cost.not_nil!.should be_close(opus + haiku, 1e-9)
+      Smith::Stats.aggregate([entry]).cost.not_nil!.should be_close(opus + haiku, 1e-9)
+
+      # The old behaviour, for contrast: everything at the ending model would
+      # have been this, and it is not what is reported any more.
+      ended_on = Smith::Pricing.estimate(saved.usage, "anthropic", "claude-haiku-4-5").not_nil!
+      entry.cost.not_nil!.should_not be_close(ended_on, 1e-9)
+
+      # `smith stats` breaks it down by model rather than filing it under one.
+      by_model = Smith::Stats.aggregate([entry]).by_model
+      by_model.map(&.model).sort!.should eq(["claude-haiku-4-5", "claude-opus-5"])
+      # One session, counted once, however many models it used.
+      Smith::Stats.aggregate([entry]).with_usage.should eq(1)
+    end
+  end
+
+  it "reads a record written before the split as the one model it recorded" do
+    # No migration: an old session file has a total and a model and no
+    # segments, which is exactly one segment, and it prices as it always did.
+    with_cli do |cli|
+      session = cli.store_for_spec.create(model: "claude-opus-5", provider: "anthropic")
+      session.usage = TURN_USAGE
+      session.usage_segments.clear
+      cli.store_for_spec.save(session)
+
+      entry = cli.store_for_spec.list.find { |row| row.id == session.id }.not_nil!
+      expected = Smith::Pricing.estimate(TURN_USAGE, "anthropic", "claude-opus-5").not_nil!
+
+      entry.cost.not_nil!.should be_close(expected, 1e-9)
+      Smith::Stats.aggregate([entry]).by_model.map(&.model).should eq(["claude-opus-5"])
+    end
+  end
+
   it "leaves --max-budget-usd a per-run limit" do
     # The budget runs off `spent_usd`, which the agent counts for itself and
     # which no baseline touches. A resumed session with a long history starts
