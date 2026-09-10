@@ -149,7 +149,15 @@ module Smith::MCP
 
     # Why the stream died, when the transport knows more than "EOF". stdio has
     # nothing to add; an HTTP transport can say which status or which network
-    # error it was. Read once, when the pending callers are abandoned.
+    # error it was.
+    #
+    # It has two readers and both of them publish it: `Client#abandon_pending`
+    # hands it to every caller it gives up on, from where it becomes a tool
+    # result — the model's context, `transcript.jsonl`, every export of the
+    # session — and a transport may raise it again at the next write. There is
+    # no filter between here and any of that, so a transport composing one owes
+    # it: anything taken from `mcp.json` arrives cut back, a url to scheme,
+    # host and port. `HttpTransport#die!` is the worked example.
     def failure_hint : String?
       nil
     end

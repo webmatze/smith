@@ -353,6 +353,13 @@ module Smith::MCP
         # Composed here, not by the server — so it is repeatable as it stands,
         # and saying so keeps the useful reason ("answered HTTP 500") rather
         # than replacing it with the generic stand-in.
+        #
+        # Repeatable is about *authorship*, and it is not the only question a
+        # line has to pass: a message smith composed itself can still quote
+        # `mcp.json`. That second question is answered where the hint is
+        # composed — a transport hands one over already cut back to scheme,
+        # host and port — and not here, so that every reader of it is covered
+        # rather than this one.
         error: RpcError.new(0, reason, safe_message: reason)
       )
 
