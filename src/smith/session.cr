@@ -496,7 +496,25 @@ module Smith::Session
         model: source.model,
         provider: source.provider,
         messages: source.messages.dup,
-        usage: source.usage,
+        # Not copied, and this is the one field that must not be. `usage` is a
+        # lifetime total for *this* session, and `smith stats` sums it over the
+        # rows of the index — so a copied one is the parent's history counted
+        # twice, three times, once per fork. Before #102 the field held the
+        # last run rather than the lifetime, and copying it meant something
+        # smaller and defensible; the meaning changed underneath it.
+        #
+        # Nothing is lost by starting at zero, which is worth saying because
+        # the obvious worry is wrong: the fork is not undercharged for the
+        # context it inherited. `build_agent` takes its baseline from this
+        # field, the agent is built with the whole inherited transcript, and
+        # the first response is billed for all of it — as prompt tokens, or as
+        # cache reads where the parent's cache is still warm, which is the
+        # likely case here because a fork's transcript is byte-identical to
+        # the one the parent already sent. `Pricing.cost` prices both, so
+        # re-sending what it inherited lands in the fork's own `COST` column
+        # either way. What stays with the parent is what the parent spent
+        # *producing* that transcript, which has already been counted once, on
+        # the session that paid it.
         todos: source.todos.dup,
         name: unique_name(source.name.try { |n| "#{n}-fork" }, nil),
         parent_id: source.id

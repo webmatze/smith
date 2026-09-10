@@ -1,5 +1,6 @@
 require "../spec_helper"
 require "../../src/smith/cli"
+require "../../src/smith/stats"
 
 # Bills every turn the same, so a total is a turn count times a constant and a
 # spec can say which run a missing token belongs to. A provider that reported
@@ -233,6 +234,38 @@ describe "a session's lifetime usage across resumes" do
       a_agent.cumulative_usage.total_tokens.should eq(240)
       saved_tokens(cli, b.id).should eq(120)
       indexed_tokens(cli, b.id).should eq(120)
+    end
+  end
+
+  it "gives a fork its own bill, and takes nothing off the session it came from" do
+    # Where #117 meets #102. The store-level spec proves what `fork` writes;
+    # this proves what a *resumed* fork then does with it, which is the seam
+    # the two issues share — the baseline in `build_agent` is read from the
+    # very field `fork` stopped copying.
+    with_cli do |cli|
+      parent, agent = new_session(cli)
+      2.times { |i| agent.send("turn #{i}") }
+      cli.persist_for_spec(parent, agent)
+      saved_tokens(cli, parent.id).should eq(240)
+
+      forked = cli.store_for_spec.fork(parent.id)
+
+      # One run on the fork. Its baseline is its own zero, so what lands is
+      # what this run spent — including re-sending the transcript it inherited,
+      # which is why nothing here is a discount.
+      session, agent = resume(cli, forked.id)
+      agent.send("the other way")
+      cli.persist_for_spec(session, agent)
+
+      saved_tokens(cli, forked.id).should eq(120)
+      indexed_tokens(cli, forked.id).should eq(120)
+
+      # And the parent is untouched by any of it.
+      saved_tokens(cli, parent.id).should eq(240)
+
+      # The whole point: the sum over the index is what was actually spent.
+      rows = cli.store_for_spec.list
+      Smith::Stats.aggregate(rows).total_tokens.should eq(360)
     end
   end
 

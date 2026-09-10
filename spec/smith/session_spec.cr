@@ -1,5 +1,6 @@
 require "../spec_helper"
 require "../../src/smith/session"
+require "../../src/smith/stats"
 
 describe Smith::Session::Store do
   it "creates, saves, lists, and loads sessions atomically" do
@@ -302,6 +303,34 @@ describe "forking a session" do
       store.rename(original.id, "option-a")
 
       store.fork(original.id).name.should eq("option-a-fork")
+    end
+  end
+
+  it "leaves the parent's history with the parent, so the total is still a total" do
+    # `smith stats` sums `usage` over the rows of the index. A fork that
+    # inherited its parent's lifetime total would be that history counted
+    # twice — three times for two forks — and the grand total would exceed
+    # what was ever actually spent.
+    with_store do |store|
+      parent = store.create(model: "claude-sonnet-5", provider: "anthropic")
+      parent.messages << Smith::LLM::Message.user("explore option A")
+      parent.usage = parent.usage + usage(prompt: 200, completion: 40)
+      store.save(parent)
+
+      forked = store.load(store.fork(parent.id).id)
+      forked.usage.total_tokens.should eq(0)
+
+      # A turn on each side, after the split.
+      forked.messages << Smith::LLM::Message.user("option B instead")
+      forked.usage = forked.usage + usage(prompt: 100, completion: 20)
+      store.save(forked)
+
+      parent.usage = parent.usage + usage(prompt: 50, completion: 10)
+      store.save(parent)
+
+      total = Smith::Stats.aggregate(store.list)
+      total.prompt_tokens.should eq(350)
+      total.completion_tokens.should eq(70)
     end
   end
 end
