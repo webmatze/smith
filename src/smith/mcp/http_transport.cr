@@ -27,11 +27,18 @@ module Smith::MCP
     @session_id : String?
     @client : HTTP::Client
 
-    # The only form of the url that is ever written into a message. Built from
-    # the `URI` itself, once, so no message ever holds the whole one — where a
-    # filter run over a finished sentence has to find the url again by shape,
-    # and a query holding a quote, an angle bracket or a space ends the match
-    # early and leaves the rest of it standing.
+    # The only form of the url that is written into a message once this
+    # constructor has returned. Built from the `URI` itself, so no such message
+    # ever holds the whole one — where a filter run over a finished sentence
+    # has to find the url again by shape, and a query holding a quote, an angle
+    # bracket or a space ends the match early and leaves the rest of it
+    # standing.
+    #
+    # The one exception is the constructor's own refusal below, which names the
+    # raw url because a url with no host is exactly what it is reporting and
+    # there is nothing left to call it by. That line reaches `smith mcp list`
+    # and no further: it is cut to `(url)` by the filter in `Manager`, and both
+    # of its callers rescue it, so it cannot become a tool result.
     @safe_url : String
 
     def initialize(
