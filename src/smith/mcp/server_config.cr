@@ -314,9 +314,20 @@ module Smith::MCP
     # variable* is not the same thing as an absent one to the program reading
     # it: an empty `PYTHONPATH` puts the working directory on the import path,
     # an empty `PATH` or `HOME` is a different program than no `PATH` or
-    # `HOME`. Today the warning is the whole defence, and the value the child
-    # would otherwise have inherited is still there behind it. Under #109's
-    # `clear_env` it will not be, and the choice deserves revisiting there.
+    # `HOME`.
+    #
+    # The warning is the whole defence, and there is nothing behind it: an
+    # explicit entry *overrides* what the child would have inherited, so an
+    # empty expansion does not fall back to the inherited value, it replaces
+    # it. `clear_env` will not change that — what `clear_env` takes away is
+    # the fallback for a variable no entry names at all, which is a different
+    # hazard. This one is already as sharp as it is going to get.
+    #
+    # If it is ever traded the other way, the alternative is cheap and worth
+    # not rediscovering: `Process` reads a nil value as "leave this variable
+    # unset", so dropping the key costs widening `ServerSpec#env` to
+    # `Hash(String, String?)` and nothing else — `spawn_server` passes the map
+    # straight through.
     #
     # There is no escape: a value that wants a literal `${NAME}` cannot have
     # one, `$$` and a backslash included. Inherited from headers rather than
