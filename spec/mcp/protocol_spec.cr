@@ -80,6 +80,13 @@ describe Smith::MCP::StdioTransport do
   # yield, which is what `smith doctor` asks for; any yield in there would hand
   # the fiber a turn by accident and the spec would pass for a reason that has
   # nothing to do with the fix.
+  #
+  # What it guards, precisely, because the two halves are not guarded equally:
+  # removing the wait in `close` makes this red every time. Removing the one in
+  # the reaper makes it red about two runs in three — bounding that wait is
+  # what made it probabilistic, and there is no honest way to write "two in
+  # three" as an assertion. So the reaper's half rests on the measurement in
+  # the commit that introduced it, and on this spec only as far as it goes.
   it "keeps what a server wrote to stderr when nothing has drained it yet" do
     script = File.tempname("smith-mcp-lastwords", ".sh")
     written = File.tempname("smith-mcp-lastwords", ".written")

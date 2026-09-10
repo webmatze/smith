@@ -200,8 +200,10 @@ module Smith::MCP
     # Time a terminated server gets to exit before it is killed outright.
     GRACE = 3.seconds
 
-    # How long `close` waits for the stderr drain to reach the end of the pipe
-    # before closing it anyway. Normally it is reached rather than waited out:
+    # How long anyone waits for the stderr drain to reach the end of the pipe
+    # before giving up on it — the reaper before it calls `wait`, `close`
+    # before it closes the descriptor, and `ServerHandle#failure_message`
+    # before it quotes the tail. Normally it is reached rather than waited out:
     # what the process wrote is already in the pipe buffer, and the fiber needs
     # a turn to read it and see EOF.
     #
@@ -259,8 +261,11 @@ module Smith::MCP
         # `Process#wait` closes all three pipes on its way out (`ensure
         # close`), so reaping is itself a way to end the drain early — not by
         # reaching the end of stderr but by taking the descriptor away from it.
-        # Yielding to the drain first closes that window. Capped, and the cap
-        # is the whole design: stderr ends when the *last* write end closes,
+        # Yielding to the drain first closes that window for as long as the cap
+        # below lasts, which is where a server that writes and exits lives —
+        # afterwards this fiber sits in `wait` and the old race is back, and
+        # `close` is what covers it from there. Capped, and the cap is the
+        # whole design: stderr ends when the *last* write end closes,
         # and a grandchild that inherited fd 2 — a wrapper that backgrounds
         # something, a server with a worker — holds it open long after its
         # parent is gone. Waiting without a bound made reaping wait for a
