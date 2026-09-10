@@ -37,6 +37,50 @@ describe Smith::MCP::ServerConfig do
       spec.stdio?.should be_true
     end
 
+    it "expands environment variables in env values, as headers already did" do
+      ENV["SMITH_MCP_TEST_ENV_TOKEN"] = "env-secret-42"
+
+      begin
+        spec = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"x": {"command": "c", "env": {"GITHUB_TOKEN": "${SMITH_MCP_TEST_ENV_TOKEN}"}}}}), "mcp.json", IO::Memory.new).first
+        spec.env.should eq({"GITHUB_TOKEN" => "env-secret-42"})
+      ensure
+        ENV.delete("SMITH_MCP_TEST_ENV_TOKEN")
+      end
+    end
+
+    it "expands a variable in the middle of an env value, not only alone" do
+      ENV["SMITH_MCP_TEST_HOST"] = "example.com"
+
+      begin
+        spec = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"x": {"command": "c", "env": {"ENDPOINT": "https://${SMITH_MCP_TEST_HOST}/v1"}}}}), "mcp.json", IO::Memory.new).first
+        spec.env.should eq({"ENDPOINT" => "https://example.com/v1"})
+      ensure
+        ENV.delete("SMITH_MCP_TEST_HOST")
+      end
+    end
+
+    it "warns about an unset env variable rather than passing the literal ${...}" do
+      # A server handed `${GITHUB_TOKEN}` as its token fails somewhere far from
+      # the cause. Empty is not better, but it is honest, and the warning says
+      # which entry to look at.
+      specs = [] of Smith::MCP::ServerSpec
+      warnings = capture do |io|
+        specs = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"x": {"command": "c", "env": {"GITHUB_TOKEN": "${SMITH_MCP_MISSING_ENV}"}}}}), "mcp.json", io)
+      end
+
+      specs.first.env["GITHUB_TOKEN"].should eq("")
+      warnings.should contain("SMITH_MCP_MISSING_ENV")
+      warnings.should contain("not set")
+      warnings.should contain("env 'GITHUB_TOKEN'")
+    end
+
+    it "leaves an env value with no ${...} exactly as written" do
+      # The dollar sign is legal in a value and common in one. Only the full
+      # `${NAME}` shape is a reference; nothing else is touched.
+      spec = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"x": {"command": "c", "env": {"PS1": "$ ", "COST": "$5", "RAW": "${not-a-name}"}}}}), "mcp.json", IO::Memory.new).first
+      spec.env.should eq({"PS1" => "$ ", "COST" => "$5", "RAW" => "${not-a-name}"})
+    end
+
     it "stringifies non-string env values, which real configs contain" do
       spec = Smith::MCP::ServerConfig.parse(%({"mcpServers": {"x": {"command": "c", "env": {"PORT": 8080, "DEBUG": true}}}}), "mcp.json", IO::Memory.new).first
       spec.env.should eq({"PORT" => "8080", "DEBUG" => "true"})

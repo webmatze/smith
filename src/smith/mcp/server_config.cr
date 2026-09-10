@@ -229,7 +229,7 @@ module Smith::MCP
         name: name,
         command: command,
         args: fields["args"]?.try(&.as_a?).try(&.compact_map(&.as_s?)) || Array(String).new,
-        env: string_map(fields["env"]?),
+        env: expand_env(fields["env"]?, name, warn_io),
         source: source
       )
     end
@@ -269,33 +269,55 @@ module Smith::MCP
         text = entry.as_s?
         next if text.nil?
 
-        result[key] = text.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/) do |match|
-          found = ENV[$1]?
-          if found.nil?
-            warn_io.puts "⚠️  MCP server '#{server}': header '#{key}' references #{match}, which is not set in the environment — sending it empty."
-            ""
-          else
-            found
-          end
-        end
+        result[key] = expand_vars(text, server, "header '#{key}'", warn_io)
       end
 
       result
     end
 
-    private def self.string_map(value : JSON::Any?) : Hash(String, String)
+    # The same for a stdio server's `env`, because the reason is the same one:
+    # a secret belongs in the environment and not in a file that gets
+    # committed. Until this, `headers` understood `${VAR}` and `env` two
+    # methods away did not, so the only ways to give a child process a token
+    # were to write it in plainly or to leave it to inherit smith's entire
+    # environment — the second of which is what #109 exists to stop, and
+    # cannot be stopped while there is no other way to pass one deliberately.
+    private def self.expand_env(value : JSON::Any?, server : String, warn_io : IO) : Hash(String, String)
       result = Hash(String, String).new
       table = value.try(&.as_h?)
       return result if table.nil?
 
       table.each do |key, entry|
         # Numbers and booleans appear in real configs (ports, flags); they mean
-        # the obvious thing as an environment variable.
-        text = entry.as_s? || entry.raw.try(&.to_s)
-        result[key] = text if text
+        # the obvious thing as an environment variable. Only a string is
+        # expanded, because only a string can hold a `${VAR}` to begin with:
+        # `8080` is a port, not a reference to anything.
+        if text = entry.as_s?
+          result[key] = expand_vars(text, server, "env '#{key}'", warn_io)
+        elsif raw = entry.raw.try(&.to_s)
+          result[key] = raw
+        end
       end
 
       result
+    end
+
+    # One implementation for both, so a `${VAR}` cannot come to mean two
+    # different things depending on which half of an entry it was written in.
+    #
+    # `what` names the place rather than the kind, because a header and an env
+    # entry are both `key: value` and which one it was is the first thing
+    # somebody reading the warning needs to know.
+    private def self.expand_vars(text : String, server : String, what : String, warn_io : IO) : String
+      text.gsub(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/) do |match|
+        found = ENV[$1]?
+        if found.nil?
+          warn_io.puts "⚠️  MCP server '#{server}': #{what} references #{match}, which is not set in the environment — using an empty value."
+          ""
+        else
+          found
+        end
+      end
     end
   end
 end
