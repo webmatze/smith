@@ -216,6 +216,21 @@ module Smith::MCP
 
       parts = [base]
 
+      # Asked for here rather than assumed: the tail is filled by a fiber of
+      # the transport's own, and this is the line that quotes it. It is
+      # normally already complete, because the route to this point runs
+      # through `connect`'s rescue, which closes the transport — and closing
+      # is what waits. Relying on that would make an ordering two files apart
+      # load-bearing and silent; asking costs nothing when the answer is
+      # already in, and is the difference between a server quoted and a server
+      # misquoted as silent when it is not.
+      #
+      # Below the `with_server_output` guard on purpose: the summary form does
+      # not quote stderr, so `smith doctor` — which reads only that form, and
+      # builds its servers with no grace precisely because it cannot wait —
+      # does not pay for a wait whose result it would discard.
+      @transport.try(&.await_stderr)
+
       tail = stderr_tail.last(3).map(&.strip).reject(&.empty?)
       parts << "(stderr: #{tail.join(" / ")})" unless tail.empty?
 

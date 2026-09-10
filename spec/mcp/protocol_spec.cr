@@ -62,3 +62,72 @@ describe Smith::MCP::Message do
     Smith::MCP::Message.parse("[1,2,3]").should be_nil
   end
 end
+
+describe Smith::MCP::StdioTransport do
+  # A server's complaint on stderr is the whole answer to "why will this not
+  # start", and closing the transport is what lost it: the bytes sit in the
+  # pipe until the drain fiber reads them, and closing the read end throws
+  # away whatever is still there. Whether anything survived came down to
+  # whether that fiber had been given a turn since the bytes arrived, which is
+  # why the loss showed up as an occasional red CI job rather than as a
+  # missing feature.
+  #
+  # Racing for that state would be the same coin toss, so it is built instead.
+  # The child is watched to the point where it has written — before the
+  # transport, and therefore before the drain fiber, exists at all, which is
+  # what makes waiting here safe: there is nothing yet that could drain it.
+  # `grace: 0` then leaves `close` with nothing to wait for and so no reason to
+  # yield, which is what `smith doctor` asks for; any yield in there would hand
+  # the fiber a turn by accident and the spec would pass for a reason that has
+  # nothing to do with the fix.
+  #
+  # What it guards, precisely, because the two halves are not guarded equally:
+  # removing the wait in `close` makes this red every time. Removing the one in
+  # the reaper makes it red about two runs in three — bounding that wait is
+  # what made it probabilistic, and there is no honest way to write "two in
+  # three" as an assertion. So the reaper's half rests on the measurement in
+  # the commit that introduced it, and on this spec only as far as it goes.
+  it "keeps what a server wrote to stderr when nothing has drained it yet" do
+    script = File.tempname("smith-mcp-lastwords", ".sh")
+    written = File.tempname("smith-mcp-lastwords", ".written")
+    process = nil
+
+    begin
+      File.write(script, <<-SH)
+        #!/bin/sh
+        echo 'TOKEN-from-the-child' >&2
+        touch "#{written}"
+        exit 1
+        SH
+      File.chmod(script, 0o755)
+
+      process = Process.new(
+        script,
+        shell: false,
+        input: Process::Redirect::Pipe,
+        output: Process::Redirect::Pipe,
+        error: Process::Redirect::Pipe
+      )
+
+      100.times do
+        break if File.exists?(written)
+        sleep 10.milliseconds
+      end
+      File.exists?(written).should be_true
+
+      transport = Smith::MCP::StdioTransport.new(process, grace: Time::Span.zero)
+      transport.close
+
+      transport.stderr_tail.join(" ").should contain("TOKEN-from-the-child")
+    ensure
+      # The assertion above can fail before `close` has run, and a child that
+      # nothing signals outlives the spec run.
+      process.try do |running|
+        running.terminate rescue nil
+        running.wait rescue nil
+      end
+      File.delete(script) if File.exists?(script)
+      File.delete(written) if File.exists?(written)
+    end
+  end
+end
