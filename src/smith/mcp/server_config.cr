@@ -308,6 +308,7 @@ module Smith::MCP
     # `what` names the place rather than the kind, because a header and an env
     # entry are both `key: value` and which one it was is the first thing
     # somebody reading the warning needs to know.
+    #
     # An unset variable becomes empty rather than being dropped, which the
     # issue asked for and which is worth a note, because the two halves are
     # not equally harmless. An empty header is inert. An empty *environment
@@ -323,11 +324,17 @@ module Smith::MCP
     # the fallback for a variable no entry names at all, which is a different
     # hazard. This one is already as sharp as it is going to get.
     #
-    # If it is ever traded the other way, the alternative is cheap and worth
-    # not rediscovering: `Process` reads a nil value as "leave this variable
-    # unset", so dropping the key costs widening `ServerSpec#env` to
-    # `Hash(String, String?)` and nothing else — `spawn_server` passes the map
-    # straight through.
+    # If it is ever traded the other way, the shape of the alternative is
+    # worth not rediscovering. `Process` reads a nil value as "leave this
+    # variable unset", and does it properly: a nil drops an *inherited* value
+    # too, so all three states — set, set-empty, absent — are reachable.
+    # Dropping the key costs widening `ServerSpec#env` and `spawn_server`'s
+    # signature to `Hash(String, String?)`, its body already passing the map
+    # straight through — plus the part that is not typing: `expand_vars`
+    # returns a `String` and so cannot say "this whole value was one unset
+    # reference". Only a value that is nothing else could become nil;
+    # `"a${UNSET}b"` has to stay a string. That decision is the work, not the
+    # signatures.
     #
     # There is no escape: a value that wants a literal `${NAME}` cannot have
     # one, `$$` and a backslash included. Inherited from headers rather than
