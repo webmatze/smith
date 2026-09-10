@@ -172,6 +172,13 @@ module Smith::MCP
       nil
     end
 
+    # Wait, briefly, for whatever the server wrote to stderr to have been read.
+    # Only stdio has a stderr to drain, and only a transport knows when its
+    # own draining is finished — so the caller that is about to quote
+    # `stderr_tail` asks here rather than guessing with a sleep.
+    def await_stderr : Nil
+    end
+
     # A subprocess's own stderr, kept so a failed handshake can say what the
     # process actually complained about. Only stdio has one.
     def stderr_tail : Array(String)
@@ -191,6 +198,15 @@ module Smith::MCP
 
     # Time a terminated server gets to exit before it is killed outright.
     GRACE = 3.seconds
+
+    # How long `close` waits for the stderr drain to reach the end of the pipe
+    # before closing it anyway. It is reached, not waited out: by this point
+    # the process has been signalled and what it wrote is already sitting in
+    # the pipe buffer, so the fiber needs one turn to read it and see EOF. The
+    # cap is for the case where it will not come at all — a process that
+    # survived SIGKILL long enough to hold the write end open — because losing
+    # a server's last words is better than never shutting down.
+    STDERR_GRACE = 250.milliseconds
 
     getter stderr_tail : Array(String)
 
@@ -228,8 +244,30 @@ module Smith::MCP
     def initialize(@process : Process, @grace : Time::Span = GRACE)
       @stderr_tail = Array(String).new
       @done = Channel(Nil).new(1)
+      # Closed rather than sent to: the end of the drain is a fact, not a
+      # message, and every later reader has to be able to observe it. A send
+      # would be taken by whoever asked first and leave the next caller
+      # waiting out the cap for something that already happened.
+      @drained = Channel(Nil).new
 
       spawn do
+        # Draining comes first, and this is why: `Process#wait` closes all
+        # three pipes on its way out (`ensure close`), so calling it is what
+        # ends the drain — not by reaching the end of stderr but by pulling
+        # the file descriptor out from under it, discarding whatever the
+        # process wrote and had not been read yet. Two fibers were racing for
+        # the same descriptor, and the winner decided whether a server that
+        # explains itself and exits is quoted or misquoted as silent.
+        #
+        # Waiting here is not a delay: stderr reaches its end when the last
+        # write end closes, which is when the process exits — the same event
+        # `wait` is about to report. It costs a hop, not a wait.
+        #
+        # Nothing deadlocks if the end never comes — a grandchild that
+        # inherited stderr and outlives its parent is the case — because
+        # `close` closes the descriptor itself once its grace runs out, which
+        # ends the drain and releases this fiber to reap.
+        @drained.receive?
         @status = @process.wait
         @done.send(nil)
       end
@@ -242,6 +280,8 @@ module Smith::MCP
           end
         rescue IO::Error
           # The process is gone; nothing left to drain.
+        ensure
+          @drained.close
         end
       end
     end
@@ -263,6 +303,15 @@ module Smith::MCP
       nil
     end
 
+    # The drain fiber is done, or the cap ran out. A closed channel answers
+    # every caller and answers again, so asking twice costs nothing.
+    def await_stderr : Nil
+      select
+      when @drained.receive?
+      when timeout(STDERR_GRACE)
+      end
+    end
+
     # SIGTERM, then SIGKILL. Both are needed: a server that ignores TERM would
     # otherwise be left behind as an orphan holding whatever it opened.
     def close : Nil
@@ -276,6 +325,17 @@ module Smith::MCP
         signal(Signal::KILL) unless exited?(@grace)
         exited?(@grace)
       end
+
+      # Before the read end goes, not after: what the process wrote is in the
+      # pipe buffer, and closing this side discards whatever has not been read
+      # yet. A server that fails by writing to stderr and exiting at once —
+      # the commonest way a misconfigured one fails — writes its explanation
+      # into that buffer and dies before smith's first write returns, so the
+      # drain fiber may not have been scheduled even once. Closing here first
+      # is what threw the explanation away, and only sometimes: whether the
+      # fiber got a turn depended on whether the write blocked, which is why
+      # it read as a flake rather than as the loss it is.
+      await_stderr
 
       close_pipe(@process.output)
       close_pipe(@process.error)

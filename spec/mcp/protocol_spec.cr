@@ -62,3 +62,88 @@ describe Smith::MCP::Message do
     Smith::MCP::Message.parse("[1,2,3]").should be_nil
   end
 end
+
+describe Smith::MCP::StdioTransport do
+  # A server's complaint on stderr is the whole answer to "why will this not
+  # start", and closing the transport is what lost it: the bytes sit in the
+  # pipe until the drain fiber reads them, and closing the read end throws
+  # away whatever is still there. Whether anything survived came down to
+  # whether that fiber had been given a turn since the bytes arrived, which is
+  # why the loss showed up as an occasional red CI job rather than as a
+  # missing feature.
+  #
+  # Racing for that state would be the same coin toss, so it is built instead.
+  # The child is watched to the point where it has written — before the
+  # transport, and therefore before the drain fiber, exists at all, which is
+  # what makes waiting here safe: there is nothing yet that could drain it.
+  # `grace: 0` then leaves `close` with nothing to wait for and so no reason to
+  # yield, which is what `smith doctor` asks for; any yield in there would hand
+  # the fiber a turn by accident and the spec would pass for a reason that has
+  # nothing to do with the fix.
+  it "keeps what a server wrote to stderr when nothing has drained it yet" do
+    script = File.tempname("smith-mcp-lastwords", ".sh")
+    written = File.tempname("smith-mcp-lastwords", ".written")
+
+    begin
+      File.write(script, <<-SH)
+        #!/bin/sh
+        echo 'TOKEN-from-the-child' >&2
+        touch "#{written}"
+        exit 1
+        SH
+      File.chmod(script, 0o755)
+
+      process = Process.new(
+        script,
+        shell: false,
+        input: Process::Redirect::Pipe,
+        output: Process::Redirect::Pipe,
+        error: Process::Redirect::Pipe
+      )
+
+      100.times do
+        break if File.exists?(written)
+        sleep 10.milliseconds
+      end
+      File.exists?(written).should be_true
+
+      transport = Smith::MCP::StdioTransport.new(process, grace: Time::Span.zero)
+      transport.close
+
+      transport.stderr_tail.join(" ").should contain("TOKEN-from-the-child")
+    ensure
+      File.delete(script) if File.exists?(script)
+      File.delete(written) if File.exists?(written)
+    end
+  end
+
+  # The other half of the same descriptor race, and the half no spec can force:
+  # `Process#wait` closes all three pipes in its `ensure`, so reaping is itself
+  # a way to end the drain early. It usually does not, because `wait` blocks on
+  # a channel first and the drain fiber gets that turn — "usually" being the
+  # whole complaint.
+  #
+  # What can be pinned is the invariant that makes the question go away: by the
+  # time the transport reports the process gone, its stderr has been read. A
+  # reordering that reaps first would leave this empty.
+  it "reads a server's stderr before reaping the process that wrote it" do
+    script = File.tempname("smith-mcp-reap", ".sh")
+
+    begin
+      File.write(script, "#!/bin/sh\necho 'TOKEN-from-the-child' >&2\nexit 1\n")
+      File.chmod(script, 0o755)
+
+      transport = Smith::MCP::StdioTransport.spawn_server(script)
+
+      100.times do
+        break unless transport.alive?
+        sleep 10.milliseconds
+      end
+      transport.alive?.should be_false
+
+      transport.stderr_tail.join(" ").should contain("TOKEN-from-the-child")
+    ensure
+      File.delete(script) if File.exists?(script)
+    end
+  end
+end
