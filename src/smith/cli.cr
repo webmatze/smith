@@ -2097,11 +2097,11 @@ module Smith
     # What the run has cost, priced per stretch rather than all at the model
     # it happens to have ended on.
     #
-    # With a budget set the agent has already added it up, per response, at
-    # the rates in force when each one arrived — so reading that is not an
-    # optimisation but the only way the line and `BudgetExceeded` can agree.
-    # They did not, after a switch: one summed per turn and the other priced
-    # the lot at the current model.
+    # This and `BudgetExceeded` disagreed after a switch: one summed per turn
+    # at the rates in force, the other priced the whole run at the model it
+    # had arrived at. Pricing per stretch settles that from this side — see
+    # below for why it is done here rather than by reading the agent's own
+    # total, which was the obvious way to make them agree and the wrong one.
     private def run_cost(provider_name : String, agent : Agent) : Float64?
       # Nothing counted yet: no segments to price and no model to blame, so
       # the answer is the one a zero-usage run always gave.
