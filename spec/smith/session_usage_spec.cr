@@ -44,6 +44,10 @@ class Smith::CLI
     build_agent(provider, session_data)
   end
 
+  def switch_model_for_spec(session_data : Smith::Session::Data, agent : Smith::Agent, name : String) : Nil
+    switch_model(session_data, agent, name)
+  end
+
   def persist_for_spec(session_data : Smith::Session::Data, agent : Smith::Agent) : Nil
     persist(session_data, agent)
   end
@@ -328,6 +332,83 @@ describe "a session's lifetime usage across resumes" do
 
       entry.cost.not_nil!.should be_close(expected, 1e-9)
       Smith::Stats.aggregate([entry]).by_model.map(&.model).should eq(["claude-opus-5"])
+    end
+  end
+
+  it "reads a pre-#103 index written on disk exactly as it always did" do
+    # The fallback that matters is `IndexEntry`'s: `smith stats` and the COST
+    # column read the index, not the session file, and a real installation's
+    # index.json has no `usage_segments` at all. Written out by hand rather
+    # than produced by this build, which could only ever write the new shape.
+    with_cli do |cli|
+      dir = cli.store_for_spec.sessions_dir
+      Dir.mkdir_p(dir)
+
+      File.write(File.join(dir, "index.json"), <<-JSON)
+      [{"id":"session-old","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",
+        "first_prompt":"before the split","message_count":2,
+        "provider":"anthropic","model":"claude-opus-5",
+        "usage":{"prompt_tokens":100000,"completion_tokens":20000,"total_tokens":120000}}]
+      JSON
+
+      entry = cli.store_for_spec.list.find { |row| row.id == "session-old" }.not_nil!
+      expected = Smith::Pricing.estimate(entry.usage.not_nil!, "anthropic", "claude-opus-5").not_nil!
+
+      entry.segments.size.should eq(1)
+      entry.cost.not_nil!.should be_close(expected, 1e-9)
+
+      agg = Smith::Stats.aggregate([entry])
+      agg.cost.not_nil!.should be_close(expected, 1e-9)
+      agg.by_model.map(&.model).should eq(["claude-opus-5"])
+      agg.total_tokens.should eq(120_000)
+    end
+  end
+
+  it "keeps a lifetime whole when the provider reported no total_tokens" do
+    # `total_tokens` is whatever the provider said, and three of the four
+    # adapters default it to 0 when the key is missing. Testing emptiness
+    # against it would have thrown a real history away on the next turn — and
+    # unrecoverably, since the next baseline reads the truncated list.
+    with_cli do |cli|
+      session = cli.store_for_spec.create(model: "claude-opus-5", provider: "anthropic")
+      session.usage = Smith::LLM::Usage.new(100_000, 20_000, 0)
+      cli.store_for_spec.save(session)
+
+      resumed, agent = resume(cli, session.id)
+      agent.send("one more")
+      cli.persist_for_spec(resumed, agent)
+
+      saved = cli.store_for_spec.load(session.id)
+      saved.segments.sum(&.usage.billed_prompt_tokens).should eq(100_100)
+      saved.segments.sum(&.usage.completion_tokens).should eq(20_020)
+    end
+  end
+
+  it "does not re-attribute an old session's history to the model it switches to" do
+    # A record from before the split derives its one segment from `model`. If
+    # `/model` moved that field first, everything the session ever spent would
+    # be re-read as the new model's — #103's own bug, arriving through the
+    # door of the feature that motivated it.
+    with_cli do |cli|
+      session = cli.store_for_spec.create(model: "claude-opus-5", provider: "anthropic")
+      session.usage = Smith::LLM::Usage.new(100_000, 20_000, 120_000)
+      session.usage_segments.clear
+      cli.store_for_spec.save(session)
+
+      before = cli.store_for_spec.list.find { |row| row.id == session.id }.not_nil!.cost.not_nil!
+
+      loaded = cli.store_for_spec.load(session.id)
+      agent = cli.build_agent_for_spec(BillingProvider.new, loaded)
+      cli.switch_model_for_spec(loaded, agent, "claude-haiku-4-5")
+      cli.store_for_spec.save(loaded)
+
+      after = cli.store_for_spec.list.find { |row| row.id == session.id }.not_nil!.cost.not_nil!
+      after.should be_close(before, 1e-9)
+
+      # And it stays put across a reload, rather than being re-derived wrong.
+      reloaded = cli.store_for_spec.load(session.id)
+      reloaded.segments.map(&.model).should eq(["claude-opus-5"])
+      reloaded.model.should eq("claude-haiku-4-5")
     end
   end
 

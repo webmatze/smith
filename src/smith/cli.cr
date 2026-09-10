@@ -1398,6 +1398,15 @@ module Smith
       previous = agent.model
       agent.model = name
 
+      # Settle the split *before* the model moves. A record written before
+      # #103 carries no segments and derives its one from `model` — so
+      # overwriting `model` first would silently re-attribute everything the
+      # session ever spent to the model it is switching *to*, which is the
+      # very error #103 exists to remove, arriving through the door of the
+      # feature that motivated it. Once written down, the past cannot be
+      # re-read.
+      session_data.usage_segments = session_data.segments
+
       # Persisted as well as applied, so `smith resume` comes back on the new
       # model — the index row is rebuilt from this same field on save.
       session_data.model = name
@@ -2094,12 +2103,18 @@ module Smith
     # They did not, after a switch: one summed per turn and the other priced
     # the lot at the current model.
     private def run_cost(provider_name : String, agent : Agent) : Float64?
-      return agent.spent_usd unless @max_budget_usd.nil?
-
-      # Nothing counted yet: there are no segments to price and no model to
-      # blame, so the answer is the one a zero-usage run always gave.
+      # Nothing counted yet: no segments to price and no model to blame, so
+      # the answer is the one a zero-usage run always gave.
       return cost_for(provider_name, agent.model, agent.cumulative_usage) if agent.usage_by_model.empty?
 
+      # Priced from the segments rather than read off `Agent#spent_usd`, which
+      # the issue offered as the shortcut. Where both are defined they agree —
+      # same rates, same responses, only grouped differently — so the
+      # disagreement with `BudgetExceeded` that #103 names is gone either way.
+      # Where they differ, `spent_usd` is the wrong one to show: it is the
+      # enforcement figure, and enforcement deliberately counts a stretch with
+      # no known rate as nothing. Printing that as a *cost* would answer
+      # "unknown" with "free", against the rule `output.cr` states outright.
       Session.cost_of(
         agent.usage_by_model.map do |model, usage|
           Session::UsageSegment.new(provider_name, model, usage)

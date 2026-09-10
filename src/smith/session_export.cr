@@ -275,7 +275,11 @@ module Smith
       provider = data.try(&.provider) || entry.try(&.provider)
       model = data.try(&.model) || entry.try(&.model)
       usage = data.try(&.usage) || entry.try(&.usage)
-      segments = data.try(&.segments) || entry.try(&.segments) || Array(Session::UsageSegment).new
+      # `||` cannot do this: an empty array is truthy, so a session file that
+      # simply has not spent anything would stop the chain and hide the index
+      # row behind it — which turned a `$0.00` export into `n/a`.
+      segments = data.try(&.segments) || Array(Session::UsageSegment).new
+      segments = entry.try(&.segments) || Array(Session::UsageSegment).new if segments.empty?
 
       Document.new(
         id: id,
@@ -319,12 +323,6 @@ module Smith
       raise ex unless TranscriptLog.new(store.session_dir(candidate)).exists?
 
       candidate
-    end
-
-    private def self.cost_of(usage : LLM::Usage?, provider : String?, model : String?, overrides : Pricing::Overrides?) : Float64?
-      return nil if usage.nil? || provider.nil? || model.nil?
-
-      Pricing.estimate(usage, provider, model, overrides)
     end
 
     private def self.load_session(store : Session::Store, id : String, warnings : Array(String)) : Session::Data?

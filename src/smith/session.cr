@@ -123,7 +123,7 @@ module Smith::Session
     # fallback is the whole of the compatibility story — nothing rewrites an
     # old row until a real turn saves the session anyway.
     def segments : Array(UsageSegment)
-      return @usage_segments unless @usage_segments.empty?
+      return @usage_segments.dup unless @usage_segments.empty?
 
       provider = @provider
       model = @model
@@ -262,8 +262,11 @@ module Smith::Session
     # would be merged into the run's real ones and reported as a model that
     # was never asked anything.
     def segments : Array(UsageSegment)
-      return @usage_segments unless @usage_segments.empty?
-      return Array(UsageSegment).new if @usage.total_tokens.zero?
+      # A copy: `build_agent` parks this as a baseline and `persist` merges
+      # against it, and neither should be able to reach back into the record
+      # it came from.
+      return @usage_segments.dup unless @usage_segments.empty?
+      return Array(UsageSegment).new if @usage.empty?
 
       [UsageSegment.new(@provider, @model, @usage)]
     end
