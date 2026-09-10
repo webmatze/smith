@@ -291,7 +291,7 @@ An unknown model shows `n/a`, never a guess — the same rule as the live cost c
 
 A derived name that would collide gets a counter (`fix-the-tests-2`); renaming onto a name another session already holds is refused rather than silently allowed. Sessions saved before names existed keep loading — they simply have none, and `smith resume <id>` still works.
 
-`smith fork` copies the transcript under a new id and records where it came from. Useful when a conversation reaches a fork in the road: keep the original, try the other way in the copy. Checkpoints stay with the session that made them.
+`smith fork` copies the transcript under a new id and records where it came from. Useful when a conversation reaches a fork in the road: keep the original, try the other way in the copy. Checkpoints stay with the session that made them, and so does the bill: a fork starts its own cost at zero rather than inheriting what the original spent, so the total across `smith stats` stays a total however often you fork. The copy's own `COST` column therefore understates its first request, which pays for the inherited context — the alternative was counting an entire history once per fork.
 
 Sessions grow without limit — each one is a directory holding the transcript, checkpoints, bash logs and attached media — until you say otherwise:
 

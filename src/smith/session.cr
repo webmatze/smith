@@ -496,7 +496,19 @@ module Smith::Session
         model: source.model,
         provider: source.provider,
         messages: source.messages.dup,
-        usage: source.usage,
+        # Not copied, and this is the one field that must not be. `usage` is a
+        # lifetime total for *this* session, and `smith stats` sums it over the
+        # rows of the index — so a copied one is the parent's history counted
+        # twice, three times, once per fork. Before #102 the field held the
+        # last run rather than the lifetime, and copying it meant something
+        # smaller and defensible; the meaning changed underneath it.
+        #
+        # The cost of starting at zero is named rather than swallowed: a fork's
+        # own `COST` column does not show what its inherited context costs on
+        # the first request. That is an understatement of one request, against
+        # an overstatement of an entire history, and only one of the two can be
+        # summed. The transcript is inherited and the bill for having produced
+        # it stays with the session that paid it.
         todos: source.todos.dup,
         name: unique_name(source.name.try { |n| "#{n}-fork" }, nil),
         parent_id: source.id
