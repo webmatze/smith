@@ -204,6 +204,10 @@ describe "MCP over Streamable HTTP" do
         sleep 20.milliseconds
       end
 
+      # Asserted rather than left to `not_nil!`: on a host that drops instead
+      # of refusing, the connect is still pending when the budget runs out, and
+      # "nothing came back in two seconds" is worth saying in those words.
+      transport.failure_hint.should_not be_nil
       hint = transport.failure_hint.not_nil!
       %w[LEAKUSER LEAKPASS LEAKPATH LEAKQUERY LEAKFRAG].each do |secret|
         hint.should_not contain(secret)
@@ -329,6 +333,39 @@ describe "MCP over Streamable HTTP" do
           end
 
           # What the model is owed is still there: which server, where, and why.
+          output.should contain("http://127.0.0.1:#{port}")
+          output.should contain("HTTP 500")
+        end
+      ensure
+        server.stop
+      end
+    end
+
+    it "keeps a url out of a tool result that a filter over the finished line would miss" do
+      # The url is never written into the message, rather than written and then
+      # found again: `scrub_urls` ends a match at a quote, an angle bracket or a
+      # space, so a query holding one of those would have been cut at that
+      # character and everything after it — here, the token — left standing.
+      server = FakeHttpServer.new
+      server.fail_all_calls = true
+      port = URI.parse(server.url).port
+
+      awkward = Smith::MCP::ServerSpec.new(
+        name: "remote",
+        url: "http://127.0.0.1:#{port}/mcp?filter=<all>&token=LEAKQUERY"
+      )
+
+      begin
+        with_http_manager(awkward) do |manager, _warnings|
+          manager["remote"].not_nil!.running?.should be_true
+
+          registry = Smith::Tools::Registry.new
+          Smith::Tools::McpTool.register_all(registry, manager)
+
+          output = registry.get("mcp__remote__echo").not_nil!.run(JSON.parse("{}"))
+
+          output.should_not contain("LEAKQUERY")
+          output.should_not contain("<all>")
           output.should contain("http://127.0.0.1:#{port}")
           output.should contain("HTTP 500")
         end

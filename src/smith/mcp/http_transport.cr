@@ -27,6 +27,13 @@ module Smith::MCP
     @session_id : String?
     @client : HTTP::Client
 
+    # The only form of the url that is ever written into a message. Built from
+    # the `URI` itself, once, so no message ever holds the whole one — where a
+    # filter run over a finished sentence has to find the url again by shape,
+    # and a query holding a quote, an angle bracket or a space ends the match
+    # early and leaves the rest of it standing.
+    @safe_url : String
+
     def initialize(
       @url : URI,
       @headers : Hash(String, String) = Hash(String, String).new,
@@ -34,6 +41,7 @@ module Smith::MCP
     )
       raise ConnectionError.new("'#{@url}' is not a usable MCP server url — no host") if @url.host.to_s.empty?
 
+      @safe_url = ServerSpec.safe_url(@url.to_s)
       @inbox = Channel(String?).new(64)
       @session_id = nil
       @closed = false
@@ -55,7 +63,7 @@ module Smith::MCP
         rescue ex
           # A spawned fiber must not raise out — the failure belongs to the
           # connection, and the waiting callers are told through the inbox.
-          die!("the connection to the MCP server at #{@url} broke: #{ex.message || ex.class.name}")
+          die!("the connection to the MCP server at #{@safe_url} broke: #{ex.message || ex.class.name}")
         end
       end
     end
@@ -98,21 +106,21 @@ module Smith::MCP
             # The call got through and was refused — the one failure an
             # auth header can cause, and worth saying so plainly.
             drain(response)
-            die!("the MCP server at #{@url} refused the credentials (HTTP #{response.status_code})")
+            die!("the MCP server at #{@safe_url} refused the credentials (HTTP #{response.status_code})")
           when 404
             drain(response)
-            die!("the MCP server at #{@url} no longer recognises this session (HTTP 404) — it may have restarted")
+            die!("the MCP server at #{@safe_url} no longer recognises this session (HTTP 404) — it may have restarted")
           else
             body = response.body_io.gets_to_end
             # The status is smith's diagnosis; the body is the server's own
             # words. They travel separately so a caller that must not repeat
             # the second still gets the first.
-            die!("the MCP server at #{@url} answered HTTP #{response.status_code}", snippet(body))
+            die!("the MCP server at #{@safe_url} answered HTTP #{response.status_code}", snippet(body))
           end
         end
       end
     rescue ex : IO::Error | OpenSSL::Error
-      die!("could not reach the MCP server at #{@url}: #{ex.message || ex.class.name}")
+      die!("could not reach the MCP server at #{@safe_url}: #{ex.message || ex.class.name}")
     end
 
     # The answer to a POST is either one JSON document or an SSE stream whose
@@ -200,14 +208,19 @@ module Smith::MCP
     # Every message that reaches here names the url, because where it was
     # trying to go is half the reason — and that url came out of `mcp.json`,
     # where userinfo, a path segment, a query and a fragment are each a place a
-    # token is routinely written. It is cut back to scheme, host and port
-    # *here*, where the line is composed, rather than at each place it is later
-    # read: `send` raises it at the next write, and `Client#abandon_pending`
-    # hands it to every caller still waiting, from where it becomes a tool
-    # result — the model's context, `transcript.jsonl` and every
-    # `smith sessions export` of the session. Filtering on the way in leaves
-    # nothing raw in the ivar, so a reader added later cannot become a new way
-    # for the url to get out.
+    # token is routinely written. Where it goes from here is why that matters:
+    # `send` raises this line at the next write, `Client#abandon_pending` hands
+    # it to every caller still waiting, and from there it is a tool result —
+    # the model's context, `transcript.jsonl`, every `smith sessions export` of
+    # the session. It outlives the run that made it.
+    #
+    # So the callers interpolate `@safe_url` and never `@url`: the whole url is
+    # not written down and then found again, it is never written down. What is
+    # left for `scrub_urls` here is the *other* source of a url in these lines
+    # — an exception message from the HTTP client, which quotes what it was
+    # given. A filter is the only tool available against that text, and it is
+    # enough there: the url in it is one the stdlib composed, not one this
+    # file's caller wrote, so the shapes that defeat a regex do not arise.
     #
     # `body` is not filtered and not merged: it is the server's own words, and
     # only a caller knows whether repeating them is the answer being looked for.
